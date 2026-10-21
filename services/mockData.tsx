@@ -53,6 +53,14 @@ import prosexxData from './prosexxData.json';
 import lovebyelenitaData from './lovebyelenitaData';
 import miss_dxxxData from './miss_dxxxData';
 import emmafioреData from './emmafioreData';
+import belledelphineData from './belledelphineData.json';
+import evaelfieData from './evaelfieData.json';
+import penelopeblackdiamondData from './penelopeblackdiamondData.json';
+import tinaBunnyVipData from './tina_bunny_vipData.json';
+import misavaData from './misavaData.json';
+import alyssaReeceData from './alyssareeceData.json';
+import pamelaAlexandraData from './pamelaalexandraData.json';
+import lustMermaidData from './lustmermaidData.json';
 
 // Subset of data for demo purposes from the Belle Delphine dataset
 const BELLE_FULL_DATA = [
@@ -142,6 +150,46 @@ const REDHEAD_IMAGES: Image[] = (redheadwinterData as any[]).map((item) => ({
 }));
 
 const ANAIMIYA_IMAGES: Image[] = (anaimiyaData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+const BELLEDELPHINE_IMAGES: Image[] = (belledelphineData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+const EVAELFIE_IMAGES: Image[] = (evaelfieData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+const PENELOPEBLACKDIAMOND_IMAGES: Image[] = (penelopeblackdiamondData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+const TINA_BUNNY_VIP_IMAGES: Image[] = (tinaBunnyVipData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+const MISAVA_IMAGES: Image[] = (misavaData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+const ALYSSA_REECE_IMAGES: Image[] = (alyssaReeceData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+const PAMELA_ALEXANDRA_IMAGES: Image[] = (pamelaAlexandraData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+const LUST_MERMAID_IMAGES: Image[] = (lustMermaidData as any[]).map((item) => ({
   ...item,
   mediaType: item.mediaType as MediaType
 }));
@@ -11792,9 +11840,127 @@ const PROFILES: Profile[] = [
     pricePerMonth: 9.99,
     access_mode: 'cached_preview'
   },
+  {
+    id: 'belledelphine',
+    name: 'Belle Delphine',
+    handle: '@belledelphine',
+    bio: 'Gamer girl & content creator | Exclusive premium content | Subscribe for the full experience 💋🎮',
+    avatarUrl: 'https://img.coomer.st/thumbnail/data/7a/b0/7ab0ac72461470b87d63918e60073ea296e9f629cfa7b86480f0fa443ee0cc8a.jpg',
+    heroUrl: 'https://img.coomer.st/thumbnail/data/93/db/93db63d6a5f5a4f4fc361c6b1d9e4fa5781b7ef82cc27e8e8349e7e85b7bcf47.jpg',
+    tags: ['gamer', 'premium', 'exclusive', 'cosplay', 'egirl'],
+    category: 'Premium',
+    images: BELLEDELPHINE_IMAGES,
+    stats: { posts: BELLEDELPHINE_IMAGES.length, likes: 125000, views: 2500000, followers: 45000 },
+    isVerified: true,
+    isVisible: true,
+    pricePerMonth: 24.99
+  },
+  {
+    id: 'evaelfie',
+    name: 'Eva Elfie',
+    handle: '@evaelfie',
+    bio: 'Premium content creator | Exclusive photos & videos | Join for the full collection ✨🔥',
+    avatarUrl: 'https://img.coomer.st/thumbnail/data/b2/0c/b20cfc18a22693313938e91014f40f9a467a3dbc3f81c837471e9f73c01bebd7.jpg',
+    heroUrl: 'https://img.coomer.st/thumbnail/data/17/c8/17c8dc596f708c8ced475a3594a36b7d54cf59bb4895723129f765b9fcb173fd.jpg',
+    tags: ['premium', 'exclusive', 'beauty', 'model', 'onlyfans'],
+    category: 'Premium',
+    images: EVAELFIE_IMAGES,
+    stats: { posts: EVAELFIE_IMAGES.length, likes: 250000, views: 5000000, followers: 120000 },
+    isVerified: true,
+    isVisible: true,
+    pricePerMonth: 29.99
+  },
+  {
+    id: 'penelopeblackdiamond',
+    name: 'Penelope Black Diamond',
+    handle: '@penelopeblackdiamond',
+    bio: 'Premium content creator | Exclusive photos & videos | Join for the full collection ✨🔥',
+    avatarUrl: 'https://img.coomer.st/thumbnail/data/af/03/af03c7532e5d6d6ab214faf1206cb12dc6a34da5265d0f553434f02ea8e6e362.jpg',
+    heroUrl: 'https://img.coomer.st/thumbnail/data/67/ce/67ce9d4e4043f0c76ecc1e84abae577a1c962cf4fde7e53fc8bfb11d59e06ee1.jpg',
+    tags: ['premium', 'exclusive', 'beauty', 'model', 'onlyfans'],
+    category: 'Premium',
+    images: PENELOPEBLACKDIAMOND_IMAGES,
+    stats: { posts: PENELOPEBLACKDIAMOND_IMAGES.length, likes: 300000, views: 6000000, followers: 150000 },
+    isVerified: true,
+    isVisible: true,
+    pricePerMonth: 29.99
+  },
+  {
+    id: 'tina_bunny_vip',
+    name: 'Tina Bunny VIP',
+    handle: '@tina_bunny_vip',
+    bio: 'OnlyFans creator • 200 photo previews in this directory.',
+    avatarUrl: 'https://img.coomer.st/icons/onlyfans/tina_bunny_vip',
+    heroUrl: TINA_BUNNY_VIP_IMAGES[0].thumbnailUrl,
+    tags: ['onlyfans', 'premium', 'photos'],
+    category: 'Premium',
+    images: TINA_BUNNY_VIP_IMAGES,
+    stats: { posts: TINA_BUNNY_VIP_IMAGES.length, likes: 0, views: 0, followers: 0 },
+    isVerified: false,
+    isVisible: true,
+    access_mode: 'cached_preview'
+  },
+  {
+    id: 'misava',
+    name: 'Misava',
+    handle: '@misava',
+    bio: 'OnlyFans creator • 200 photo previews in this directory.',
+    avatarUrl: 'https://img.coomer.st/icons/onlyfans/misava',
+    heroUrl: MISAVA_IMAGES[0].thumbnailUrl,
+    tags: ['onlyfans', 'premium', 'photos'],
+    category: 'Premium',
+    images: MISAVA_IMAGES,
+    stats: { posts: MISAVA_IMAGES.length, likes: 0, views: 0, followers: 0 },
+    isVerified: false,
+    isVisible: true,
+    access_mode: 'cached_preview'
+  },
+  {
+    id: 'alyssareece',
+    name: 'Alyssa Reece',
+    handle: '@alyssareece',
+    bio: 'OnlyFans creator • 200 photo previews in this directory.',
+    avatarUrl: 'https://img.coomer.st/icons/onlyfans/alyssareece',
+    heroUrl: ALYSSA_REECE_IMAGES[0].thumbnailUrl,
+    tags: ['onlyfans', 'premium', 'photos'],
+    category: 'Premium',
+    images: ALYSSA_REECE_IMAGES,
+    stats: { posts: ALYSSA_REECE_IMAGES.length, likes: 0, views: 0, followers: 0 },
+    isVerified: false,
+    isVisible: true,
+    access_mode: 'cached_preview'
+  },
+  {
+    id: 'pamelaalexandra',
+    name: 'Pamela Alexandra',
+    handle: '@pamelaalexandra',
+    bio: 'OnlyFans creator • 200 photo previews in this directory.',
+    avatarUrl: 'https://img.coomer.st/icons/onlyfans/pamelaalexandra',
+    heroUrl: PAMELA_ALEXANDRA_IMAGES[0].thumbnailUrl,
+    tags: ['onlyfans', 'premium', 'photos'],
+    category: 'Premium',
+    images: PAMELA_ALEXANDRA_IMAGES,
+    stats: { posts: PAMELA_ALEXANDRA_IMAGES.length, likes: 0, views: 0, followers: 0 },
+    isVerified: false,
+    isVisible: true,
+    access_mode: 'cached_preview'
+  },
+  {
+    id: 'lustmermaid',
+    name: 'Lust Mermaid',
+    handle: '@lustmermaid',
+    bio: 'OnlyFans creator • 200 photo previews in this directory.',
+    avatarUrl: 'https://img.coomer.st/icons/onlyfans/lustmermaid',
+    heroUrl: LUST_MERMAID_IMAGES[0].thumbnailUrl,
+    tags: ['onlyfans', 'premium', 'photos'],
+    category: 'Premium',
+    images: LUST_MERMAID_IMAGES,
+    stats: { posts: LUST_MERMAID_IMAGES.length, likes: 0, views: 0, followers: 0 },
+    isVerified: false,
+    isVisible: true,
+    access_mode: 'cached_preview'
+  },
 ];
-
-
 
 interface MockDataContextType {
   profiles: Profile[];
