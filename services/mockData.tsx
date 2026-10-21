@@ -56,6 +56,11 @@ import emmafioреData from './emmafioreData';
 import belledelphineData from './belledelphineData.json';
 import evaelfieData from './evaelfieData.json';
 import penelopeblackdiamondData from './penelopeblackdiamondData.json';
+import tinaBunnyVipData from './tina_bunny_vipData.json';
+import misavaData from './misavaData.json';
+import alyssaReeceData from './alyssareeceData.json';
+import pamelaAlexandraData from './pamelaalexandraData.json';
+import lustMermaidData from './lustmermaidData.json';
 
 // Subset of data for demo purposes from the Belle Delphine dataset
 const BELLE_FULL_DATA = [
@@ -160,6 +165,31 @@ const EVAELFIE_IMAGES: Image[] = (evaelfieData as any[]).map((item) => ({
 }));
 
 const PENELOPEBLACKDIAMOND_IMAGES: Image[] = (penelopeblackdiamondData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+const TINA_BUNNY_VIP_IMAGES: Image[] = (tinaBunnyVipData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+const MISAVA_IMAGES: Image[] = (misavaData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+const ALYSSA_REECE_IMAGES: Image[] = (alyssaReeceData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+const PAMELA_ALEXANDRA_IMAGES: Image[] = (pamelaAlexandraData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+const LUST_MERMAID_IMAGES: Image[] = (lustMermaidData as any[]).map((item) => ({
   ...item,
   mediaType: item.mediaType as MediaType
 }));
@@ -11854,6 +11884,81 @@ const PROFILES: Profile[] = [
     isVerified: true,
     isVisible: true,
     pricePerMonth: 29.99
+  },
+  {
+    id: 'tina_bunny_vip',
+    name: 'Tina Bunny VIP',
+    handle: '@tina_bunny_vip',
+    bio: 'OnlyFans creator • 200 photo previews in this directory.',
+    avatarUrl: 'https://img.coomer.st/icons/onlyfans/tina_bunny_vip',
+    heroUrl: TINA_BUNNY_VIP_IMAGES[0].thumbnailUrl,
+    tags: ['onlyfans', 'premium', 'photos'],
+    category: 'Premium',
+    images: TINA_BUNNY_VIP_IMAGES,
+    stats: { posts: TINA_BUNNY_VIP_IMAGES.length, likes: 0, views: 0, followers: 0 },
+    isVerified: false,
+    isVisible: true,
+    access_mode: 'cached_preview'
+  },
+  {
+    id: 'misava',
+    name: 'Misava',
+    handle: '@misava',
+    bio: 'OnlyFans creator • 200 photo previews in this directory.',
+    avatarUrl: 'https://img.coomer.st/icons/onlyfans/misava',
+    heroUrl: MISAVA_IMAGES[0].thumbnailUrl,
+    tags: ['onlyfans', 'premium', 'photos'],
+    category: 'Premium',
+    images: MISAVA_IMAGES,
+    stats: { posts: MISAVA_IMAGES.length, likes: 0, views: 0, followers: 0 },
+    isVerified: false,
+    isVisible: true,
+    access_mode: 'cached_preview'
+  },
+  {
+    id: 'alyssareece',
+    name: 'Alyssa Reece',
+    handle: '@alyssareece',
+    bio: 'OnlyFans creator • 200 photo previews in this directory.',
+    avatarUrl: 'https://img.coomer.st/icons/onlyfans/alyssareece',
+    heroUrl: ALYSSA_REECE_IMAGES[0].thumbnailUrl,
+    tags: ['onlyfans', 'premium', 'photos'],
+    category: 'Premium',
+    images: ALYSSA_REECE_IMAGES,
+    stats: { posts: ALYSSA_REECE_IMAGES.length, likes: 0, views: 0, followers: 0 },
+    isVerified: false,
+    isVisible: true,
+    access_mode: 'cached_preview'
+  },
+  {
+    id: 'pamelaalexandra',
+    name: 'Pamela Alexandra',
+    handle: '@pamelaalexandra',
+    bio: 'OnlyFans creator • 200 photo previews in this directory.',
+    avatarUrl: 'https://img.coomer.st/icons/onlyfans/pamelaalexandra',
+    heroUrl: PAMELA_ALEXANDRA_IMAGES[0].thumbnailUrl,
+    tags: ['onlyfans', 'premium', 'photos'],
+    category: 'Premium',
+    images: PAMELA_ALEXANDRA_IMAGES,
+    stats: { posts: PAMELA_ALEXANDRA_IMAGES.length, likes: 0, views: 0, followers: 0 },
+    isVerified: false,
+    isVisible: true,
+    access_mode: 'cached_preview'
+  },
+  {
+    id: 'lustmermaid',
+    name: 'Lust Mermaid',
+    handle: '@lustmermaid',
+    bio: 'OnlyFans creator • 200 photo previews in this directory.',
+    avatarUrl: 'https://img.coomer.st/icons/onlyfans/lustmermaid',
+    heroUrl: LUST_MERMAID_IMAGES[0].thumbnailUrl,
+    tags: ['onlyfans', 'premium', 'photos'],
+    category: 'Premium',
+    images: LUST_MERMAID_IMAGES,
+    stats: { posts: LUST_MERMAID_IMAGES.length, likes: 0, views: 0, followers: 0 },
+    isVerified: false,
+    isVisible: true,
+    access_mode: 'cached_preview'
   },
 ];
 
