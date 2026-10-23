@@ -29,8 +29,11 @@ const Navbar = () => {
     <>
       {/* Mobile Header */}
       <div className="md:hidden fixed top-0 left-0 right-0 z-50 bg-black border-b border-red-900/50 px-4 py-3 flex items-center justify-between">
-        <Link to="/" className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-red-600 to-red-400">
-          FansLeak
+        <Link to="/" aria-label="FansLeak home" className="flex items-center gap-2">
+          <img src="/logo.svg" alt="" width="28" height="28" className="h-7 w-7" />
+          <span className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-red-600 to-red-400">
+            FansLeak
+          </span>
         </Link>
         <button onClick={() => setIsOpen(!isOpen)} className="p-2 text-red-500">
           {isOpen ? <X size={24} /> : <Menu size={24} />}
@@ -45,8 +48,11 @@ const Navbar = () => {
       `}>
         <div className="flex flex-col h-full">
           <div className="p-6 hidden md:block">
-            <Link to="/" className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-red-600 to-red-400">
-              FansLeak
+            <Link to="/" aria-label="FansLeak home" className="flex items-center gap-2.5">
+              <img src="/logo.svg" alt="" width="32" height="32" className="h-8 w-8" />
+              <span className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-red-600 to-red-400">
+                FansLeak
+              </span>
             </Link>
           </div>
 

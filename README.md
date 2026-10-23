@@ -154,3 +154,22 @@ URL Inspection → *Request indexing* works today even while the sitemap reports
   rebuild — not implemented.
 - Profiles created in the Admin panel are held in memory only (not persisted), so they are
   not indexable; add a profile to `PROFILES` in `services/mockData.tsx` to make it permanent.
+
+## Brand assets
+
+The logo (interlocking F/L monogram with a drip, red gradient on `#0a0a0a`) is generated
+from vector sources in `public/`:
+
+| File | Use |
+| --- | --- |
+| `favicon.svg`, `favicon.ico`, `favicon-16/32/48.png` | browser favicons (simplified flat mark so it stays legible at 16px) |
+| `apple-touch-icon.png` (180) | iOS home screen |
+| `icon-192.png`, `icon-512.png`, `icon-512-maskable.png` | manifest icons (`any` + `maskable`) |
+| `logo.svg`, `logo-maskable.svg`, `logo-lockup.svg` | in-app mark and icon + wordmark lockup |
+| `og-image.png` / `og-image.svg` (1200×630) | social preview card |
+| `site.webmanifest` | PWA manifest |
+
+Two mark variants are deliberate: the detailed artwork (gradient + glow + drip) is used at
+180px and above, while 16/32px favicons use a flat, thickened version — the glow turns to
+mush and the drip disappears at tab size. `scripts/check-seo.mjs` fails the build if any of
+these files or their `<link>` tags go missing.

@@ -172,7 +172,9 @@ if (home) {
   for (const required of [
     /<meta name="description" content="[^"]+"/,
     /<meta property="og:image" content="[^"]+"/,
-    /<link rel="icon" href="\/favicon\.svg"/,
+    /<link rel="icon" href="\/favicon\.svg" type="image\/svg\+xml"/,
+    /<link rel="icon" href="\/favicon\.ico"/,
+    /<link rel="apple-touch-icon" sizes="180x180" href="\/apple-touch-icon\.png"/,
   ]) {
     if (!required.test(home)) failures.push(`dist/index.html: missing ${required}`);
   }
@@ -211,8 +213,15 @@ if (!fs.existsSync(path.join(DIST_DIR, '404.html'))) {
 /* Required static assets (icons, social image, manifest) ------------------ */
 const REQUIRED_ASSETS = [
   'favicon.svg',
-  'icon-180.png',
+  'favicon.ico',
+  'favicon-16.png',
+  'favicon-32.png',
+  'favicon-48.png',
+  'apple-touch-icon.png',
+  'icon-192.png',
   'icon-512.png',
+  'icon-512-maskable.png',
+  'logo.svg',
   'og-image.png',
   'site.webmanifest',
 ];
