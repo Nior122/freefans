@@ -11,7 +11,9 @@
     "start": "node scripts/start.mjs",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "postbuild": "node scripts/check-seo.mjs"
+    "postbuild": "node scripts/prerender.mjs && node scripts/check-seo.mjs",
+    "prerender": "node scripts/prerender.mjs",
+    "check-seo": "node scripts/check-seo.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.52.0",

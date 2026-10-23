@@ -1,4 +1,18 @@
+# crawlers: everything public is allowed, private app routes are not
 User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /auth
+Disallow: /favorites
+Disallow: /api/
+
+User-agent: Googlebot
+Allow: /
+Disallow: /admin
+Disallow: /auth
+Disallow: /favorites
+
+User-agent: Bingbot
 Allow: /
 Disallow: /admin
 Disallow: /auth
