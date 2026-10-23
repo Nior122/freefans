@@ -22,7 +22,7 @@ export const AuthPage = () => {
     <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
       <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md">
         <h2 className="text-3xl font-bold text-center mb-2 bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-cyan-500">
-          FanDirectory
+          FansLeak
         </h2>
         <p className="text-center text-gray-500 mb-8">
           {isLogin ? 'Welcome back' : 'Join our community'}
