@@ -10,7 +10,8 @@
     "server": "tsx server.ts",
     "start": "node scripts/start.mjs",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "postbuild": "node scripts/check-seo.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.52.0",
