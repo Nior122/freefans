@@ -1,3 +1,10 @@
-# Cloudflare Pages SPA fallback: let React Router handle deep links such as
-# /profile/emmafiore while still serving real files (sitemap.xml, robots.txt, assets).
-/*    /index.html    200
+# Cloudflare Pages routing.
+#
+# There is deliberately NO catch-all "/* /index.html 200" rule here:
+# every route is prerendered (see scripts/prerender.mjs), so unknown URLs are
+# answered by dist/404.html with a real 404 status instead of 200 + the homepage
+# (soft 404s, which Search Console reports against the site as a whole).
+#
+# Real files (sitemap.xml, robots.txt, assets) are served as-is; <route>/ resolves
+# to <route>/index.html and <route> is 308-redirected to <route>/ by Pages, which
+# is why every canonical and sitemap URL uses the trailing-slash form.

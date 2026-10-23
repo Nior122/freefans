@@ -2,26 +2,34 @@
 /**
  * Writes crawlable HTML for every public route.
  *
- * The app is a client-rendered SPA, so without this every URL returns the same
+ * The app is a client-rendered SPA, so without this every URL returned the same
  * empty shell with one shared <title>. After `vite build` this script takes the
  * built shell and emits a real file per route:
  *
- *   dist/index.html
- *   dist/search/index.html
- *   dist/hashtags/index.html
- *   dist/more/index.html
- *   dist/profile/<id>/index.html   (one per visible profile)
+ *   dist/index.html                      -> /
+ *   dist/search/index.html               -> /search/
+ *   dist/hashtags/index.html             -> /hashtags/
+ *   dist/more/index.html                 -> /more/
+ *   dist/profile/<id>/index.html         -> /profile/<id>/
+ *   dist/auth|favorites|admin/index.html -> noindex app pages
+ *   dist/404.html                        -> real 404 (no soft-404 catch-all)
  *
- * Each file gets its own <title>, meta description, canonical, Open Graph /
- * Twitter tags and Person JSON-LD, so Google can read unique metadata without
- * executing 14 MB of JavaScript. The SPA still boots normally from the shell and
- * takes over routing (Cloudflare Pages serves these files for clean URLs like
- * /profile/emmafiore, and `public/_redirects` handles anything else).
+ * Cloudflare Pages serves `<route>/index.html` for `<route>/` and 308-redirects
+ * `<route>` to `<route>/`, so every <link rel="canonical">, og:url and JSON-LD
+ * URL is emitted in the trailing-slash form to match the URL actually served.
+ *
+ * Each page gets its own <title>, meta description, canonical, robots directive,
+ * Open Graph / Twitter tags and JSON-LD (WebSite, Organization, ItemList,
+ * ProfilePage + Person + BreadcrumbList), so Google can read unique metadata
+ * without executing the 14 MB application bundle.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  DEFAULT_OG_IMAGE,
   DIST_DIR,
+  SITE_NAME,
+  absoluteUrl,
   escapeHtml,
   readProfiles,
   resolveSiteUrl,
@@ -37,34 +45,42 @@ if (!fs.existsSync(shellPath)) {
 }
 
 const shell = fs.readFileSync(shellPath, 'utf8');
-const siteName = 'FansLeak';
 
-function jsonLdFor(data) {
-  if (!data.jsonLd) return '';
-  const json = JSON.stringify(data.jsonLd).replace(/</g, '\\u003c');
+function jsonLdScript(data) {
+  if (!data) return '';
+  const json = JSON.stringify(data).replace(/</g, '\\u003c');
   return `<script type="application/ld+json">${json}</script>`;
 }
 
 function renderShell(meta) {
-  // Values are already sanitized by the caller; only escape them here so the
-  // typography (em dash, ellipsis) survives.
-  const title = escapeHtml(meta.title || siteName);
-  const description = escapeHtml(meta.description);
+  const title = escapeHtml(meta.title || SITE_NAME);
+  const description = escapeHtml(meta.description || '');
+  const robots = meta.noindex
+    ? 'noindex, follow'
+    : 'index, follow, max-image-preview:large, max-snippet:-1';
+
+  const image = meta.image
+    ? meta.image.startsWith('http')
+      ? meta.image
+      : `${siteUrl}${meta.image}`
+    : `${siteUrl}${DEFAULT_OG_IMAGE}`;
 
   const head = [
-    `<link rel="canonical" href="${escapeHtml(meta.url)}" />`,
-    `<meta name="robots" content="${meta.noindex ? 'noindex, follow' : 'index, follow, max-image-preview:large'}" />`,
+    meta.url ? `<link rel="canonical" href="${escapeHtml(meta.url)}" />` : '',
+    `<meta name="robots" content="${robots}" />`,
     `<meta property="og:type" content="${meta.type || 'website'}" />`,
-    `<meta property="og:site_name" content="${siteName}" />`,
-    `<meta property="og:url" content="${escapeHtml(meta.url)}" />`,
+    `<meta property="og:site_name" content="${SITE_NAME}" />`,
+    meta.url ? `<meta property="og:url" content="${escapeHtml(meta.url)}" />` : '',
     `<meta property="og:title" content="${title}" />`,
     `<meta property="og:description" content="${description}" />`,
-    meta.image ? `<meta property="og:image" content="${escapeHtml(meta.image)}" />` : '',
+    `<meta property="og:image" content="${escapeHtml(image)}" />`,
+    `<meta property="og:image:alt" content="${title}" />`,
+    `<meta property="og:locale" content="en_US" />`,
     `<meta name="twitter:card" content="summary_large_image" />`,
     `<meta name="twitter:title" content="${title}" />`,
     `<meta name="twitter:description" content="${description}" />`,
-    meta.image ? `<meta name="twitter:image" content="${escapeHtml(meta.image)}" />` : '',
-    jsonLdFor(meta),
+    `<meta name="twitter:image" content="${escapeHtml(image)}" />`,
+    jsonLdScript(meta.jsonLd),
   ]
     .filter(Boolean)
     .join('\n    ');
@@ -72,7 +88,7 @@ function renderShell(meta) {
   let html = shell
     .replace(/<title>[\s\S]*?<\/title>/, `<title>${title}</title>`)
     .replace(/<meta name="description"[^>]*>/, `<meta name="description" content="${description}" />`)
-    // Strip shell-level og tags so the per-page ones are the only ones present.
+    // Drop shell-level social tags so per-page tags are the only ones present.
     .replace(/\s*<meta property="og:(?!site_name)[^>]*>/g, '')
     .replace(/\s*<meta name="twitter:[^>]*>/g, '');
 
@@ -83,111 +99,148 @@ function renderShell(meta) {
   return html.replace('</head>', `  ${head}\n  </head>`);
 }
 
+const written = [];
+
+/**
+ * Meta descriptions should be unique and ~50-160 characters. Profiles with a
+ * very short (or empty) bio get a descriptive fallback instead of a thin one.
+ */
+function buildDescription(candidates, fallback) {
+  for (const candidate of candidates) {
+    const text = sanitizeText(candidate, 155);
+    if (text.length >= 50) return text;
+  }
+  return sanitizeText(fallback, 155);
+}
+
 function writePage(relativePath, meta) {
   const target = path.join(DIST_DIR, relativePath);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.writeFileSync(target, renderShell(meta), 'utf8');
+  written.push(target);
   return target;
 }
 
-const profiles = readProfiles().filter((profile) => profile.isVisible);
-const uniqueIds = [...new Set(profiles.map((profile) => profile.id))];
+const allProfiles = readProfiles().filter(
+  (profile) => profile.isVisible && /^[A-Za-z0-9._-]+$/.test(profile.id)
+);
 
-const written = [];
+const profiles = [];
+const seen = new Set();
+for (const profile of allProfiles) {
+  if (seen.has(profile.id)) continue; // duplicate ids would fight over one URL
+  seen.add(profile.id);
+  profiles.push(profile);
+}
 
-// Home
-written.push(
-  writePage('index.html', {
-    url: `${siteUrl}/`,
-    title: `${siteName} — Creator Profiles & Exclusive Previews`,
-    description:
-      'Browse creator profiles, photo galleries and exclusive free previews on FansLeak. Discover trending creators, hashtags and new profiles daily.',
-    type: 'website',
-    jsonLd: {
+const homeUrl = absoluteUrl(siteUrl, '/');
+const homeDescription =
+  'Browse creator profiles, photo galleries and exclusive free previews on FansLeak. ' +
+  'Discover trending creators and new profiles daily.';
+
+/* Home ------------------------------------------------------------------- */
+writePage('index.html', {
+  url: homeUrl,
+  title: `${SITE_NAME} — Creator Profiles & Exclusive Previews`,
+  description: homeDescription,
+  type: 'website',
+  jsonLd: [
+    {
       '@context': 'https://schema.org',
       '@type': 'WebSite',
-      name: siteName,
-      url: `${siteUrl}/`,
+      name: SITE_NAME,
+      url: homeUrl,
+      description: homeDescription,
       potentialAction: {
         '@type': 'SearchAction',
-        target: `${siteUrl}/search?q={search_term_string}`,
+        target: `${siteUrl}/search/?q={search_term_string}`,
         'query-input': 'required name=search_term_string',
       },
     },
-  })
-);
+    {
+      '@context': 'https://schema.org',
+      '@type': 'Organization',
+      name: SITE_NAME,
+      url: homeUrl,
+      logo: `${siteUrl}/icon-512.png`,
+    },
+    {
+      '@context': 'https://schema.org',
+      '@type': 'CollectionPage',
+      name: `Creator profiles on ${SITE_NAME}`,
+      url: homeUrl,
+      mainEntity: {
+        '@type': 'ItemList',
+        numberOfItems: profiles.length,
+        itemListElement: profiles.map((profile, index) => ({
+          '@type': 'ListItem',
+          position: index + 1,
+          name: sanitizeText(profile.name || profile.id, 60),
+          url: absoluteUrl(siteUrl, `/profile/${profile.id}`),
+        })),
+      },
+    },
+  ],
+});
 
+/* Static pages ----------------------------------------------------------- */
 const staticPages = [
   {
-    path: 'search/index.html',
+    dir: 'search',
     url: '/search',
-    title: `Search creators — ${siteName}`,
-    description: 'Search creator profiles by name, handle or hashtag on FansLeak.',
+    title: `Search creator profiles — ${SITE_NAME}`,
+    description:
+      'Search creator profiles by name, handle or hashtag on FansLeak and open any gallery instantly.',
   },
   {
-    path: 'hashtags/index.html',
+    dir: 'hashtags',
     url: '/hashtags',
-    title: `Creator hashtags & categories — ${siteName}`,
-    description: 'Browse creators by hashtag and category on FansLeak.',
+    title: `Creator hashtags & categories — ${SITE_NAME}`,
+    description:
+      'Browse FansLeak creators by hashtag and category: premium, cosplay, latina, gothic, fitness and more.',
   },
   {
-    path: 'more/index.html',
+    dir: 'more',
     url: '/more',
-    title: `More — ${siteName}`,
-    description: 'About, support and extra pages for FansLeak.',
+    title: `More — ${SITE_NAME}`,
+    description:
+      'About FansLeak, support links and extra pages - how to browse creator profiles, ' +
+      'use search and hashtags, and save favourites.',
   },
 ];
 
 for (const page of staticPages) {
-  written.push(
-    writePage(page.path, {
-      url: `${siteUrl}${page.url}`,
-      title: page.title,
-      description: page.description,
-    })
-  );
+  writePage(`${page.dir}/index.html`, {
+    url: absoluteUrl(siteUrl, page.url),
+    title: page.title,
+    description: page.description,
+  });
 }
 
-// Private routes: keep the SPA working but never let them be indexed.
-for (const page of [
-  { path: 'auth/index.html', url: '/auth', title: `Sign in - ${siteName}` },
-  { path: 'favorites/index.html', url: '/favorites', title: `Favorites - ${siteName}` },
-  { path: 'admin/index.html', url: '/admin', title: `Admin - ${siteName}` },
-]) {
-  written.push(
-    writePage(page.path, {
-      url: `${siteUrl}${page.url}`,
-      title: page.title,
-      description: 'This page is private and is not indexed.',
-      noindex: true,
-    })
+/* Profile pages ---------------------------------------------------------- */
+for (const profile of profiles) {
+  const profilePath = `/profile/${profile.id}`;
+  const url = absoluteUrl(siteUrl, profilePath);
+  const displayName = sanitizeText(profile.name || profile.handle.replace(/^@/, '') || profile.id, 60);
+  const description = buildDescription(
+    [profile.bio],
+    `${displayName} on ${SITE_NAME} - creator profile, photo gallery and free previews. ` +
+      'Browse photos, videos and tags, then open the full gallery.'
   );
-}
 
-// Profile pages
-for (const id of uniqueIds) {
-  if (!/^[A-Za-z0-9._-]+$/.test(id)) {
-    console.warn(`[prerender] Skipping profile with unsafe id: ${id}`);
-    continue;
-  }
-
-  const profile = profiles.find((candidate) => candidate.id === id);
-  const displayName = sanitizeText(profile.name || profile.handle.replace(/^@/, '') || id, 60);
-  const description =
-    sanitizeText(profile.bio, 150) ||
-    `${displayName} on ${siteName} - creator profile, photo gallery and free previews.`;
-
-  written.push(
-    writePage(`profile/${id}/index.html`, {
-      url: `${siteUrl}/profile/${id}`,
-      title: `${displayName} — profile & gallery | ${siteName}`,
-      description,
-      type: 'profile',
-      image: profile.avatarUrl,
-      jsonLd: {
+  writePage(`${profilePath.replace(/^\//, '')}/index.html`, {
+    url,
+    title: `${displayName} — profile & gallery | ${SITE_NAME}`,
+    description,
+    type: 'profile',
+    image: profile.avatarUrl || DEFAULT_OG_IMAGE,
+    jsonLd: [
+      {
         '@context': 'https://schema.org',
         '@type': 'ProfilePage',
-        url: `${siteUrl}/profile/${id}`,
+        url,
+        name: `${displayName} — profile & gallery`,
+        isPartOf: { '@type': 'WebSite', name: SITE_NAME, url: homeUrl },
         mainEntity: {
           '@type': 'Person',
           name: displayName,
@@ -195,13 +248,47 @@ for (const id of uniqueIds) {
           description: sanitizeText(profile.bio, 200),
           ...(profile.avatarUrl ? { image: profile.avatarUrl } : {}),
           ...(profile.category ? { knowsAbout: profile.category } : {}),
+          ...(profile.tags?.length ? { keywords: profile.tags.join(', ') } : {}),
         },
       },
-    })
-  );
+      {
+        '@context': 'https://schema.org',
+        '@type': 'BreadcrumbList',
+        itemListElement: [
+          { '@type': 'ListItem', position: 1, name: 'Home', item: homeUrl },
+          { '@type': 'ListItem', position: 2, name: displayName, item: url },
+        ],
+      },
+    ],
+  });
 }
+
+/* Private app pages (reachable, never indexed) --------------------------- */
+for (const page of [
+  { dir: 'auth', url: '/auth', title: `Sign in — ${SITE_NAME}` },
+  { dir: 'favorites', url: '/favorites', title: `Favorites — ${SITE_NAME}` },
+  { dir: 'admin', url: '/admin', title: `Admin — ${SITE_NAME}` },
+]) {
+  writePage(`${page.dir}/index.html`, {
+    url: absoluteUrl(siteUrl, page.url),
+    title: page.title,
+    description: 'This page is private and is not indexed.',
+    noindex: true,
+  });
+}
+
+/* Real 404 ---------------------------------------------------------------
+ * Cloudflare Pages serves dist/404.html (status 404) for unknown paths. Without
+ * it the old catch-all `_redirects` rule answered every typo with 200 + the
+ * homepage, which Google records as an endless supply of soft 404s.
+ */
+writePage('404.html', {
+  title: `Page not found — ${SITE_NAME}`,
+  description: 'This page does not exist on FansLeak.',
+  noindex: true,
+});
 
 console.log(
   `[prerender] Wrote ${written.length} HTML files to dist/ for ${siteUrl} ` +
-    `(${uniqueIds.length} profile pages)`
+    `(${profiles.length} profile pages, trailing-slash canonicals, 404 included)`
 );

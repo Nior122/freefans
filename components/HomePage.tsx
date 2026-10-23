@@ -238,7 +238,7 @@ const ListCard: React.FC<{ profile: Profile; date: string }> = ({ profile, date 
 
   return (
     <Link
-      to={`/profile/${profile.id}`}
+      to={`/profile/${profile.id}/`}
       className="block relative h-[180px] rounded-lg overflow-hidden group animate-fade-in"
     >
       {/* Background Image */}
@@ -248,6 +248,7 @@ const ListCard: React.FC<{ profile: Profile; date: string }> = ({ profile, date 
           alt=""
           className="w-full h-full object-cover"
           loading="lazy"
+          decoding="async"
         />
         <div className="absolute inset-0 gradient-overlay-horizontal" />
       </div>
@@ -258,9 +259,12 @@ const ListCard: React.FC<{ profile: Profile; date: string }> = ({ profile, date 
         <div className="flex-shrink-0 relative">
           <img
             src={profile.avatarUrl}
-            alt={profile.name}
+            alt={`${profile.name} profile picture`}
+            width="176"
+            height="176"
             className="w-40 h-40 md:w-44 md:h-44 avatar-rounded-square object-cover border-2 border-white/10 shadow-lg"
             loading="lazy"
+            decoding="async"
           />
           {/* Online dot on avatar */}
           <span className="absolute bottom-2 right-2 flex h-4 w-4">

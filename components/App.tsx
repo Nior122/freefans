@@ -15,12 +15,14 @@ const Navbar = () => {
   const { user, logout } = useMockData();
 
   const navItems = [
+    // Trailing slashes match the canonical URLs (Cloudflare Pages serves
+    // /route/ and 308-redirects /route), so internal links never redirect.
     { name: 'Home', icon: Home, path: '/' },
-    { name: 'Search', icon: Search, path: '/search' },
-    { name: 'Hashtags', icon: Hash, path: '/hashtags' },
-    ...(user ? [{ name: 'Favorites', icon: Heart, path: '/favorites' }] : []),
-    ...(user?.role === 'ADMIN' ? [{ name: 'Admin', icon: Settings, path: '/admin' }] : []),
-    { name: 'More', icon: MoreHorizontal, path: '/more' },
+    { name: 'Search', icon: Search, path: '/search/' },
+    { name: 'Hashtags', icon: Hash, path: '/hashtags/' },
+    ...(user ? [{ name: 'Favorites', icon: Heart, path: '/favorites/' }] : []),
+    ...(user?.role === 'ADMIN' ? [{ name: 'Admin', icon: Settings, path: '/admin/' }] : []),
+    { name: 'More', icon: MoreHorizontal, path: '/more/' },
   ];
 
   return (
@@ -51,7 +53,10 @@ const Navbar = () => {
           <div className="flex-1 px-4 space-y-2 mt-16 md:mt-0">
             {navItems.map((item) => {
               const Icon = item.icon;
-              const isActive = location.pathname === item.path;
+              const isActive =
+                (item.path === '/'
+                  ? location.pathname === '/' || location.pathname === ''
+                  : location.pathname.replace(/\/+$/, '') === item.path.replace(/\/+$/, ''));
               return (
                 <Link
                   key={item.path}
@@ -117,7 +122,7 @@ const Layout = ({ children }: { children?: React.ReactNode }) => {
 const ProtectedRoute = ({ children, requireAdmin = false }: { children?: React.ReactNode, requireAdmin?: boolean }) => {
   const { user } = useMockData();
   
-  if (!user) return <Navigate to="/auth" />;
+  if (!user) return <Navigate to="/auth/" replace />;
   if (requireAdmin && user.role !== 'ADMIN') return <Navigate to="/" />;
   
   return <>{children}</>;

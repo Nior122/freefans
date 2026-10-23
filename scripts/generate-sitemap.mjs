@@ -11,6 +11,10 @@
  *   SITE_URL=https://fansleak.pages.dev npm run sitemap
  *   npm run build            # runs automatically via prebuild
  *
+ * URLs use the trailing-slash form (Cloudflare Pages serves `<route>/index.html`
+ * for `<route>/` and 308-redirects `<route>` to it), so every sitemap entry is
+ * also the page's <link rel="canonical"> - no redirects, no mismatches.
+ *
  * SITE_URL can also be passed as the first CLI argument. On Cloudflare Pages set
  * SITE_URL as a Production build environment variable. CF_PAGES_URL is NOT used
  * because it resolves to a per-deployment alias, not the canonical domain.
@@ -20,6 +24,7 @@ import path from 'node:path';
 import {
   DEFAULT_SITE_URL,
   PUBLIC_DIR,
+  absoluteUrl,
   escapeXml,
   readProfiles,
   resolveSiteUrl,
@@ -35,7 +40,7 @@ function buildSitemap(siteUrl, profiles, lastmod) {
     { path: '/hashtags', priority: '0.5', changefreq: 'weekly' },
     { path: '/more', priority: '0.3', changefreq: 'monthly' },
     ...profiles.map((profile) => ({
-      path: `/profile/${encodeURIComponent(profile.id)}`,
+      path: `/profile/${profile.id}`,
       priority: '0.8',
       changefreq: 'weekly',
     })),
@@ -50,7 +55,7 @@ function buildSitemap(siteUrl, profiles, lastmod) {
     })
     .map(
       (page) => `  <url>
-    <loc>${escapeXml(`${siteUrl}${page.path}`)}</loc>
+    <loc>${escapeXml(absoluteUrl(siteUrl, page.path))}</loc>
     <lastmod>${lastmod}</lastmod>
     <changefreq>${page.changefreq}</changefreq>
     <priority>${page.priority}</priority>

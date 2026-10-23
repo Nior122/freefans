@@ -115,6 +115,7 @@ export const ImageGallery = ({ images, userHasAccess }: ImageGalleryProps) => {
                   alt={img.caption || "Gallery image"}
                   className={`w-full h-full object-cover transition-transform duration-500 ${!isLocked && 'group-hover:scale-105'}`}
                   loading="lazy"
+                  decoding="async"
                 />
               </div>
 
