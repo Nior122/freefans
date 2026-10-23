@@ -24,7 +24,7 @@ npm run server    # Express API only
 ## Environment Variables
 | Variable | Purpose |
 | --- | --- |
-| `SITE_URL` | Public base URL (no trailing slash) used to build absolute URLs in `sitemap.xml` / `robots.txt`, e.g. `https://fansleak.com`. **Required for production builds.** |
+| `SITE_URL` | Public base URL (no trailing slash) used to build absolute URLs in `sitemap.xml` / `robots.txt`, set to `https://fansleak.pages.dev`. **Set this in Cloudflare Pages.** |
 | `AI_INTEGRATIONS_GEMINI_API_KEY` | Gemini API key for the bio generator (optional) |
 | `AI_INTEGRATIONS_GEMINI_BASE_URL` | Gemini base URL (optional) |
 
@@ -38,15 +38,15 @@ See `.env.example`.
   `isVisible: false` are skipped, and duplicate profile IDs are emitted once.
 - `npm run build` runs it automatically (`prebuild`). Standalone:
   ```bash
-  SITE_URL=https://your-domain.com npm run sitemap
+  SITE_URL=https://fansleak.pages.dev npm run sitemap
   ```
-- Submit `https://your-domain.com/sitemap.xml` in Search Console, using the exact same URL
+- Submit `https://fansleak.pages.dev/sitemap.xml` in Search Console, using the exact same URL
   as `SITE_URL`.
 
 ### Verify the tag is live
 Run this against the exact property URL you added to Search Console:
 ```bash
-curl -s https://your-domain.com/ | grep -o '<meta name="google-site-verification"[^>]*>'
+curl -s https://fansleak.pages.dev/ | grep -o '<meta name="google-site-verification"[^>]*>'
 # expect: <meta name="google-site-verification" content="eOzKZgDLPg020gOMwI5bstWMPEg7ARMfzdCwQQ132Fo" />
 ```
 `npm run build` also runs `scripts/check-seo.mjs` (`postbuild`), which **fails the build**
@@ -56,11 +56,14 @@ if the tag is missing from `dist/index.html` or sits outside `<head>`.
 1. **Wrong property type** — the meta tag only works for a *URL-prefix* property. A *Domain*
    property can only be verified with a DNS TXT record.
 2. **URL mismatch** — the property must match exactly: `https://` vs `http://`,
-   `www.` vs apex, and `fansleak.com` vs `fanve.pages.dev` are different properties.
+   `www.` vs apex, and `fansleak.com` vs `fansleak.pages.dev` are different properties.
    Verify the one you actually submitted.
 3. **Stale deploy** — confirm Cloudflare Pages rebuilt after the merge (Deployments tab,
    commit hash should be the merge commit). If the production branch in Cloudflare is not
    `fan`, the merge never triggers a build.
+6. **Sitemap host mismatch** — `https://fansleak.pages.dev/sitemap.xml` must list
+   `https://fansleak.pages.dev/...` URLs, never `*.fansleak.pages.dev` deployment aliases.
+   Set `SITE_URL` and redeploy; robots.txt has the same requirement.
 4. **Cloudflare blocking Googlebot** — Bot Fight Mode / "I'm Under Attack" / WAF rules /
    Cloudflare Access return a challenge page with no meta tag. Allow `Googlebot` or turn
    those off for the site, then retry.
@@ -72,12 +75,16 @@ if the tag is missing from `dist/index.html` or sits outside `<head>`.
 | --- | --- |
 | Build command | `npm run build` |
 | Build output directory | `dist` |
-| Environment variable | `SITE_URL=https://your-domain.com` (Production) |
+| Environment variable | `SITE_URL = https://fansleak.pages.dev` (Production) |
+| Optional | `NODE_VERSION = 22` |
 
 `public/_redirects` (`/* /index.html 200`) gives Cloudflare Pages the SPA fallback so deep
-links like `/profile/emmafiore` resolve to the app instead of a 404. If `SITE_URL` is not
-set, the sitemap generator falls back to `CF_PAGES_URL`, then to a `https://your-domain.com`
-placeholder.
+links like `/profile/emmafiore` resolve to the app instead of a 404.
+
+If `SITE_URL` is not set, the generator falls back to `https://fansleak.pages.dev`. It does
+**not** use `CF_PAGES_URL`: on Pages that resolves to a per-deployment alias such as
+`https://ab9feb2a.fansleak.pages.dev`, which is what earlier builds wrote into the sitemap
+and robots.txt. Garbage like that makes Search Console reject or ignore the sitemap.
 
 A `vercel.json` with equivalent rewrite config is kept for Vercel preview/test deploys.
 

@@ -4,4 +4,4 @@ Disallow: /admin
 Disallow: /auth
 Disallow: /favorites
 
-Sitemap: https://your-domain.com/sitemap.xml
+Sitemap: https://fansleak.pages.dev/sitemap.xml

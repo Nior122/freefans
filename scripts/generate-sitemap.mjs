@@ -12,7 +12,11 @@
  *
  * SITE_URL can also be passed as the first CLI argument.
  * On Cloudflare Pages, set SITE_URL as a build environment variable
- * (Settings -> Environment variables). CF_PAGES_URL is used as a fallback.
+ * (Settings -> Environment variables -> Production).
+ *
+ * NOTE: CF_PAGES_URL is deliberately NOT used as a fallback. On Cloudflare Pages it
+ * resolves to a per-deployment alias (e.g. https://ab9feb2a.fansleak.pages.dev), which
+ * produced sitemap entries pointing at a deployment host instead of the real domain.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -24,15 +28,10 @@ const PUBLIC_DIR = path.join(ROOT, 'public');
 const SITEMAP_FILE = path.join(PUBLIC_DIR, 'sitemap.xml');
 const ROBOTS_FILE = path.join(PUBLIC_DIR, 'robots.txt');
 
-const PLACEHOLDER = 'https://your-domain.com';
+const DEFAULT_SITE_URL = 'https://fansleak.pages.dev';
 
 function resolveSiteUrl() {
-  const candidates = [
-    process.argv[2],
-    process.env.SITE_URL,
-    process.env.VITE_SITE_URL,
-    process.env.CF_PAGES_URL,
-  ];
+  const candidates = [process.argv[2], process.env.SITE_URL, process.env.VITE_SITE_URL];
 
   for (const candidate of candidates) {
     if (!candidate) continue;
@@ -43,10 +42,10 @@ function resolveSiteUrl() {
   }
 
   console.warn(
-    `[sitemap] SITE_URL is not set - falling back to ${PLACEHOLDER}.\n` +
-      '[sitemap] Set SITE_URL (e.g. SITE_URL=https://your-domain.com) before building so the sitemap uses your real domain.'
+    `[sitemap] SITE_URL is not set - defaulting to the production domain ${DEFAULT_SITE_URL}.\n` +
+      `[sitemap] Set SITE_URL explicitly (e.g. SITE_URL=${DEFAULT_SITE_URL}) to override.`
   );
-  return PLACEHOLDER;
+  return DEFAULT_SITE_URL;
 }
 
 /** Pulls the PROFILES array out of the mock data module and returns its entries. */
