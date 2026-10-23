@@ -13,7 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const TOKEN = 'eOzKZgDLPg020gOMwI5bstWMPEg7ARMfzdCwQQ132Fo';
+const TOKEN = 'W8NUKGvl4cHSmctRzfmeO4Gw1zYinIrgFafJi_mMNa0';
 const DIST = path.join(ROOT, 'dist');
 
 const candidates = [path.join(DIST, 'index.html'), path.join(ROOT, 'index.html')];

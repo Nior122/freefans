@@ -47,7 +47,7 @@ See `.env.example`.
 Run this against the exact property URL you added to Search Console:
 ```bash
 curl -s https://fansleak.pages.dev/ | grep -o '<meta name="google-site-verification"[^>]*>'
-# expect: <meta name="google-site-verification" content="eOzKZgDLPg020gOMwI5bstWMPEg7ARMfzdCwQQ132Fo" />
+# expect: <meta name="google-site-verification" content="W8NUKGvl4cHSmctRzfmeO4Gw1zYinIrgFafJi_mMNa0" />
 ```
 `npm run build` also runs `scripts/check-seo.mjs` (`postbuild`), which **fails the build**
 if the tag is missing from `dist/index.html` or sits outside `<head>`.
