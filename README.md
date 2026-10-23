@@ -173,3 +173,47 @@ Two mark variants are deliberate: the detailed artwork (gradient + glow + drip) 
 180px and above, while 16/32px favicons use a flat, thickened version — the glow turns to
 mush and the drip disappears at tab size. `scripts/check-seo.mjs` fails the build if any of
 these files or their `<link>` tags go missing.
+
+## Adding a profile
+
+A profile is one entry in `PROFILES` (`services/mockData.tsx`) plus an image array. Everything
+else — `/profile/<id>/` URL, sitemap entry, prerendered HTML, canonical, JSON-LD — is derived
+from that array, so adding an entry and rebuilding is all it takes.
+
+```bash
+npm run add-profile -- path/to/profile.json --dry-run   # validates + prints the entry
+npm run add-profile -- path/to/profile.json             # writes data file + registers profile
+npm run build                                           # sitemap + prerendered pages
+```
+
+The payload:
+
+```json
+{
+  "id": "creator_slug",
+  "name": "Creator Name",
+  "handle": "@creator_slug",
+  "bio": "One or two sentences; used as the meta description (50-155 chars is ideal).",
+  "avatarUrl": "https://…/avatar.jpg",
+  "heroUrl": "https://…/banner.jpg",
+  "tags": ["onlyfans", "cosplay"],
+  "category": "Creator",
+  "pricePerMonth": 9.99,
+  "access_mode": "cached_preview",
+  "stats": { "posts": 120, "likes": 5000, "views": 25000, "followers": 1200 },
+  "images": [
+    { "url": "https://…/a.jpg", "caption": "…", "width": 1080, "height": 1350, "mediaType": "image" }
+  ]
+}
+```
+
+The importer enforces what the build needs: slug-shaped `id` (2-64 chars, no reserved app
+routes like `search`), name + bio, absolute http(s) media URLs, at least one image, numeric
+stats, ≤12 tags. It de-duplicates image URLs, generates `<id>-001` image ids, defaults
+`isLocked`/`isVisible`, drops oversized captions, refuses to overwrite an existing profile
+unless `--force`, and warns when a profile exceeds ~500 images (all profile media is bundled
+into the client JS, which is already the main bundle-size cost).
+
+Only add media you have the right to distribute — creator-supplied media kits, profiles the
+creator has submitted, or your own content. The importer never fetches anything; it only
+validates and writes JSON you provide.
