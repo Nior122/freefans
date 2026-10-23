@@ -5,7 +5,7 @@ import { useMockData } from '../services/mockData';
 import { Profile } from '../types';
 
 const SimpleProfileCard: React.FC<{ profile: Profile }> = ({ profile }) => (
-  <Link to={`/profile/${profile.id}`} className="flex items-center gap-4 p-4 bg-[#0a0a0a] rounded-xl border border-red-900/30 hover:border-red-700/50 hover:bg-[#110000] transition-all">
+  <Link to={`/profile/${profile.id}/`} className="flex items-center gap-4 p-4 bg-[#0a0a0a] rounded-xl border border-red-900/30 hover:border-red-700/50 hover:bg-[#110000] transition-all">
     <img src={profile.avatarUrl} alt={profile.name} className="w-12 h-12 rounded-full object-cover" />
     <div className="flex-1 min-w-0">
       <h3 className="font-bold text-white truncate">{profile.name}</h3>

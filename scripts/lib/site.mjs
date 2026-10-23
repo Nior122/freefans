@@ -12,6 +12,46 @@ export const DIST_DIR = path.join(ROOT, 'dist');
 
 export const DEFAULT_SITE_URL = 'https://fansleak.pages.dev';
 export const VERIFICATION_TOKEN = 'W8NUKGvl4cHSmctRzfmeO4Gw1zYinIrgFafJi_mMNa0';
+export const SITE_NAME = 'FansLeak';
+export const DEFAULT_OG_IMAGE = '/og-image.png';
+
+/**
+ * Cloudflare Pages serves `dist/<route>/index.html` and 308-redirects
+ * `/route` to `/route/`. Every canonical, sitemap entry and internal link must
+ * therefore use the trailing-slash form so the indexed URL is the one actually
+ * served (no redirects, no canonical/URL mismatch).
+ */
+// Only real asset types are treated as files: a profile id may legitimately
+// contain a dot (e.g. "emanuela.ebony") and must still get a trailing slash.
+const FILE_EXTENSIONS = new Set([
+  'xml', 'txt', 'json', 'webmanifest', 'html', 'js', 'mjs', 'css',
+  'png', 'jpg', 'jpeg', 'webp', 'avif', 'gif', 'svg', 'ico', 'mp4', 'webm', 'woff', 'woff2',
+]);
+
+export function isFilePath(routePath) {
+  const match = routePath.match(/\.([a-z0-9]+)$/i);
+  return Boolean(match && FILE_EXTENSIONS.has(match[1].toLowerCase()));
+}
+
+export function canonicalPath(routePath) {
+  const withLeadingSlash = routePath.startsWith('/') ? routePath : `/${routePath}`;
+  if (withLeadingSlash === '/') return '/';
+  if (isFilePath(withLeadingSlash)) return withLeadingSlash;
+  return withLeadingSlash.replace(/\/+$/, '') + '/';
+}
+
+/** Absolute, trailing-slash-normalised URL for a route. */
+export function absoluteUrl(siteUrl, routePath) {
+  return `${siteUrl}${canonicalPath(routePath)}`;
+}
+
+/** Maps a canonical URL path to the file Cloudflare Pages will serve. */
+export function distFileForPath(routePath) {
+  const clean = canonicalPath(routePath);
+  if (clean === '/') return 'index.html';
+  if (isFilePath(clean)) return clean.replace(/^\//, '');
+  return `${clean.replace(/^\//, '')}index.html`;
+}
 
 /**
  * Canonical origin used for absolute URLs.

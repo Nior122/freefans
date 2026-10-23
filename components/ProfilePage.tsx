@@ -80,7 +80,7 @@ export const ProfilePage = () => {
 
   const profile = profiles.find(p => p.id === id);
 
-  if (!profile) return <Navigate to="/" />;
+  if (!profile) return <Navigate to="/" replace />;
 
   const isFav = isFavorite(profile.id);
 
@@ -379,8 +379,10 @@ export const ProfilePage = () => {
         <div className="absolute inset-0">
           <img
             src={profile.heroUrl}
-            alt="Banner"
+            alt={`${profile.name} banner`}
             className="w-full h-full object-cover opacity-80"
+            fetchPriority="high"
+            decoding="async"
           />
           <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-[#121212]" />
         </div>
@@ -395,7 +397,7 @@ export const ProfilePage = () => {
 
         {/* Search Button (Global) */}
         <button
-          onClick={() => navigate('/search')}
+          onClick={() => navigate('/search/')}
           className="absolute top-4 right-4 z-10 flex items-center justify-center w-10 h-10 bg-black/50 hover:bg-black/70 text-white rounded-full backdrop-blur-sm transition-all border border-white/10"
         >
           <Search size={20} />
@@ -409,7 +411,9 @@ export const ProfilePage = () => {
         <div className="relative mb-4">
           <img
             src={profile.avatarUrl}
-            alt={profile.name}
+            alt={`${profile.name} profile picture`}
+            width="192"
+            height="192"
             className="w-40 h-40 md:w-48 md:h-48 rounded-full border-[6px] border-[#121212] shadow-2xl object-cover bg-[#262626]"
           />
           {/* Online Indicator */}
@@ -579,6 +583,7 @@ export const ProfilePage = () => {
                           alt={img.caption || "Video thumbnail"}
                           className="w-full h-full object-cover opacity-80"
                           loading="lazy"
+                          decoding="async"
                         />
                         <div className="absolute inset-0 flex items-center justify-center bg-black/20">
                           <div className="w-12 h-12 bg-white/20 rounded-full flex items-center justify-center backdrop-blur-sm border border-white/40">
@@ -592,6 +597,7 @@ export const ProfilePage = () => {
                         alt={img.caption || "Post"}
                         className={`w-full h-full object-cover transition-transform duration-500 ${!isLocked && 'group-hover:scale-105'}`}
                         loading="lazy"
+                        decoding="async"
                       />
                     )}
                   </div>
