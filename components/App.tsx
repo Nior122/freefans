@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { HashRouter, Routes, Route, Navigate, useLocation, Link } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, Link } from 'react-router-dom';
 import { Home, User, Settings, PlusCircle, Search, LogOut, Menu, X, Heart, Hash, MoreHorizontal } from 'lucide-react';
 import { ProfilePage } from './ProfilePage';
 import { AdminPanel } from './AdminPanel';
@@ -28,7 +28,7 @@ const Navbar = () => {
       {/* Mobile Header */}
       <div className="md:hidden fixed top-0 left-0 right-0 z-50 bg-black border-b border-red-900/50 px-4 py-3 flex items-center justify-between">
         <Link to="/" className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-red-600 to-red-400">
-          FanDirectory
+          FansLeak
         </Link>
         <button onClick={() => setIsOpen(!isOpen)} className="p-2 text-red-500">
           {isOpen ? <X size={24} /> : <Menu size={24} />}
@@ -44,7 +44,7 @@ const Navbar = () => {
         <div className="flex flex-col h-full">
           <div className="p-6 hidden md:block">
             <Link to="/" className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-red-600 to-red-400">
-              FanDirectory
+              FansLeak
             </Link>
           </div>
 
@@ -158,7 +158,7 @@ export default function App() {
 
   return (
     <MockDataProvider>
-      <HashRouter>
+      <BrowserRouter>
         <Layout>
           <Routes>
             <Route path="/" element={<HomePage />} />
@@ -180,7 +180,7 @@ export default function App() {
             <Route path="*" element={<Navigate to="/" />} />
           </Routes>
         </Layout>
-      </HashRouter>
+      </BrowserRouter>
     </MockDataProvider>
   );
 }

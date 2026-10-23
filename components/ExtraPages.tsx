@@ -136,8 +136,8 @@ export const MorePage = () => {
       </div>
       
       <div className="mt-8 text-center text-xs text-gray-600">
-        <p>FanDirectory v1.0.0</p>
-        <p>© 2024 FanDirectory Inc.</p>
+        <p>FansLeak v1.0.0</p>
+        <p>© 2026 FansLeak</p>
       </div>
     </div>
   );
