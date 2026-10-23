@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { HashRouter, Routes, Route, Navigate, useLocation, Link } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, Link } from 'react-router-dom';
 import { Home, User, Settings, PlusCircle, Search, LogOut, Menu, X, Heart, Hash, MoreHorizontal } from 'lucide-react';
 import { ProfilePage } from './ProfilePage';
 import { AdminPanel } from './AdminPanel';
@@ -158,7 +158,7 @@ export default function App() {
 
   return (
     <MockDataProvider>
-      <HashRouter>
+      <BrowserRouter>
         <Layout>
           <Routes>
             <Route path="/" element={<HomePage />} />
@@ -180,7 +180,7 @@ export default function App() {
             <Route path="*" element={<Navigate to="/" />} />
           </Routes>
         </Layout>
-      </HashRouter>
+      </BrowserRouter>
     </MockDataProvider>
   );
 }

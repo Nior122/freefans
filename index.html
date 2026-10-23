@@ -4,7 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="referrer" content="no-referrer" />
+    <meta name="google-site-verification" content="eOzKZgDLPg020gOMwI5bstWMPEg7ARMfzdCwQQ132Fo" />
     <title>FanDirectory</title>
+    <script>
+      // Legacy hash URLs (#/profile/name) -> clean URLs (/profile/name)
+      (function () {
+        var hash = window.location.hash;
+        if (hash.indexOf('#/') === 0) {
+          window.location.replace(hash.slice(1));
+        }
+      })();
+    </script>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>

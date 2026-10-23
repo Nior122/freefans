@@ -1,0 +1,3 @@
+# Cloudflare Pages SPA fallback: let React Router handle deep links such as
+# /profile/emmafiore while still serving real files (sitemap.xml, robots.txt, assets).
+/*    /index.html    200
