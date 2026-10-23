@@ -53,6 +53,8 @@ import prosexxData from './prosexxData.json';
 import lovebyelenitaData from './lovebyelenitaData';
 import miss_dxxxData from './miss_dxxxData';
 import emmafioреData from './emmafioreData';
+import belledelphineData from './belledelphineData.json';
+import sweetiefoxData from './sweetiefoxData.json';
 
 // Subset of data for demo purposes from the Belle Delphine dataset
 const BELLE_FULL_DATA = [
@@ -5456,6 +5458,18 @@ const URBABYDOLLXO_IMAGES: Image[] = URBABYDOLLXO_URLS.map((url, index) => ({
 }));
 
 // Create 3 profiles for variety
+
+// Belle Delphine (coomer.st) — 200 images imported from coomer.st/onlyfans/user/belledelphine
+const BELLEDLPHINE_IMAGES: Image[] = (belledelphineData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+// Sweetie Fox (coomer.st) — 200 images imported from coomer.st/onlyfans/user/sweetiefox_of
+const SWEETIEFOX_IMAGES: Image[] = (sweetiefoxData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
 
 const PROFILES: Profile[] = [
   {
@@ -11792,6 +11806,46 @@ const PROFILES: Profile[] = [
     pricePerMonth: 9.99,
     access_mode: 'cached_preview'
   },
+  {
+    id: 'belledelphine',
+    name: 'Belle Delphine',
+    handle: '@belledelphine',
+    bio: 'Gamer girl & cosplay creator bringing you exclusive premium content from OnlyFans. Imported from coomer.st/onlyfans/user/belledelphine — 1,000 posts, 86,138 favorites.',
+    avatarUrl: '/media/belledelphine/belledelphine-001.jpg',
+    heroUrl: '/media/belledelphine/belledelphine-002.jpg',
+    tags: ['onlyfans', 'cosplay', 'gaming', 'egirl', 'premium', 'exclusive'],
+    category: 'OnlyFans',
+    images: BELLEDLPHINE_IMAGES,
+    stats: {
+      posts: BELLEDLPHINE_IMAGES.length,
+      likes: 86138,
+      views: 500000,
+      followers: 12000
+    },
+    isVerified: true,
+    isVisible: true,
+    pricePerMonth: 19.99
+  },
+  {
+    id: 'sweetiefox',
+    name: 'Sweetie Fox',
+    handle: '@sweetiefox',
+    bio: 'OnlyFans creator sharing exclusive premium content. Imported from coomer.st/onlyfans/user/sweetiefox_of — 2,451 posts, 70,886 favorites.',
+    avatarUrl: '/media/sweetiefox/sweetiefox-001.jpg',
+    heroUrl: '/media/sweetiefox/sweetiefox-002.jpg',
+    tags: ['onlyfans', 'premium', 'exclusive', 'adult'],
+    category: 'OnlyFans',
+    images: SWEETIEFOX_IMAGES,
+    stats: {
+      posts: SWEETIEFOX_IMAGES.length,
+      likes: 70886,
+      views: 450000,
+      followers: 15000
+    },
+    isVerified: true,
+    isVisible: true,
+    pricePerMonth: 19.99
+  }
 ];
 
 
