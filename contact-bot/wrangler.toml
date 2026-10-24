@@ -10,3 +10,4 @@ database_id = "REPLACE_WITH_D1_DATABASE_ID"
 [vars]
 SITE_URL = "https://fansleak.pages.dev"
 PAYMENT_PROVIDER = "selar"
+PAYMENT_METHODS = "selar,bank"
