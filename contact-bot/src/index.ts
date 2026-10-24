@@ -172,11 +172,21 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined) {
     await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Not authorised." }); return;
   }
-  const m = data.match(/^(approve|reject|bankverify|bankreject):([0-9a-f-]{36})$/i);
+  const m = data.match(/^(approve|reject|bankverify|bankreject|selarverify):([0-9a-f-]{36})$/i);
   if (!m) { await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Unknown action." }); return; }
   const action = m[1].toLowerCase(), id = m[2];
   const r = await e.DB.prepare("SELECT id,telegram_chat_id,profile_id,status FROM contact_requests WHERE id=?").bind(id).first<RequestRow>();
   if (!r) { await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request not found." }); return; }
+  if (action === "selarverify") {
+    if (r.status !== "pending_payment") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request is not awaiting Selar verification." });
+    const paid = await e.DB.prepare("SELECT payment_reference,payment_amount_minor,payment_currency,payment_method FROM contact_requests WHERE id=?").bind(id).first<any>();
+    if (!paid || paid.payment_method !== "selar" || !paid.payment_reference || paid.payment_currency !== "NGN" || paid.payment_amount_minor !== Math.round((price(e) || 0) * 100)) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "No matching validated Selar sale is attached to this request." });
+    await e.DB.prepare("UPDATE contact_requests SET status='payment_verified',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment' AND payment_method='selar'").bind(id).run();
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,'selar_payment_admin_verified',?,?,?)").bind(actor, id, r.profile_id, "Admin reviewed validated Selar sale event").run();
+    await say(e, r.telegram_chat_id, "The admin reviewed your Selar payment notification. Your request is now waiting for final approval.");
+    await say(e, e.ADMIN_TELEGRAM_ID, "Selar payment verified by admin for <code>" + id + "</code>. Now decide whether to approve the contact request.", { inline_keyboard: [[{ text: "Approve & send contact", callback_data: "approve:" + id }, { text: "Reject request", callback_data: "reject:" + id }]] });
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment verified. Review the contact request next." });
+  }
   if (action === "bankverify") {
     if (r.status !== "pending_manual_payment") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request is not awaiting bank verification." });
     await e.DB.prepare("UPDATE contact_requests SET status='payment_verified',payment_currency='NGN',payment_amount_minor=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_manual_payment'").bind(Math.round((price(e) || 0) * 100), id).run();
@@ -240,11 +250,11 @@ async function selar(request: Request, e: Env) {
   }
   const target = rows.results[0];
   await e.DB.prepare("INSERT INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id) VALUES(?,?,?,?,?,?)").bind(s.reference, s.email, s.amountMinor, s.currency, s.productId ?? null, target.id).run();
-  await e.DB.prepare("UPDATE contact_requests SET status='payment_verified',payment_method='selar',payment_reference=?,payment_amount_minor=?,payment_currency=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(s.reference, s.amountMinor, s.currency, target.id).run();
+  await e.DB.prepare("UPDATE contact_requests SET payment_method='selar',payment_reference=?,payment_amount_minor=?,payment_currency=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment' AND payment_method='selar'").bind(s.reference, s.amountMinor, s.currency, target.id).run();
   const contact = await e.DB.prepare("SELECT sharing_enabled FROM creator_contacts WHERE profile_id=?").bind(target.profile_id).first<any>();
-  const markup = { inline_keyboard: [[{ text: "Approve & send contact", callback_data: `approve:${target.id}` }, { text: "Reject", callback_data: `reject:${target.id}` }]] };
-  await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar payment verified</b>\nRequest: <code>${target.id}</code>\nProfile: ${esc(target.profile_id)}\nBuyer: ${esc(s.email)}\nAmount: ${money(s.amountMinor / 100)}\nPayment ref: ${esc(s.reference)}\nContact sharing enabled: ${contact?.sharing_enabled === 1 ? "yes" : "no"}`, markup);
-  await say(e, target.telegram_chat_id, "Selar confirmed your payment. Your request is waiting for admin review; payment does not guarantee approval.");
+  const markup = { inline_keyboard: [[{ text: "Verify Selar payment", callback_data: "selarverify:" + target.id }, { text: "Reject payment/request", callback_data: "reject:" + target.id }]] };
+  await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar payment notification — admin verification required</b>\nRequest: <code>${target.id}</code>\nProfile: ${esc(target.profile_id)}\nBuyer: ${esc(s.email)}\nAmount: ${money(s.amountMinor / 100)}\nPayment ref: ${esc(s.reference)}\nContact sharing enabled: ${contact?.sharing_enabled === 1 ? "yes" : "no"}`, markup);
+  await say(e, target.telegram_chat_id, "A Selar payment notification was received. The admin must review and verify it before your request can be approved.");
   return json({ ok: true, matched: true });
 }
 export default {
