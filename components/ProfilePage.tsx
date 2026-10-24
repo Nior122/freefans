@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, Navigate, useNavigate } from 'react-router-dom';
 import {
   Star,
-  UploadCloud,
+  MessageSquare,
   Search,
   ChevronLeft,
   ChevronRight,
@@ -454,7 +454,7 @@ export const ProfilePage = () => {
         <div className="flex items-center gap-4 w-full max-w-sm justify-center mb-3">
           <a href="https://t.me/+jrCwPGduIDoxN2Rk" target="_blank" rel="noopener noreferrer" className="animate-wobble flex-1 bg-red-700 hover:bg-red-600 text-white py-2 rounded-full font-bold text-base transition-colors shadow-lg shadow-red-900/40 flex flex-col items-center justify-center gap-0">
             <div className="flex items-center gap-2">
-              <UploadCloud size={18} />
+              <MessageSquare size={18} />
               <span>Subscribe</span>
             </div>
             <span className="text-[11px] font-semibold text-red-200 tracking-wide">{subCount} subscribers</span>
@@ -480,32 +480,7 @@ export const ProfilePage = () => {
             {profile.name}
           </span>
         </nav>
-        <div className="flex items-center gap-3 w-full max-w-sm justify-center mb-4">
-          <a
-            href="https://t.me/bp00ty"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="animate-zoom-in flex-1 bg-[#1a1a1a] hover:bg-[#252525] border border-gray-700 hover:border-gray-500 text-white py-2 rounded-full font-bold text-base transition-colors flex flex-col items-center justify-center gap-0"
-          >
-            <div className="flex items-center gap-2">
-              <span>📩</span>
-              <span>Message</span>
-            </div>
-            <span className="text-[11px] font-semibold text-gray-400 tracking-wide">{msgCount} received</span>
-          </a>
-          <a
-            href="https://loadingup.vercel.app/"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="animate-shake flex-1 bg-[#1a1a1a] hover:bg-[#252525] border border-gray-700 hover:border-gray-500 text-white py-2 rounded-full font-bold text-base transition-colors flex flex-col items-center justify-center gap-0"
-          >
-            <div className="flex items-center gap-2">
-              <span>📞</span>
-              <span>Call Me</span>
-            </div>
-            <span className="text-[11px] font-semibold text-gray-400 tracking-wide">{callCount} called</span>
-          </a>
-        </div>
+
       </div>
 
       <div className="max-w-[1600px] mx-auto px-2 md:px-4">
