@@ -383,6 +383,8 @@ export const ProfilePage = () => {
             className="w-full h-full object-cover opacity-80"
             fetchPriority="high"
             decoding="async"
+            width="1200"
+            height="400"
           />
           <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-[#121212]" />
         </div>
@@ -426,7 +428,11 @@ export const ProfilePage = () => {
             <h1 className="text-3xl md:text-4xl font-bold text-white tracking-tight">
               {profile.name}
             </h1>
-            <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/e/e4/Twitter_Verified_Badge.svg/800px-Twitter_Verified_Badge.svg.png" className="w-6 h-6" alt="Verified" />
+            {profile.isVerified && (
+              <svg className="w-6 h-6 text-yellow-400 fill-current" viewBox="0 0 24 24" aria-label="Verified" role="img">
+                <path d="M23 12a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2h11l3 3 7-7h4a2 2 0 0 1 2 2z" />
+              </svg>
+            )}
           </div>
           <p className="text-gray-400 text-lg font-medium">{profile.handle}</p>
           {profile.bio && (
@@ -463,6 +469,17 @@ export const ProfilePage = () => {
             <Star size={22} fill={isFav ? "currentColor" : "none"} />
           </button>
         </div>
+
+        {/* Breadcrumb */}
+        <nav className="flex justify-center gap-1 text-xs text-gray-500 mb-6">
+          <span className="flex items-center gap-1">
+            <span className="text-gray-400">Home</span>
+            <span>/</span>
+          </span>
+          <span className="text-gray-300 font-medium">
+            {profile.name}
+          </span>
+        </nav>
         <div className="flex items-center gap-3 w-full max-w-sm justify-center mb-4">
           <a
             href="https://t.me/bp00ty"

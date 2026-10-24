@@ -22,7 +22,7 @@ export const AuthPage = () => {
     <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
       <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md">
         <div className="flex items-center justify-center gap-2.5 mb-2">
-          <img src="/logo.svg" alt="" width="36" height="36" className="h-9 w-9" />
+          <img src="/logo.svg" alt="FansLeak logo" width="36" height="36" className="h-9 w-9" />
           <h2 className="text-3xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-red-600 to-red-400">
             FansLeak
           </h2>

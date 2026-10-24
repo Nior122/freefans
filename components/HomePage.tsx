@@ -245,10 +245,12 @@ const ListCard: React.FC<{ profile: Profile; date: string }> = ({ profile, date 
       <div className="absolute inset-0">
         <img
           src={profile.heroUrl}
-          alt=""
+          alt={`${profile.name} banner`}
           className="w-full h-full object-cover"
           loading="lazy"
           decoding="async"
+          width="400"
+          height="180"
         />
         <div className="absolute inset-0 gradient-overlay-horizontal" />
       </div>
