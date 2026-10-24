@@ -10,7 +10,7 @@ Cloudflare Worker + D1 backend for @KasiQueenbot. Selar is the single payment me
 - Set `SELAR_CHECKOUT_URL`, `SELAR_PRODUCT_ID`, and `SELAR_WEBHOOK_SECRET` for Selar. The webhook accepts only a normalized sale notification forwarded by a trusted integration and requires an explicit successful payment status (`paid`, `completed`, `success`, or `successful`), explicit currency, exact product ID, buyer email, NGN amount, unique sale reference, and a request that selected Selar. Missing status/currency/product fields are rejected; the handler never assumes a generic New Sale event proves payment.
 - Set `CONTACT_PRICE_NGN` to the exact price in naira. It is shared by the payment options. Do not accept a sale at a different amount.
 - Workers AI is bound as `AI` in `wrangler.toml`; `AI_MODEL` selects the model. The AI is customer support only and cannot verify payment, approve requests, or release contact details.
-- If you later change providers, change `PAYMENT_PROVIDER` and implement/enable that provider's own verified webhook adapter. Never route another provider's payload through the Selar handler. Bank link payments can remain enabled independently.
+- If you later change providers, implement that provider's own verified webhook adapter and update the configuration. Never route another provider's payload through the Selar handler.
 
 ## Request and privacy flow
 
