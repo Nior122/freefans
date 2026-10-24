@@ -233,7 +233,7 @@ export default {
     const u = new URL(request.url);
     if (request.method === "GET" && u.pathname === "/health") return json({ ok: true, service: "fansleak-contact-bot", provider: provider(env), methods: enabledMethods(env) });
     if (request.method === "POST" && u.pathname === "/telegram/webhook") {
-      if (!safeEq(request.headers.get("x-telegram-bot-api-secret-token") || "", env.TELEGRAM_WEBHOOK_SECRET || "")) return json({ error: "unauthorised" }, 401);
+      if (!env.TELEGRAM_WEBHOOK_SECRET || !safeEq(request.headers.get("x-telegram-bot-api-secret-token") || "", env.TELEGRAM_WEBHOOK_SECRET)) return json({ error: "unauthorised" }, 401);
       let update: Update;
       try { update = await request.json() as Update; } catch { return json({ error: "invalid_json" }, 400); }
       try { if (update.message) await message(env, update.message); if (update.callback_query) await callback(env, update.callback_query); }
