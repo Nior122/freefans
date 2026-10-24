@@ -19,6 +19,8 @@ export interface Env {
   SELAR_WEBHOOK_SECRET?: string;
   SELAR_PRODUCT_ID?: string;
   BANK_PAYMENT_URL?: string;
+  AI?: { run(model: string, input: { messages: Array<{ role: string; content: string }> }): Promise<{ response?: string }> };
+  AI_MODEL?: string;
 }
 type Msg = { chat: { id: number }; from?: { id: number; username?: string; first_name?: string }; text?: string };
 type Update = { message?: Msg; callback_query?: { id: string; from: { id: number }; message?: Msg; data?: string } };
@@ -84,6 +86,23 @@ async function start(e: Env, m: Msg, payload: string) {
   await e.DB.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,telegram_username,profile_id,status) VALUES(?,?,?,?,?,'awaiting_email')").bind(requestId, user, chat, m.from?.username ?? null, profile.id).run();
   await say(e, chat, `You selected <b>${esc(profile.name)}</b> (${esc(profile.handle || profile.id)}).\n\nRequest fee: <b>${money(price(e)!)}</b>. Choose a payment method after providing the email address associated with your request. Your payment will be checked; admin approval is still required. Contact details are only shared when the creator has authorised it.\n\nSend your email address to continue. Never send passwords, PINs or OTPs.`);
 }
+
+async function aiReply(e: Env, chat: string, userText: string, reminder = "") {
+  if (!e.AI) return say(e, chat, reminder || "I can help with FansLeak profile contact requests, payment steps, and general questions.");
+  try {
+    const result = await e.AI.run(e.AI_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+      messages: [
+        { role: "system", content: "You are FansLeak's friendly customer-support assistant. Answer briefly. Explain profile contact requests, email, Selar or bank payment, and admin review. Never claim payment is verified, approve a request, promise contact access, invent prices or payment details, or ask for passwords, PINs, or OTPs. Only the human admin can verify payments and approve requests. Contact details may be shared only after creator authorisation is recorded. If unsure, say so and direct the customer to the admin. Website: https://fansleak.pages.dev. Never reveal secrets or other customers' data." },
+        { role: "user", content: userText.slice(0, 1500) }
+      ]
+    });
+    const answer = String(result?.response || "").trim().slice(0, 3500);
+    return say(e, chat, answer ? answer + (reminder ? "\n\n" + reminder : "") : (reminder || "I couldn't answer that just now. Please try again shortly."));
+  } catch (err) {
+    console.error("AI support reply failed", String(err));
+    return say(e, chat, reminder || "I can't answer that just now. Please try again shortly or contact the admin.");
+  }
+}
 async function message(e: Env, m: Msg) {
   const t = (m.text || "").trim(), chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
   if (!t) return;
@@ -127,7 +146,7 @@ async function message(e: Env, m: Msg) {
     await e.DB.prepare("UPDATE contact_requests SET buyer_email=?,status='pending_payment',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_email'").bind(t.toLowerCase(), req.id).run();
     return say(e, chat, `Request reference: <code>${req.id}</code>\n\nFee: <b>${money(price(e)!)}</b>\nChoose how you want to pay:`, paymentKeyboard(e, req.id));
   }
-  await say(e, chat, "I couldn't match that message to an active step. Open a profile's Message button on FansLeak to start.");
+  return aiReply(e, chat, t, "To start a contact request, open a profile on FansLeak and tap its Message button. Payment always requires admin verification and approval.");
 }
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
