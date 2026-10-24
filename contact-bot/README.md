@@ -1,5 +1,7 @@
 # FansLeak Telegram Contact Bot
 
+The bot uses Cloudflare Workers AI for customer support when a message does not match an active payment/request step. AI replies can explain the flow, but cannot verify payments, approve requests, or release contacts.
+
 Cloudflare Worker + D1 backend for @KasiQueenbot. Selar is the initial automated checkout adapter; manual bank-link payment is available alongside it. Payment URLs, price, product ID, and active provider are runtime configuration—not hard-coded into the bot. A future provider can be added as a separate adapter without rewriting Telegram request handling or the database workflow.
 
 ## Payment options
@@ -8,6 +10,7 @@ Cloudflare Worker + D1 backend for @KasiQueenbot. Selar is the initial automated
 - Set `SELAR_CHECKOUT_URL`, `SELAR_PRODUCT_ID`, and `SELAR_WEBHOOK_SECRET` for Selar. The webhook accepts only a normalized sale notification forwarded by a trusted integration and requires an explicit successful payment status (`paid`, `completed`, `success`, or `successful`), explicit currency, exact product ID, buyer email, NGN amount, unique sale reference, and a request that selected Selar. Missing status/currency/product fields are rejected; the handler never assumes a generic New Sale event proves payment.
 - Set `BANK_PAYMENT_URL` to the bank payment link you provide. After the buyer pays, the bot asks for a transfer reference and notifies the admin. The admin must check the actual bank transaction record and click **I verified the bank payment** or **Reject / not found**. A buyer's screenshot or claim never counts as verification. Bank payment then still needs final request approval.
 - Set `CONTACT_PRICE_NGN` to the exact price in naira. It is shared by the payment options. Do not accept a sale at a different amount.
+- Workers AI is bound as `AI` in `wrangler.toml`; `AI_MODEL` selects the model. The AI is customer support only and cannot verify payment, approve requests, or release contact details.
 - If you later change providers, change `PAYMENT_PROVIDER` and implement/enable that provider's own verified webhook adapter. Never route another provider's payload through the Selar handler. Bank link payments can remain enabled independently.
 
 ## Important Selar policy note
@@ -34,7 +37,7 @@ Selar's published prohibited-business list includes adult entertainment and adul
    ```json
    {"reference":"unique-sale-reference","email":"buyer@example.com","amount":1500,"currency":"NGN","product_id":"your-product-id","payment_status":"paid"}
    ```
-   `amount` is in naira; `amount_minor` may be supplied instead in kobo. Only map an authoritative successful-payment field if Selar actually provides one. If the trigger has no payment-status field, do not fabricate one or forward the event as verified; automated Selar verification must remain disabled until a trusted source of payment status is available. The handler also rejects non-NGN currency or amount mismatches. The webhook requires the exact product ID.
+   `amount` is in naira; `amount_minor` may be supplied instead in kobo. Only map an authoritative successful-payment field if Selar actually provides one. If the trigger has no payment-status field, do not fabricate one or forward the event as verified; automated Selar verification must remain disabled until a trusted source of payment status is available. The handler also rejects non-NGN currency or amount mismatches. A matching Selar notification is sent to the admin for explicit verification before the request can be approved. The webhook requires the exact product ID.
 7. Set Telegram's webhook URL to `https://YOUR-WORKER-DOMAIN/telegram/webhook`, with Telegram's `secret_token` set to `TELEGRAM_WEBHOOK_SECRET`.
 8. Verify `GET /health` lists the expected payment methods, then test Selar and bank flows with low-risk test transactions before public launch.
 
