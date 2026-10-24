@@ -63,6 +63,22 @@ jobs:
           printf '%s' "$SELAR_PRODUCT_ID" | npx --yes wrangler@4 secret put SELAR_PRODUCT_ID --config contact-bot/wrangler.toml
           printf '%s' "$BANK_PAYMENT_URL" | npx --yes wrangler@4 secret put BANK_PAYMENT_URL --config contact-bot/wrangler.toml
 
+      - name: Configure required Worker secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+          ADMIN_TELEGRAM_ID: ${{ secrets.ADMIN_TELEGRAM_ID }}
+          SELAR_WEBHOOK_SECRET: ${{ secrets.SELAR_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          for name in TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET ADMIN_TELEGRAM_ID SELAR_WEBHOOK_SECRET; do
+            value="${!name}"
+            test -n "$value" || { echo "Missing GitHub Actions secret: $name"; exit 1; }
+            printf '%s' "$value" | npx --yes wrangler@4 secret put "$name" --config contact-bot/wrangler.toml
+          done
+
       - name: Connect Telegram webhook
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -80,18 +96,3 @@ jobs:
             --data-urlencode "url=$worker_url" \
             --data-urlencode "secret_token=$TELEGRAM_WEBHOOK_SECRET" \
             --data-urlencode "drop_pending_updates=false" | jq -e '.ok == true'
-      - name: Configure required Worker secrets
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
-          ADMIN_TELEGRAM_ID: ${{ secrets.ADMIN_TELEGRAM_ID }}
-          SELAR_WEBHOOK_SECRET: ${{ secrets.SELAR_WEBHOOK_SECRET }}
-        run: |
-          set -euo pipefail
-          for name in TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET ADMIN_TELEGRAM_ID SELAR_WEBHOOK_SECRET; do
-            value="${!name}"
-            test -n "$value" || { echo "Missing GitHub Actions secret: $name"; exit 1; }
-            printf '%s' "$value" | npx --yes wrangler@4 secret put "$name" --config contact-bot/wrangler.toml
-          done
