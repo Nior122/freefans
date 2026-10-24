@@ -188,19 +188,21 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   await say(e, r.telegram_chat_id, `Request approved. Creator contact: <b>${esc(c.contact_value)}</b>\n\nPlease respect the creator's boundaries.`);
   return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Approved and sent." });
 }
-type Sale = { reference: string; email: string; amountMinor: number; currency: string; productId?: string };
+type Sale = { reference: string; email: string; amountMinor: number; currency: string; productId: string; paymentStatus: string };
 function normalise(body: unknown): Sale | null {
   if (!body || typeof body !== "object") return null;
   const o = body as Record<string, any>;
   const reference = String(o.reference ?? o.transaction_reference ?? o.transactionReference ?? o.order_id ?? o.orderId ?? "").trim();
   const email = String(o.email ?? o.customer_email ?? o.customerEmail ?? o.customer?.email ?? "").trim().toLowerCase();
-  const raw = o.amount_minor ?? o.amountMinor ?? o.amount, amount = Number(raw), currency = String(o.currency ?? "NGN").toUpperCase();
+  const raw = o.amount_minor ?? o.amountMinor ?? o.amount, amount = Number(raw), currency = String(o.currency ?? "").toUpperCase();
   const productId = String(o.product_id ?? o.productId ?? o.product ?? "").trim();
-  if (!reference || !emailRe.test(email) || !Number.isFinite(amount) || amount <= 0 || !/^[A-Z]{3}$/.test(currency)) return null;
-  return { reference, email, amountMinor: o.amount_minor !== undefined || o.amountMinor !== undefined ? Math.round(amount) : Math.round(amount * 100), currency, productId: productId || undefined };
+  const paymentStatus = String(o.payment_status ?? o.paymentStatus ?? o.status ?? "").trim().toLowerCase();
+  // Fail closed: never infer currency or successful payment from a generic "New Sale" event.
+  if (!reference || !emailRe.test(email) || !Number.isFinite(amount) || amount <= 0 || !/^[A-Z]{3}$/.test(currency) || !productId || !["paid", "completed", "success", "successful"].includes(paymentStatus)) return null;
+  return { reference, email, amountMinor: o.amount_minor !== undefined || o.amountMinor !== undefined ? Math.round(amount) : Math.round(amount * 100), currency, productId, paymentStatus };
 }
 async function selar(request: Request, e: Env) {
-  if (provider(e) !== "selar") return json({ error: "selar_is_not_the_active_provider" }, 409);
+  if (provider(e) !== "selar" || !methods(e).includes("selar")) return json({ error: "selar_is_not_enabled" }, 409);
   if (!e.SELAR_WEBHOOK_SECRET || !safeEq(request.headers.get("x-selar-webhook-secret") || "", e.SELAR_WEBHOOK_SECRET)) return json({ error: "unauthorised" }, 401);
   let body: unknown;
   try { body = await request.json(); } catch { return json({ error: "invalid_json" }, 400); }
@@ -212,7 +214,7 @@ async function selar(request: Request, e: Env) {
   const p = price(e);
   if (!p || s.amountMinor !== Math.round(p * 100)) return json({ error: "amount_mismatch" }, 422);
   if (await e.DB.prepare("SELECT provider_reference FROM processed_sales WHERE provider_reference=?").bind(s.reference).first()) return json({ ok: true, duplicate: true });
-  const rows = await e.DB.prepare("SELECT id,profile_id,telegram_chat_id FROM contact_requests WHERE buyer_email=? AND status='pending_payment' ORDER BY created_at DESC LIMIT 2").bind(s.email).all<any>();
+  const rows = await e.DB.prepare("SELECT id,profile_id,telegram_chat_id FROM contact_requests WHERE buyer_email=? AND status='pending_payment' AND payment_method='selar' ORDER BY created_at DESC LIMIT 2").bind(s.email).all<any>();
   if (rows.results.length !== 1) {
     await say(e, e.ADMIN_TELEGRAM_ID, `Selar sale ${esc(s.reference)} for ${esc(s.email)} matched ${rows.results.length} pending requests. No request unlocked; reconcile manually.`);
     return json({ ok: true, matched: false });
