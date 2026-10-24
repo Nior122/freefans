@@ -29,7 +29,7 @@ npm run server    # Express API only
 | `AI_INTEGRATIONS_GEMINI_BASE_URL` | Gemini base URL (optional) |
 | `VITE_TELEGRAM_BOT_USERNAME` | Telegram bot username without the `@`. Used by each profile's Message button to open the bot with that profile's ID, e.g. `https://t.me/YourBot?start=contact_creator_slug`. **Set this in Cloudflare Pages before enabling contact requests.** |
 
-See `.env.example`. The Telegram username is a Vite build-time variable; set it in Cloudflare Pages and redeploy for the profile Message buttons to use the bot.
+See `.env.example`. The Telegram username defaults to `KasiQueenbot`. Optionally set `VITE_TELEGRAM_BOT_USERNAME` in Cloudflare Pages to override it. Vite variables are applied at build time, so redeploy after changing the value.
 
 ## SEO / Google Search Console
 
