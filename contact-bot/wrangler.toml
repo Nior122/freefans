@@ -1,9 +1,9 @@
 name = "fansleak-contact-bot"
 main = "src/index.ts"
+compatibility_date = "2026-10-24"
 
 [ai]
 binding = "AI"
-compatibility_date = "2026-10-24"
 
 [[d1_databases]]
 binding = "DB"
