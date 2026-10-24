@@ -11,7 +11,7 @@ interface D1Database {
 export interface Env {
  DB: D1Database; TELEGRAM_BOT_TOKEN: string; TELEGRAM_WEBHOOK_SECRET: string;
  ADMIN_TELEGRAM_ID: string; SELAR_CHECKOUT_URL: string; SELAR_WEBHOOK_SECRET: string;
- CONTACT_PRICE_NGN: string; SELAR_PRODUCT_ID?: string; SITE_URL?: string; PAYMENT_PROVIDER?: string;
+ CONTACT_PRICE_NGN: string; SELAR_PRODUCT_ID?: string; SITE_URL?: string; PAYMENT_PROVIDER?: string; SELAR_APPROVED_FOR_CONTACT_ACCESS?: string;
 }
 type Msg={chat:{id:number};from?:{id:number;username?:string;first_name?:string};text?:string};
 type Update={message?:Msg;callback_query?:{id:string;from:{id:number};message?:Msg;data?:string}};
@@ -31,7 +31,7 @@ async function start(e:Env,m:Msg,payload:string){
  if(!/^[A-Za-z0-9._-]{1,50}$/.test(id)){await say(e,chat,"Invalid profile link. Open the Message button directly from FansLeak.");return}
  let profile:Profile|undefined;try{profile=(await catalogue(e)).find(p=>p.id===id)}catch{await say(e,chat,"I can't load the live FansLeak profile list right now. Try again shortly.");return}
  if(!profile){await say(e,chat,"That profile is not currently in the public FansLeak catalogue.");return}
- if(!price(e)||!e.SELAR_CHECKOUT_URL){await say(e,chat,"Contact requests are not accepting payments yet. Please try again later.");await say(e,e.ADMIN_TELEGRAM_ID,"Setup required: configure CONTACT_PRICE_NGN and SELAR_CHECKOUT_URL.");return}
+ if((e.PAYMENT_PROVIDER||"selar").toLowerCase()==="selar"&&e.SELAR_APPROVED_FOR_CONTACT_ACCESS!=="true"){await say(e,chat,"Checkout is temporarily unavailable while the payment provider’s approval for this service is confirmed. Please try again later.");return}if(!price(e)||!e.SELAR_CHECKOUT_URL){await say(e,chat,"Contact requests are not accepting payments yet. Please try again later.");await say(e,e.ADMIN_TELEGRAM_ID,"Setup required: configure CONTACT_PRICE_NGN and SELAR_CHECKOUT_URL.");return}
  const active=await e.DB.prepare("SELECT id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
  if(active){await say(e,chat,"You already have a request in progress. Finish it or contact support before starting another.");return}
  const requestId=crypto.randomUUID();
@@ -60,6 +60,7 @@ async function callback(e:Env,u:NonNullable<Update["callback_query"]>){
 type Sale={reference:string;email:string;amountMinor:number;currency:string;productId?:string};
 function normalise(body:unknown):Sale|null{if(!body||typeof body!=="object")return null;const o=body as Record<string,any>;const reference=String(o.reference??o.transaction_reference??o.transactionReference??o.order_id??o.orderId??"").trim(),email=String(o.email??o.customer_email??o.customerEmail??o.customer?.email??"").trim().toLowerCase(),raw=o.amount_minor??o.amountMinor??o.amount,amount=Number(raw),currency=String(o.currency??"NGN").toUpperCase(),productId=String(o.product_id??o.productId??o.product??"").trim();if(!reference||!emailRe.test(email)||!Number.isFinite(amount)||amount<=0||!/^[A-Z]{3}$/.test(currency))return null;return{reference,email,amountMinor:o.amount_minor!==undefined||o.amountMinor!==undefined?Math.round(amount):Math.round(amount*100),currency,productId:productId||undefined}}
 async function selar(request:Request,e:Env){
+ if(e.SELAR_APPROVED_FOR_CONTACT_ACCESS!=="true")return json({error:"selar_contact_access_not_approved"},403);
  if(!e.SELAR_WEBHOOK_SECRET||!safeEq(request.headers.get("x-selar-webhook-secret")||"",e.SELAR_WEBHOOK_SECRET))return json({error:"unauthorised"},401);
  let body:unknown;try{body=await request.json()}catch{return json({error:"invalid_json"},400)}const s=normalise(body);if(!s)return json({error:"invalid_sale_payload",expected:["reference","email","amount","currency","product_id"]},400);
  if(s.currency!=="NGN")return json({error:"unsupported_currency"},422);if(!e.SELAR_PRODUCT_ID)return json({error:"selar_product_id_not_configured"},503);if(!s.productId||s.productId!==e.SELAR_PRODUCT_ID)return json({error:"wrong_product"},422);const p=price(e);if(!p||s.amountMinor!==Math.round(p*100))return json({error:"amount_mismatch"},422);
