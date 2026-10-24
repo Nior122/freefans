@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS contact_requests (
 CREATE INDEX IF NOT EXISTS idx_requests_user_status ON contact_requests(telegram_user_id,status);
 CREATE INDEX IF NOT EXISTS idx_requests_email_status ON contact_requests(buyer_email,status);
 CREATE INDEX IF NOT EXISTS idx_requests_manual_payment ON contact_requests(status,manual_payment_reference);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_requests_unique_manual_payment_reference ON contact_requests(manual_payment_reference) WHERE manual_payment_reference IS NOT NULL;
 CREATE TABLE IF NOT EXISTS creator_contacts (
  profile_id TEXT PRIMARY KEY, contact_value TEXT NOT NULL, contact_type TEXT NOT NULL DEFAULT 'telegram',
  sharing_enabled INTEGER NOT NULL DEFAULT 0 CHECK(sharing_enabled IN(0,1)), consent_confirmed_at TEXT,
