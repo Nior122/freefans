@@ -42,7 +42,8 @@ const esc = (s: string) => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;
 const price = (e: Env) => { const n = Number(e.CONTACT_PRICE_NGN); return Number.isFinite(n) && n > 0 ? n : null; };
 const servicePrice = (e: Env) => { const n = Number(e.SERVICE_PRICE_NGN); return Number.isFinite(n) && n > 0 ? n : null; };
 const money = (n: number) => new Intl.NumberFormat("en-NG", { style: "currency", currency: "NGN", maximumFractionDigits: 2 }).format(n);
-const saleMoney = (minor: number, currency: string) => new Intl.NumberFormat("en", { style: "currency", currency, maximumFractionDigits: 2 }).format(minor / 100);
+const currencyDigits = (currency: string) => new Intl.NumberFormat("en", { style: "currency", currency }).resolvedOptions().maximumFractionDigits;
+const saleMoney = (minor: number, currency: string) => new Intl.NumberFormat("en", { style: "currency", currency }).format(minor / (10 ** currencyDigits(currency)));
 const provider = (e: Env) => (e.PAYMENT_PROVIDER || "selar").trim().toLowerCase();
 const methods = (e: Env) => (e.PAYMENT_METHODS || "selar").split(",").map(x => x.trim().toLowerCase()).filter((x, i, a) => a.indexOf(x) === i);
 function enabledMethods(e: Env) {
@@ -271,12 +272,14 @@ function normalise(body: unknown, orderFieldName: string): Sale | null {
   const reference = String(o.reference ?? o.transaction_reference ?? o.transactionReference ?? o.sale_reference ?? o.saleReference ?? "").trim();
   const email = String(o.email ?? o.customer_email ?? o.customerEmail ?? o.customer?.email ?? "").trim().toLowerCase();
   const orderId = String(o.fans_order_id ?? o.fansOrderId ?? o.order_id ?? o.custom_fields?.[orderFieldName] ?? o.checkout_form?.[orderFieldName] ?? "").trim();
-  const raw = o.amount_minor ?? o.amountMinor ?? o.amount, amount = Number(raw), currency = String(o.currency ?? "").toUpperCase();
+  const currency = String(o.currency ?? "").toUpperCase();
+  const raw = o.amount_minor ?? o.amountMinor ?? o.amount, amount = Number(raw);
   const productId = String(o.product_id ?? o.productId ?? o.product ?? "").trim();
   const paymentStatus = String(o.payment_status ?? o.paymentStatus ?? o.status ?? "").trim().toLowerCase();
   // Fail closed: never infer currency or successful payment from a generic "New Sale" event.
   if (!reference || (!emailRe.test(email) && !orderId) || !Number.isFinite(amount) || amount <= 0 || !/^[A-Z]{3}$/.test(currency) || !productId || !["paid", "completed", "success", "successful"].includes(paymentStatus)) return null;
-  return { reference, email, orderId, amountMinor: o.amount_minor !== undefined || o.amountMinor !== undefined ? Math.round(amount) : Math.round(amount * 100), currency, productId, paymentStatus };
+  const isMinor = o.amount_minor !== undefined || o.amountMinor !== undefined;
+  return { reference, email, orderId, amountMinor: isMinor ? Math.round(amount) : Math.round(amount * (10 ** currencyDigits(currency))), currency, productId, paymentStatus };
 }
 async function selar(request: Request, e: Env) {
   if (provider(e) !== "selar" || !methods(e).includes("selar")) return json({ error: "selar_is_not_enabled" }, 409);
