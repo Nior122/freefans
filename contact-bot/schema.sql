@@ -1,0 +1,49 @@
+PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS contact_requests (
+ id TEXT PRIMARY KEY, telegram_user_id TEXT NOT NULL, telegram_chat_id TEXT NOT NULL,
+ telegram_username TEXT, profile_id TEXT NOT NULL, buyer_email TEXT,
+ status TEXT NOT NULL CHECK(status IN ('awaiting_email','pending_payment','awaiting_bank_reference','pending_manual_payment','payment_verified','approved','rejected','expired')),
+ payment_method TEXT, manual_payment_reference TEXT,
+ payment_reference TEXT UNIQUE, payment_amount_minor INTEGER, payment_currency TEXT,
+ created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+ updated_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_requests_user_status ON contact_requests(telegram_user_id,status);
+CREATE INDEX IF NOT EXISTS idx_requests_email_status ON contact_requests(buyer_email,status);
+CREATE INDEX IF NOT EXISTS idx_requests_manual_payment ON contact_requests(status,manual_payment_reference);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_requests_unique_manual_payment_reference ON contact_requests(manual_payment_reference) WHERE manual_payment_reference IS NOT NULL;
+CREATE TABLE IF NOT EXISTS creator_contacts (
+ profile_id TEXT PRIMARY KEY, contact_value TEXT NOT NULL, contact_type TEXT NOT NULL DEFAULT 'telegram',
+ sharing_enabled INTEGER NOT NULL DEFAULT 0 CHECK(sharing_enabled IN(0,1)), consent_confirmed_at TEXT,
+ updated_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE TABLE IF NOT EXISTS processed_sales (
+ provider_reference TEXT PRIMARY KEY, buyer_email TEXT NOT NULL, amount_minor INTEGER NOT NULL,
+ currency TEXT NOT NULL, product_id TEXT, request_id TEXT,
+ received_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE TABLE IF NOT EXISTS admin_audit (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, admin_telegram_id TEXT NOT NULL, action TEXT NOT NULL,
+ profile_id TEXT, request_id TEXT, details TEXT,
+ created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+-- A separate order record for the second Selar product. Contact approvals remain in contact_requests.
+CREATE TABLE IF NOT EXISTS service_orders (
+ id TEXT PRIMARY KEY,
+ service_id TEXT NOT NULL,
+ telegram_user_id TEXT NOT NULL,
+ telegram_chat_id TEXT NOT NULL,
+ telegram_username TEXT,
+ request_text TEXT,
+ buyer_email TEXT,
+ status TEXT NOT NULL CHECK(status IN ('awaiting_request','awaiting_email','pending_payment','payment_verified','fulfilled','cancelled','payment_review')),
+ payment_method TEXT,
+ payment_reference TEXT UNIQUE,
+ payment_amount_minor INTEGER,
+ payment_currency TEXT,
+ created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+ updated_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_service_orders_user_status ON service_orders(telegram_user_id,status);
+CREATE INDEX IF NOT EXISTS idx_service_orders_email_status ON service_orders(buyer_email,status);

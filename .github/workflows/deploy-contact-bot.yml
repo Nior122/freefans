@@ -1,0 +1,138 @@
+name: Deploy FansLeak contact bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      contact_price_ngn:
+        description: "Exact contact request fee in NGN"
+        required: true
+        type: string
+      contact_selar_checkout_url:
+        description: "FansLeak contact/assessment Selar checkout URL"
+        required: true
+        type: string
+      contact_selar_product_id:
+        description: "Exact Selar product code for contact/assessment"
+        required: true
+        type: string
+      service_price_ngn:
+        description: "Second service/product price in NGN"
+        required: true
+        type: string
+      service_selar_checkout_url:
+        description: "Second service/product Selar checkout URL"
+        required: true
+        type: string
+      service_selar_product_id:
+        description: "Exact Selar product code for the second service/product"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-fansleak-contact-bot
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out selected branch
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Validate both Selar product settings before any changes
+        env:
+          CONTACT_PRICE_NGN: ${{ inputs.contact_price_ngn }}
+          SELAR_CHECKOUT_URL: ${{ inputs.contact_selar_checkout_url }}
+          SELAR_PRODUCT_ID: ${{ inputs.contact_selar_product_id }}
+          SERVICE_PRICE_NGN: ${{ inputs.service_price_ngn }}
+          SERVICE_CHECKOUT_URL: ${{ inputs.service_selar_checkout_url }}
+          SERVICE_PRODUCT_ID: ${{ inputs.service_selar_product_id }}
+        run: |
+          set -euo pipefail
+          [[ "$CONTACT_PRICE_NGN" =~ ^[0-9]+([.][0-9]{1,2})?$ ]] || { echo "Invalid contact price"; exit 1; }
+          [[ "$SERVICE_PRICE_NGN" =~ ^[0-9]+([.][0-9]{1,2})?$ ]] || { echo "Invalid service price"; exit 1; }
+          awk "BEGIN { exit !($CONTACT_PRICE_NGN > 0) }" || { echo "Contact price must be positive"; exit 1; }
+          awk "BEGIN { exit !($SERVICE_PRICE_NGN > 0) }" || { echo "Service price must be positive"; exit 1; }
+          [[ "$SELAR_CHECKOUT_URL" == https://* ]] || { echo "Contact checkout URL must use HTTPS"; exit 1; }
+          [[ "$SERVICE_CHECKOUT_URL" == https://* ]] || { echo "Service checkout URL must use HTTPS"; exit 1; }
+          [[ -n "$SELAR_PRODUCT_ID" && -n "$SERVICE_PRODUCT_ID" && "$SELAR_PRODUCT_ID" != "$SERVICE_PRODUCT_ID" ]] || { echo "Use two distinct, non-empty Selar product codes"; exit 1; }
+
+      - name: Apply the idempotent service-orders migration
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "Missing GitHub secret CLOUDFLARE_API_TOKEN"; exit 1; }
+          npx --yes wrangler@4 d1 execute fansleak-contact-requests --remote --file contact-bot/migrations/0002_service_orders.sql --config contact-bot/wrangler.toml
+
+      - name: Deploy Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "Missing GitHub secret CLOUDFLARE_API_TOKEN"; exit 1; }
+          npx --yes wrangler@4 deploy --config contact-bot/wrangler.toml
+
+      - name: Configure runtime variables
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CONTACT_PRICE_NGN: ${{ inputs.contact_price_ngn }}
+          SELAR_CHECKOUT_URL: ${{ inputs.contact_selar_checkout_url }}
+          SELAR_PRODUCT_ID: ${{ inputs.contact_selar_product_id }}
+          SERVICE_PRICE_NGN: ${{ inputs.service_price_ngn }}
+          SERVICE_CHECKOUT_URL: ${{ inputs.service_selar_checkout_url }}
+          SERVICE_PRODUCT_ID: ${{ inputs.service_selar_product_id }}
+        run: |
+          set -euo pipefail
+          [[ "$CONTACT_PRICE_NGN" =~ ^[0-9]+([.][0-9]{1,2})?$ ]] || { echo "Invalid contact price"; exit 1; }
+          [[ "$SERVICE_PRICE_NGN" =~ ^[0-9]+([.][0-9]{1,2})?$ ]] || { echo "Invalid service price"; exit 1; }
+          awk "BEGIN { exit !($CONTACT_PRICE_NGN > 0) }" || { echo "Contact price must be positive"; exit 1; }
+          awk "BEGIN { exit !($SERVICE_PRICE_NGN > 0) }" || { echo "Service price must be positive"; exit 1; }
+          [[ "$SELAR_CHECKOUT_URL" == https://* ]] || { echo "Contact checkout URL must use HTTPS"; exit 1; }
+          [[ "$SERVICE_CHECKOUT_URL" == https://* ]] || { echo "Service checkout URL must use HTTPS"; exit 1; }
+          [[ -n "$SELAR_PRODUCT_ID" && -n "$SERVICE_PRODUCT_ID" && "$SELAR_PRODUCT_ID" != "$SERVICE_PRODUCT_ID" ]] || { echo "Use two distinct, non-empty Selar product codes"; exit 1; }
+          printf '%s' "$CONTACT_PRICE_NGN" | npx --yes wrangler@4 secret put CONTACT_PRICE_NGN --config contact-bot/wrangler.toml
+          printf '%s' "$SELAR_CHECKOUT_URL" | npx --yes wrangler@4 secret put SELAR_CHECKOUT_URL --config contact-bot/wrangler.toml
+          printf '%s' "$SELAR_PRODUCT_ID" | npx --yes wrangler@4 secret put SELAR_PRODUCT_ID --config contact-bot/wrangler.toml
+          printf '%s' "$SERVICE_PRICE_NGN" | npx --yes wrangler@4 secret put SERVICE_PRICE_NGN --config contact-bot/wrangler.toml
+          printf '%s' "$SERVICE_CHECKOUT_URL" | npx --yes wrangler@4 secret put SERVICE_CHECKOUT_URL --config contact-bot/wrangler.toml
+          printf '%s' "$SERVICE_PRODUCT_ID" | npx --yes wrangler@4 secret put SERVICE_PRODUCT_ID --config contact-bot/wrangler.toml
+
+      - name: Configure required Worker secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+          ADMIN_TELEGRAM_ID: ${{ secrets.ADMIN_TELEGRAM_ID }}
+          SELAR_WEBHOOK_SECRET: ${{ secrets.SELAR_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          for name in TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET ADMIN_TELEGRAM_ID SELAR_WEBHOOK_SECRET; do
+            value="${!name}"
+            test -n "$value" || { echo "Missing GitHub Actions secret: $name"; exit 1; }
+            printf '%s' "$value" | npx --yes wrangler@4 secret put "$name" --config contact-bot/wrangler.toml
+          done
+
+      - name: Connect Telegram webhook
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          test -n "$TELEGRAM_BOT_TOKEN" || { echo "Missing GitHub Actions secret TELEGRAM_BOT_TOKEN"; exit 1; }
+          test -n "$TELEGRAM_WEBHOOK_SECRET" || { echo "Missing GitHub Actions secret TELEGRAM_WEBHOOK_SECRET"; exit 1; }
+          subdomain="$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "https://api.cloudflare.com/client/v4/accounts/5f7678c82c50be845dba6bd8280bfae5/workers/scripts/fansleak-contact-bot/subdomain" | jq -er '.result.subdomain')"
+          test -n "$subdomain"
+          worker_url="https://fansleak-contact-bot.${subdomain}.workers.dev/telegram/webhook"
+          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+            --data-urlencode "url=$worker_url" \
+            --data-urlencode "secret_token=$TELEGRAM_WEBHOOK_SECRET" \
+            --data-urlencode "drop_pending_updates=false" | jq -e '.ok == true'

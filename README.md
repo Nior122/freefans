@@ -217,3 +217,10 @@ into the client JS, which is already the main bundle-size cost).
 Only add media you have the right to distribute — creator-supplied media kits, profiles the
 creator has submitted, or your own content. The importer never fetches anything; it only
 validates and writes JSON you provide.
+
+
+## Telegram contact requests
+
+The red **Message** button on each profile opens `@KasiQueenbot` with that profile's ID. The site build generates `public/contact-catalogue.json` from the visible profile records, so newly added profiles are included automatically on the next deployment. Optionally set `VITE_TELEGRAM_BOT_USERNAME` in Cloudflare Pages; it defaults to `KasiQueenbot`.
+
+The configurable bot Worker, Selar payment adapter, manual bank payment link, D1 schema, admin review flow and deployment instructions are in [`contact-bot/README.md`](contact-bot/README.md). The Worker must be separately deployed/configured; the website button alone does not activate payment processing.

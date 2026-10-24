@@ -40,11 +40,6 @@ export const ProfilePage = () => {
   // Live visitor counter
   const [visitorCount, setVisitorCount] = useState(() => Math.floor(Math.random() * 180) + 120);
 
-  // Flaunting button counts (generated once, stable per session)
-  const fmtK = (n: number) => n >= 1000 ? (n / 1000).toFixed(1) + 'K' : n.toString();
-  const [subCount]  = useState(() => fmtK(Math.floor(Math.random() * 60000) + 18000));
-  const [msgCount]  = useState(() => fmtK(Math.floor(Math.random() * 30000) + 8000));
-  const [callCount] = useState(() => fmtK(Math.floor(Math.random() * 20000) + 5000));
 
   // Social proof toast
   const NAMES = [
@@ -79,6 +74,8 @@ export const ProfilePage = () => {
   const REQUIRED_WAIT_MS = 4000; // 4 seconds
 
   const profile = profiles.find(p => p.id === id);
+  const telegramBotUsername = (import.meta.env.VITE_TELEGRAM_BOT_USERNAME || 'KasiQueenbot').trim().replace(/^@/, '');
+  const contactBotUrl = telegramBotUsername ? `https://t.me/${telegramBotUsername}?start=contact_${profile?.id ?? ''}` : undefined;
 
   if (!profile) return <Navigate to="/" replace />;
 
@@ -452,12 +449,12 @@ export const ProfilePage = () => {
 
         {/* Actions */}
         <div className="flex items-center gap-4 w-full max-w-sm justify-center mb-3">
-          <a href="https://t.me/+jrCwPGduIDoxN2Rk" target="_blank" rel="noopener noreferrer" className="animate-wobble flex-1 bg-red-700 hover:bg-red-600 text-white py-2 rounded-full font-bold text-base transition-colors shadow-lg shadow-red-900/40 flex flex-col items-center justify-center gap-0">
+          <a href={contactBotUrl ?? '#'} target="_blank" rel="noopener noreferrer" onClick={(event) => { if (!contactBotUrl) { event.preventDefault(); alert('Contact requests are being set up. Please try again later.'); } }} aria-label={`Request ${profile.name}'s contact through Telegram`} className="animate-wobble flex-1 bg-red-700 hover:bg-red-600 text-white py-2 rounded-full font-bold text-base transition-colors shadow-lg shadow-red-900/40 flex flex-col items-center justify-center gap-0">
             <div className="flex items-center gap-2">
               <MessageSquare size={18} />
-              <span>Subscribe</span>
+              <span>Message</span>
             </div>
-            <span className="text-[11px] font-semibold text-red-200 tracking-wide">{subCount} subscribers</span>
+            <span className="text-[11px] font-semibold text-red-200 tracking-wide">Request contact</span>
           </a>
           <button
             onClick={handleFavorite}
