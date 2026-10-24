@@ -121,7 +121,7 @@ async function startService(e: Env, m: Msg, serviceId: string) {
   if (active) return say(e, chat, "You already have a service order in progress. Finish it or contact support before starting another.");
   const id = crypto.randomUUID();
   await e.DB.prepare("INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,telegram_username,status) VALUES(?,?,?,?,?,'awaiting_request')").bind(id, serviceId, user, chat, m.from?.username ?? null).run();
-  return say(e, chat, "Welcome to the service purchase. Order: <code>" + id + "</code>\nPrice: <b>" + money(servicePrice(e)!) + "</b>\n\nBriefly describe the service or item you need (3–2,000 characters). Then I will collect your email and give you the Selar checkout link.");
+  return say(e, chat, "Hi! I’m the FansLeak AI assistant. Tell me what you need, and I’ll ask a few questions so I understand your request.\n\nOrder reference: <code>" + id + "</code>\n\nWhen you’re ready to purchase, type PAY. This Selar product has a fixed price of " + money(servicePrice(e)!) + ". No email is needed in this Telegram chat.");
 }
 
 async function message(e: Env, m: Msg) {
@@ -145,8 +145,8 @@ async function message(e: Env, m: Msg) {
     return say(e, chat, "Fulfilment sent to customer for order " + order.id);
   }
   if (user === e.ADMIN_TELEGRAM_ID && t === "/orders") {
-    const rows = await e.DB.prepare("SELECT id,service_id,buyer_email,status,request_text FROM service_orders WHERE status IN('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 20").all<any>();
-    return say(e, chat, (rows.results || []).map(r => r.id + " | " + r.service_id + " | " + (r.buyer_email || "-") + " | " + r.status + " | " + String(r.request_text || "").slice(0, 180)).join("\n") || "No service orders awaiting payment or fulfilment.");
+    const rows = await e.DB.prepare("SELECT id,service_id,telegram_username,telegram_user_id,status,CASE WHEN status='payment_verified' THEN substr(request_text,-180) ELSE 'Request hidden until payment is verified' END AS visible_request FROM service_orders WHERE status IN('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 20").all<any>();
+    return say(e, chat, (rows.results || []).map(r => r.id + " | " + r.service_id + " | @" + (r.telegram_username || "unknown") + " | Telegram " + r.telegram_user_id + " | " + r.status + " | " + String(r.visible_request || "")).join("\n") || "No service orders awaiting payment or fulfilment.");
   }
   if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/setcontact ")) {
     const [, id, handle] = t.split(/\s+/);
@@ -169,17 +169,35 @@ async function message(e: Env, m: Msg) {
     return say(e, chat, (rows.results || []).map(r => `${r.id} | ${r.profile_id} | ${r.buyer_email || "-"} | ${r.status}`).join("\n") || "No pending requests.");
   }
 
-  const serviceOrder = await e.DB.prepare("SELECT id,status FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email') ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
-  if (serviceOrder?.status === "awaiting_request") {
-    if (t.length < 3 || t.length > 2000) return say(e, chat, "Please describe what you need in 3–2,000 characters.");
-    await e.DB.prepare("UPDATE service_orders SET request_text=?,status='awaiting_email',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_request'").bind(t, serviceOrder.id).run();
-    return say(e, chat, "Request saved. Now send your email address for payment and order confirmation.");
-  }
-  if (serviceOrder?.status === "awaiting_email") {
-    if (!emailRe.test(t)) return say(e, chat, "Please send a valid email address. Never send passwords, PINs or OTPs.");
-    if (!servicePrice(e) || !e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || provider(e) !== "selar") return say(e, chat, "The service checkout is not configured yet. Please try again later.");
-    await e.DB.prepare("UPDATE service_orders SET buyer_email=?,status='pending_payment',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_email'").bind(t.toLowerCase(), serviceOrder.id).run();
-    return say(e, chat, "Order reference: <code>" + serviceOrder.id + "</code>\n\nService fee: <b>" + money(servicePrice(e)!) + "</b>. Pay using the Selar product link below and use the same email you provided. The bot will confirm a validated payment and notify the admin; service details will be sent here after fulfilment.\n\n" + esc(e.SERVICE_CHECKOUT_URL) + "\n\nNever send passwords, PINs or OTPs.");
+  const serviceOrder = await e.DB.prepare("SELECT id,status,request_text FROM service_orders WHERE telegram_user_id=? AND status='awaiting_request' ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
+  if (serviceOrder) {
+    if (/^\/?(pay|checkout|ready to pay)$/i.test(t)) {
+      const requestText = String(serviceOrder.request_text || "").trim();
+      if (requestText.length < 3) return say(e, chat, "First, tell me what you need so I can understand your request.");
+      if (!servicePrice(e) || !e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || provider(e) !== "selar") return say(e, chat, "The service checkout is not configured yet. Please try again later.");
+      await e.DB.prepare("UPDATE service_orders SET status='pending_payment',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_request'").bind(serviceOrder.id).run();
+      const checkout = new URL(e.SERVICE_CHECKOUT_URL);
+      checkout.searchParams.set("add_to_cart", "1");
+      return say(e, chat, "Your order reference is <code>" + serviceOrder.id + "</code>.\n\nThe price for this Selar product is <b>" + money(servicePrice(e)!) + "</b>. Open checkout below. In Selar’s custom checkout form, enter this order reference in the required field named <b>FansLeak order ID</b>. No email is needed in this Telegram chat; Selar may still request its standard checkout details.\n\n" + esc(checkout.toString()) + "\n\nI’ll notify you here after the payment is verified.");
+    }
+    if (t.length < 2 || t.length > 2000) return say(e, chat, "Please send a message between 2 and 2,000 characters.");
+    const previous = String(serviceOrder.request_text || "");
+    const updated = (previous + (previous ? "\nCustomer: " : "Customer: ") + t).slice(-8000);
+    await e.DB.prepare("UPDATE service_orders SET request_text=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_request'").bind(updated, serviceOrder.id).run();
+    if (!e.AI) return say(e, chat, "Thanks. Tell me a little more about what you need, or type PAY when you’re ready to purchase at " + money(servicePrice(e)!) + ".");
+    try {
+      const result = await e.AI.run(e.AI_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+        messages: [
+          { role: "system", content: "You are the FansLeak AI service assistant. Talk naturally and briefly with the customer to understand their service request. Ask one useful clarifying question at a time if needed. Do not ask for email, phone, passwords, PINs, OTPs, or sensitive payment information. Do not invent prices or promise that a service can be delivered. This Selar product has one fixed configured price; tell the customer they can type PAY when ready to purchase, and the bot will show the checkout. Never claim payment is complete. If the customer asks how much, say the fixed checkout price is " + money(servicePrice(e) || 0) + ". The order reference is " + serviceOrder.id + ". The conversation so far: " + updated.slice(-6000) },
+          { role: "user", content: t.slice(0, 1500) }
+        ]
+      });
+      const answer = String(result?.response || "").trim().slice(0, 2500);
+      return say(e, chat, answer || "Thanks. Tell me a little more about what you need, or type PAY when you’re ready to purchase at " + money(servicePrice(e)!) + ".");
+    } catch (err) {
+      console.error("AI service conversation failed", String(err));
+      return say(e, chat, "I saved your message. You can tell me more, or type PAY when you’re ready to purchase at " + money(servicePrice(e)!) + ".");
+    }
   }
   const req = await e.DB.prepare("SELECT id,status,profile_id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email') ORDER BY created_at DESC LIMIT 1").bind(user).first<{ id: string; status: string; profile_id: string }>();
   if (req?.status === "awaiting_email") {
@@ -240,18 +258,19 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   await say(e, r.telegram_chat_id, `Request approved. Creator contact: <b>${esc(c.contact_value)}</b>\n\nPlease respect the creator's boundaries.`);
   return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Approved and sent." });
 }
-type Sale = { reference: string; email: string; amountMinor: number; currency: string; productId: string; paymentStatus: string };
+type Sale = { reference: string; email: string; orderId: string; amountMinor: number; currency: string; productId: string; paymentStatus: string };
 function normalise(body: unknown): Sale | null {
   if (!body || typeof body !== "object") return null;
   const o = body as Record<string, any>;
   const reference = String(o.reference ?? o.transaction_reference ?? o.transactionReference ?? o.order_id ?? o.orderId ?? "").trim();
   const email = String(o.email ?? o.customer_email ?? o.customerEmail ?? o.customer?.email ?? "").trim().toLowerCase();
+  const orderId = String(o.order_id ?? o.orderId ?? o.fansleak_order_id ?? o.custom_fields?.fansleak_order_id ?? o.custom_fields?.["FansLeak order ID"] ?? o.checkout_form?.fansleak_order_id ?? "").trim();
   const raw = o.amount_minor ?? o.amountMinor ?? o.amount, amount = Number(raw), currency = String(o.currency ?? "").toUpperCase();
   const productId = String(o.product_id ?? o.productId ?? o.product ?? "").trim();
   const paymentStatus = String(o.payment_status ?? o.paymentStatus ?? o.status ?? "").trim().toLowerCase();
   // Fail closed: never infer currency or successful payment from a generic "New Sale" event.
-  if (!reference || !emailRe.test(email) || !Number.isFinite(amount) || amount <= 0 || !/^[A-Z]{3}$/.test(currency) || !productId || !["paid", "completed", "success", "successful"].includes(paymentStatus)) return null;
-  return { reference, email, amountMinor: o.amount_minor !== undefined || o.amountMinor !== undefined ? Math.round(amount) : Math.round(amount * 100), currency, productId, paymentStatus };
+  if (!reference || (!emailRe.test(email) && !orderId) || !Number.isFinite(amount) || amount <= 0 || !/^[A-Z]{3}$/.test(currency) || !productId || !["paid", "completed", "success", "successful"].includes(paymentStatus)) return null;
+  return { reference, email, orderId, amountMinor: o.amount_minor !== undefined || o.amountMinor !== undefined ? Math.round(amount) : Math.round(amount * 100), currency, productId, paymentStatus };
 }
 async function selar(request: Request, e: Env) {
   if (provider(e) !== "selar" || !methods(e).includes("selar")) return json({ error: "selar_is_not_enabled" }, 409);
@@ -263,15 +282,17 @@ async function selar(request: Request, e: Env) {
   if (s.currency !== "NGN") return json({ error: "unsupported_currency" }, 422);
   const kind: "contact" | "service" | null = s.productId === e.SELAR_PRODUCT_ID ? "contact" : s.productId === e.SERVICE_PRODUCT_ID ? "service" : null;
   if (!kind) return json({ error: "wrong_product" }, 422);
+  if (kind === "contact" && !emailRe.test(s.email)) return json({ error: "contact_sale_requires_buyer_email" }, 400);
+  if (kind === "service" && !/^[0-9a-f-]{36}$/i.test(s.orderId)) return json({ error: "service_sale_requires_fansleak_order_id", expected: "order_id from Selar's FansLeak order ID custom checkout field" }, 400);
   const p = kind === "contact" ? price(e) : servicePrice(e);
   if (!p) return json({ error: "product_price_not_configured" }, 503);
   if (s.amountMinor !== Math.round(p * 100)) return json({ error: "amount_mismatch" }, 422);
   if (await e.DB.prepare("SELECT provider_reference FROM processed_sales WHERE provider_reference=?").bind(s.reference).first()) return json({ ok: true, duplicate: true });
   const rows = kind === "contact"
     ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id FROM contact_requests WHERE buyer_email=? AND status='pending_payment' AND payment_method='selar' ORDER BY created_at DESC LIMIT 2").bind(s.email).all<any>()
-    : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text FROM service_orders WHERE buyer_email=? AND status='pending_payment' ORDER BY created_at DESC LIMIT 2").bind(s.email).all<any>();
+    : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id FROM service_orders WHERE id=? AND status='pending_payment' LIMIT 2").bind(s.orderId).all<any>();
   if (rows.results.length !== 1) {
-    await say(e, e.ADMIN_TELEGRAM_ID, `Selar sale ${esc(s.reference)} for ${esc(s.email)} matched ${rows.results.length} pending requests. No request unlocked; reconcile manually.`);
+    await say(e, e.ADMIN_TELEGRAM_ID, `Selar sale ${esc(s.reference)} for ${kind === "service" ? "FansLeak order " + esc(s.orderId) : esc(s.email)} matched ${rows.results.length} pending requests. No request unlocked; reconcile manually.`);
     return json({ ok: true, matched: false });
   }
   const target = rows.results[0];
@@ -285,7 +306,7 @@ async function selar(request: Request, e: Env) {
   } else {
     const result = await e.DB.prepare("UPDATE service_orders SET payment_method='selar',payment_reference=?,payment_amount_minor=?,payment_currency=?,status='payment_verified',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(s.reference, s.amountMinor, s.currency, target.id).run();
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_payment_confirmed',?,?)").bind(e.ADMIN_TELEGRAM_ID, target.id, "Validated Selar sale for second product").run();
-    await say(e, e.ADMIN_TELEGRAM_ID, "<b>Service payment confirmed</b>\nOrder: <code>" + target.id + "</code>\nService: " + esc(target.profile_id) + "\nBuyer: " + esc(s.email) + "\nAmount: " + money(s.amountMinor / 100) + "\nPayment reference: " + esc(s.reference) + "\nCustomer request: " + esc(String(target.request_text || "Not provided").slice(0, 600)) + "\n\nReply with: /deliver " + target.id + " your service details");
+    await say(e, e.ADMIN_TELEGRAM_ID, "<b>Service payment confirmed</b>\nOrder: <code>" + target.id + "</code>\nService: " + esc(target.profile_id) + "\nCustomer: @" + esc(target.telegram_username || "unknown") + " (Telegram ID " + esc(String(target.telegram_user_id)) + ")\nAmount: " + money(s.amountMinor / 100) + "\nPayment reference: " + esc(s.reference) + "\nCustomer request/conversation: " + esc(String(target.request_text || "Not provided").slice(-1800)) + "\n\nReply with: /deliver " + target.id + " your service details");
     await say(e, target.telegram_chat_id, "Payment confirmed for order <code>" + target.id + "</code>. The admin has been notified. Your service details will be sent here after fulfilment.");
   }
   return json({ ok: true, matched: true });
