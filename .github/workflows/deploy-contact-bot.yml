@@ -15,10 +15,6 @@ on:
         description: "Exact Selar product ID"
         required: true
         type: string
-      bank_payment_url:
-        description: "Bank payment instructions/link"
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -52,13 +48,11 @@ jobs:
           CONTACT_PRICE_NGN: ${{ inputs.contact_price_ngn }}
           SELAR_CHECKOUT_URL: ${{ inputs.selar_checkout_url }}
           SELAR_PRODUCT_ID: ${{ inputs.selar_product_id }}
-          BANK_PAYMENT_URL: ${{ inputs.bank_payment_url }}
         run: |
           set -euo pipefail
           printf '%s' "$CONTACT_PRICE_NGN" | npx --yes wrangler@4 secret put CONTACT_PRICE_NGN --config contact-bot/wrangler.toml
           printf '%s' "$SELAR_CHECKOUT_URL" | npx --yes wrangler@4 secret put SELAR_CHECKOUT_URL --config contact-bot/wrangler.toml
           printf '%s' "$SELAR_PRODUCT_ID" | npx --yes wrangler@4 secret put SELAR_PRODUCT_ID --config contact-bot/wrangler.toml
-          printf '%s' "$BANK_PAYMENT_URL" | npx --yes wrangler@4 secret put BANK_PAYMENT_URL --config contact-bot/wrangler.toml
 
       - name: Configure required Worker secrets
         env:
