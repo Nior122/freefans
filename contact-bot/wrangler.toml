@@ -5,7 +5,7 @@ compatibility_date = "2026-10-24"
 [[d1_databases]]
 binding = "DB"
 database_name = "fansleak-contact-requests"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "f22e4f55-9db6-4bb8-a328-8547ff79523f"
 
 [vars]
 SITE_URL = "https://fansleak.pages.dev"
