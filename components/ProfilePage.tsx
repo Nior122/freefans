@@ -79,6 +79,10 @@ export const ProfilePage = () => {
   const REQUIRED_WAIT_MS = 4000; // 4 seconds
 
   const profile = profiles.find(p => p.id === id);
+  const telegramBotUsername = (import.meta.env.VITE_TELEGRAM_BOT_USERNAME || '').trim().replace(/^@/, '');
+  const contactBotUrl = telegramBotUsername
+    ? `https://t.me/${telegramBotUsername}?start=contact_${profile?.id ?? ''}`
+    : undefined;
 
   if (!profile) return <Navigate to="/" replace />;
 
@@ -482,9 +486,16 @@ export const ProfilePage = () => {
         </nav>
         <div className="flex items-center gap-3 w-full max-w-sm justify-center mb-4">
           <a
-            href="https://t.me/bp00ty"
+            href={contactBotUrl ?? '#'}
             target="_blank"
             rel="noopener noreferrer"
+            onClick={(event) => {
+              if (!contactBotUrl) {
+                event.preventDefault();
+                alert('Contact requests are being set up. Please try again later.');
+              }
+            }}
+            aria-label={`Request ${profile.name}'s contact through Telegram`}
             className="animate-zoom-in flex-1 bg-[#1a1a1a] hover:bg-[#252525] border border-gray-700 hover:border-gray-500 text-white py-2 rounded-full font-bold text-base transition-colors flex flex-col items-center justify-center gap-0"
           >
             <div className="flex items-center gap-2">

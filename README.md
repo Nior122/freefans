@@ -27,8 +27,9 @@ npm run server    # Express API only
 | `SITE_URL` | Public base URL (no trailing slash) used to build absolute URLs in `sitemap.xml` / `robots.txt`, set to `https://fansleak.pages.dev`. **Set this in Cloudflare Pages.** |
 | `AI_INTEGRATIONS_GEMINI_API_KEY` | Gemini API key for the bio generator (optional) |
 | `AI_INTEGRATIONS_GEMINI_BASE_URL` | Gemini base URL (optional) |
+| `VITE_TELEGRAM_BOT_USERNAME` | Telegram bot username without the `@`. Used by each profile's Message button to open the bot with that profile's ID, e.g. `https://t.me/YourBot?start=contact_creator_slug`. **Set this in Cloudflare Pages before enabling contact requests.** |
 
-See `.env.example`.
+See `.env.example`. The Telegram username is a Vite build-time variable; set it in Cloudflare Pages and redeploy for the profile Message buttons to use the bot.
 
 ## SEO / Google Search Console
 
