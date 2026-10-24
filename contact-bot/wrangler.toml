@@ -14,5 +14,5 @@ database_id = "f22e4f55-9db6-4bb8-a328-8547ff79523f"
 [vars]
 SITE_URL = "https://fansleak.pages.dev"
 PAYMENT_PROVIDER = "selar"
-PAYMENT_METHODS = "selar,bank"
+PAYMENT_METHODS = "selar"
 AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
