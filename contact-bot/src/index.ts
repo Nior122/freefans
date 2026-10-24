@@ -284,14 +284,10 @@ async function selar(request: Request, e: Env) {
   try { body = await request.json(); } catch { return json({ error: "invalid_json" }, 400); }
   const s = normalise(body, (e.SERVICE_ORDER_FIELD_NAME || "").trim());
   if (!s) return json({ error: "invalid_sale_payload", expected: ["reference", "email", "amount", "currency", "product_id", "payment_status"] }, 400);
-  if (s.currency !== "NGN") return json({ error: "unsupported_currency" }, 422);
   const kind: "contact" | "service" | null = s.productId === e.SELAR_PRODUCT_ID ? "contact" : s.productId === e.SERVICE_PRODUCT_ID ? "service" : null;
   if (!kind) return json({ error: "wrong_product" }, 422);
   if (kind === "contact" && !emailRe.test(s.email)) return json({ error: "contact_sale_requires_buyer_email" }, 400);
   if (kind === "service" && !/^[0-9a-f-]{36}$/i.test(s.orderId)) return json({ error: "service_sale_requires_fans_order_id", expected: "order_id mapped from Selar's configured Fans order ID custom checkout field" }, 400);
-  const p = kind === "contact" ? price(e) : servicePrice(e);
-  if (!p) return json({ error: "product_price_not_configured" }, 503);
-  if (s.amountMinor !== Math.round(p * 100)) return json({ error: "amount_mismatch" }, 422);
   if (await e.DB.prepare("SELECT provider_reference FROM processed_sales WHERE provider_reference=?").bind(s.reference).first()) return json({ ok: true, duplicate: true });
   const rows = kind === "contact"
     ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id FROM contact_requests WHERE buyer_email=? AND status='pending_payment' AND payment_method='selar' ORDER BY created_at DESC LIMIT 2").bind(s.email).all<any>()
