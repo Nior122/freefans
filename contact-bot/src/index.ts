@@ -145,8 +145,8 @@ async function message(e: Env, m: Msg) {
     return say(e, chat, "Fulfilment sent to customer for order " + order.id);
   }
   if (user === e.ADMIN_TELEGRAM_ID && t === "/orders") {
-    const rows = await e.DB.prepare("SELECT id,service_id,buyer_email,status FROM service_orders WHERE status IN('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 20").all<any>();
-    return say(e, chat, (rows.results || []).map(r => r.id + " | " + r.service_id + " | " + (r.buyer_email || "-") + " | " + r.status).join("\n") || "No service orders awaiting payment or fulfilment.");
+    const rows = await e.DB.prepare("SELECT id,service_id,buyer_email,status,request_text FROM service_orders WHERE status IN('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 20").all<any>();
+    return say(e, chat, (rows.results || []).map(r => r.id + " | " + r.service_id + " | " + (r.buyer_email || "-") + " | " + r.status + " | " + String(r.request_text || "").slice(0, 180)).join("\n") || "No service orders awaiting payment or fulfilment.");
   }
   if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/setcontact ")) {
     const [, id, handle] = t.split(/\s+/);
@@ -269,7 +269,7 @@ async function selar(request: Request, e: Env) {
   if (await e.DB.prepare("SELECT provider_reference FROM processed_sales WHERE provider_reference=?").bind(s.reference).first()) return json({ ok: true, duplicate: true });
   const rows = kind === "contact"
     ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id FROM contact_requests WHERE buyer_email=? AND status='pending_payment' AND payment_method='selar' ORDER BY created_at DESC LIMIT 2").bind(s.email).all<any>()
-    : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id FROM service_orders WHERE buyer_email=? AND status='pending_payment' ORDER BY created_at DESC LIMIT 2").bind(s.email).all<any>();
+    : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text FROM service_orders WHERE buyer_email=? AND status='pending_payment' ORDER BY created_at DESC LIMIT 2").bind(s.email).all<any>();
   if (rows.results.length !== 1) {
     await say(e, e.ADMIN_TELEGRAM_ID, `Selar sale ${esc(s.reference)} for ${esc(s.email)} matched ${rows.results.length} pending requests. No request unlocked; reconcile manually.`);
     return json({ ok: true, matched: false });
@@ -285,7 +285,7 @@ async function selar(request: Request, e: Env) {
   } else {
     const result = await e.DB.prepare("UPDATE service_orders SET payment_method='selar',payment_reference=?,payment_amount_minor=?,payment_currency=?,status='payment_verified',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(s.reference, s.amountMinor, s.currency, target.id).run();
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_payment_confirmed',?,?)").bind(e.ADMIN_TELEGRAM_ID, target.id, "Validated Selar sale for second product").run();
-    await say(e, e.ADMIN_TELEGRAM_ID, "<b>Service payment confirmed</b>\\nOrder: <code>" + target.id + "</code>\\nService: " + esc(target.profile_id) + "\\nBuyer: " + esc(s.email) + "\\nAmount: " + money(s.amountMinor / 100) + "\\nPayment reference: " + esc(s.reference) + "\\n\\nReply with: /deliver " + target.id + " your service details");
+    await say(e, e.ADMIN_TELEGRAM_ID, "<b>Service payment confirmed</b>\\nOrder: <code>" + target.id + "</code>\\nService: " + esc(target.profile_id) + "\\nBuyer: " + esc(s.email) + "\\nAmount: " + money(s.amountMinor / 100) + "\\nPayment reference: " + esc(s.reference) + "\\nCustomer request: " + esc(String(target.request_text || "Not provided")) + "\\n\\nReply with: /deliver " + target.id + " your service details");
     await say(e, target.telegram_chat_id, "Payment confirmed for order <code>" + target.id + "</code>. The admin has been notified. Your service details will be sent here after fulfilment.");
   }
   return json({ ok: true, matched: true });
