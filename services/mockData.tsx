@@ -57,6 +57,8 @@ import belledelphineData from './belledelphineData.json';
 import sweetiefoxData from './sweetiefoxData.json';
 import bigtittygotheggData from './bigtittygotheggData.json';
 import imsadspiceData from './imsadspiceData.json';
+import sierralisabethData from './sierralisabethData.json';
+import yellz00Data from './yellz00Data.json';
 
 // Subset of data for demo purposes from the Belle Delphine dataset
 const BELLE_FULL_DATA = [
@@ -5481,6 +5483,18 @@ const BIGTITTYGOTHEGG_IMAGES: Image[] = (bigtittygotheggData as any[]).map((item
 
 // imsadspice (coomer.st) — 200 images imported from coomer.st/onlyfans/user/imsadspice
 const IMSADSPICE_IMAGES: Image[] = (imsadspiceData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+// sierralisabeth (coomer.st) — 200 images imported from coomer.st/onlyfans/user/sierralisabeth
+const SIERRA_LISABETH_IMAGES: Image[] = (sierralisabethData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+// yellz00 (coomer.st) — 200 images imported from coomer.st/onlyfans/user/yellz00
+const YELLZ00_IMAGES: Image[] = (yellz00Data as any[]).map((item) => ({
   ...item,
   mediaType: item.mediaType as MediaType
 }));
@@ -11895,6 +11909,46 @@ const PROFILES: Profile[] = [
       likes: 43483,
       views: 600000,
       followers: 18000
+    },
+    isVerified: true,
+    isVisible: true,
+    pricePerMonth: 19.99
+  },
+  {
+    id: 'sierralisabeth',
+    name: 'Sierra Lisabeth',
+    handle: '@sierralisabeth',
+    bio: 'Exclusive content from Sierra Lisabeth. Join for the most captivating and premium experiences.',
+    avatarUrl: 'https://img.coomer.st/thumbnail/data/3d/38/3d38cbdc332f8f69be5377f8328518367043f724b12539486edd7f5949783848.jpg',
+    heroUrl: 'https://img.coomer.st/thumbnail/data/ef/79/ef792c4dda9e9f4ec58ffad631d92e880f4ae9cd7834a3b51e54ae17a1ce0fd8.jpg',
+    tags: ['onlyfans', 'premium', 'exclusive', 'adult'],
+    category: 'OnlyFans',
+    images: SIERRA_LISABETH_IMAGES,
+    stats: {
+      posts: SIERRA_LISABETH_IMAGES.length,
+      likes: 40017,
+      views: 700000,
+      followers: 22000
+    },
+    isVerified: true,
+    isVisible: true,
+    pricePerMonth: 19.99
+  },
+  {
+    id: 'yellz00',
+    name: 'Yellz00',
+    handle: '@yellz00',
+    bio: 'OnlyFans creator sharing exclusive premium content.',
+    avatarUrl: 'https://img.coomer.st/thumbnail/data/6a/1f/6a1f212a81c759de38cd7484dfc3a8a946c11c35a4364fe3abce3fc5e4f9038f.jpg',
+    heroUrl: 'https://img.coomer.st/thumbnail/data/ee/a9/eea954c44b04181c9fa1d95c72729923afe9f4bdd06cf530adc0d43e853c31d1.jpg',
+    tags: ['onlyfans', 'premium', 'exclusive', 'adult'],
+    category: 'OnlyFans',
+    images: YELLZ00_IMAGES,
+    stats: {
+      posts: YELLZ00_IMAGES.length,
+      likes: 36954,
+      views: 500000,
+      followers: 15000
     },
     isVerified: true,
     isVisible: true,
