@@ -15,6 +15,7 @@ export interface Env {
   SERVICE_PRICE_NGN?: string;
   SERVICE_CHECKOUT_URL?: string;
   SERVICE_PRODUCT_ID?: string;
+  SERVICE_ORDER_FIELD_NAME?: string;
   PAYMENT_PROVIDER?: string;
   PAYMENT_METHODS?: string;
   SITE_URL?: string;
@@ -110,9 +111,9 @@ async function aiReply(e: Env, chat: string, userText: string, reminder = "") {
 async function startService(e: Env, m: Msg, serviceId: string) {
   const chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(serviceId)) return say(e, chat, "Invalid service purchase link.");
-  if (!servicePrice(e) || !e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || provider(e) !== "selar") {
+  if (!servicePrice(e) || !e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || !e.SERVICE_ORDER_FIELD_NAME?.trim() || provider(e) !== "selar") {
     await say(e, chat, "This service purchase is not accepting orders yet. Please try again later.");
-    await say(e, e.ADMIN_TELEGRAM_ID, "Service purchase setup required: configure SERVICE_PRICE_NGN, SERVICE_CHECKOUT_URL and SERVICE_PRODUCT_ID.");
+    await say(e, e.ADMIN_TELEGRAM_ID, "Service purchase setup required: configure SERVICE_PRICE_NGN, SERVICE_CHECKOUT_URL, SERVICE_PRODUCT_ID and SERVICE_ORDER_FIELD_NAME.");
     return;
   }
   const activeContact = await e.DB.prepare("SELECT id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
@@ -174,11 +175,11 @@ async function message(e: Env, m: Msg) {
     if (/^\/?(pay|checkout|ready to pay)$/i.test(t)) {
       const requestText = String(serviceOrder.request_text || "").trim();
       if (requestText.length < 3) return say(e, chat, "First, tell me what you need so I can understand your request.");
-      if (!servicePrice(e) || !e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || provider(e) !== "selar") return say(e, chat, "The service checkout is not configured yet. Please try again later.");
+      if (!servicePrice(e) || !e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || !e.SERVICE_ORDER_FIELD_NAME?.trim() || provider(e) !== "selar") return say(e, chat, "The service checkout is not configured yet. Please try again later.");
       await e.DB.prepare("UPDATE service_orders SET status='pending_payment',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_request'").bind(serviceOrder.id).run();
       const checkout = new URL(e.SERVICE_CHECKOUT_URL);
       checkout.searchParams.set("add_to_cart", "1");
-      return say(e, chat, "Your order reference is <code>" + serviceOrder.id + "</code>.\n\nThe price for this Selar product is <b>" + money(servicePrice(e)!) + "</b>. Open checkout below. In Selar’s custom checkout form, enter this order reference in the required field named <b>FansLeak order ID</b>. No email is needed in this Telegram chat; Selar may still request its standard checkout details.\n\n" + esc(checkout.toString()) + "\n\nI’ll notify you here after the payment is verified.");
+      return say(e, chat, "Your order reference is <code>" + serviceOrder.id + "</code>.\n\nThe price for this Selar product is <b>" + money(servicePrice(e)!) + "</b>. Open checkout below. In Selar’s custom checkout form, enter this order reference in the required field named <b>${esc(e.SERVICE_ORDER_FIELD_NAME!.trim())}</b>. No email is needed in this Telegram chat; Selar may still request its standard checkout details.\n\n" + esc(checkout.toString()) + "\n\nI’ll notify you here after the payment is verified.");
     }
     if (t.length < 2 || t.length > 2000) return say(e, chat, "Please send a message between 2 and 2,000 characters.");
     const previous = String(serviceOrder.request_text || "");
@@ -263,12 +264,12 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Approved and sent." });
 }
 type Sale = { reference: string; email: string; orderId: string; amountMinor: number; currency: string; productId: string; paymentStatus: string };
-function normalise(body: unknown): Sale | null {
+function normalise(body: unknown, orderFieldName: string): Sale | null {
   if (!body || typeof body !== "object") return null;
   const o = body as Record<string, any>;
-  const reference = String(o.reference ?? o.transaction_reference ?? o.transactionReference ?? o.order_id ?? o.orderId ?? "").trim();
+  const reference = String(o.reference ?? o.transaction_reference ?? o.transactionReference ?? o.sale_reference ?? o.saleReference ?? "").trim();
   const email = String(o.email ?? o.customer_email ?? o.customerEmail ?? o.customer?.email ?? "").trim().toLowerCase();
-  const orderId = String(o.order_id ?? o.orderId ?? o.fansleak_order_id ?? o.custom_fields?.fansleak_order_id ?? o.custom_fields?.["FansLeak order ID"] ?? o.checkout_form?.fansleak_order_id ?? "").trim();
+  const orderId = String(o.fans_order_id ?? o.fansOrderId ?? o.order_id ?? o.custom_fields?.[orderFieldName] ?? o.checkout_form?.[orderFieldName] ?? "").trim();
   const raw = o.amount_minor ?? o.amountMinor ?? o.amount, amount = Number(raw), currency = String(o.currency ?? "").toUpperCase();
   const productId = String(o.product_id ?? o.productId ?? o.product ?? "").trim();
   const paymentStatus = String(o.payment_status ?? o.paymentStatus ?? o.status ?? "").trim().toLowerCase();
@@ -281,13 +282,13 @@ async function selar(request: Request, e: Env) {
   if (!e.SELAR_WEBHOOK_SECRET || !safeEq(request.headers.get("x-selar-webhook-secret") || "", e.SELAR_WEBHOOK_SECRET)) return json({ error: "unauthorised" }, 401);
   let body: unknown;
   try { body = await request.json(); } catch { return json({ error: "invalid_json" }, 400); }
-  const s = normalise(body);
+  const s = normalise(body, (e.SERVICE_ORDER_FIELD_NAME || "").trim());
   if (!s) return json({ error: "invalid_sale_payload", expected: ["reference", "email", "amount", "currency", "product_id", "payment_status"] }, 400);
   if (s.currency !== "NGN") return json({ error: "unsupported_currency" }, 422);
   const kind: "contact" | "service" | null = s.productId === e.SELAR_PRODUCT_ID ? "contact" : s.productId === e.SERVICE_PRODUCT_ID ? "service" : null;
   if (!kind) return json({ error: "wrong_product" }, 422);
   if (kind === "contact" && !emailRe.test(s.email)) return json({ error: "contact_sale_requires_buyer_email" }, 400);
-  if (kind === "service" && !/^[0-9a-f-]{36}$/i.test(s.orderId)) return json({ error: "service_sale_requires_fansleak_order_id", expected: "order_id from Selar's FansLeak order ID custom checkout field" }, 400);
+  if (kind === "service" && !/^[0-9a-f-]{36}$/i.test(s.orderId)) return json({ error: "service_sale_requires_fans_order_id", expected: "order_id mapped from Selar's configured Fans order ID custom checkout field" }, 400);
   const p = kind === "contact" ? price(e) : servicePrice(e);
   if (!p) return json({ error: "product_price_not_configured" }, 503);
   if (s.amountMinor !== Math.round(p * 100)) return json({ error: "amount_mismatch" }, 422);
