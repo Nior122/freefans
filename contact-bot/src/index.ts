@@ -142,7 +142,7 @@ async function message(e: Env, m: Msg) {
     return say(e, chat, `Your transfer reference has been sent to the admin for manual checking. Request: <code>${req.id}</code>. Access is not granted until the payment is verified and the request is approved.`);
   }
   if (req?.status === "awaiting_email") {
-    if (!emailRe.test(t)) return say(e, chat, "Please send a valid email address to associate with your payment request.");
+    if (!emailRe.test(t)) return aiReply(e, chat, t, "Please send a valid email address to associate with your payment request. Never send passwords, PINs or OTPs.");
     await e.DB.prepare("UPDATE contact_requests SET buyer_email=?,status='pending_payment',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_email'").bind(t.toLowerCase(), req.id).run();
     return say(e, chat, `Request reference: <code>${req.id}</code>\n\nFee: <b>${money(price(e)!)}</b>\nChoose how you want to pay:`, paymentKeyboard(e, req.id));
   }
