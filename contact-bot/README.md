@@ -12,8 +12,9 @@ One Telegram bot, two separate Selar products, and two distinct customer journey
 
 2. **Second service/product purchase:** `https://t.me/KasiQueenbot?start=service_SERVICE_ID`
    - The service ID identifies the second link; no product menu is shown.
-   - The bot collects the customer's request and email, then provides the second product's Selar checkout URL and price.
-   - A validated sale event must match the second product code and exact NGN amount. The bot marks the order paid and notifies the admin and customer.
+   - The AI chats with the customer to understand their request, asks clarifying questions, and shows the configured fixed price when the customer types `PAY`. No email is collected in Telegram.
+   - The checkout message includes a unique FansLeak order ID. Configure a required Selar custom checkout field named **FansLeak order ID** and have the trusted webhook adapter pass that field as `order_id` to this Worker. Selar may still request its standard checkout details separately.
+   - A validated sale event must match the second product code, exact NGN amount, and exact pending FansLeak order ID. The bot marks that order paid and notifies the admin and customer. Unpaid request text is hidden from `/orders` and is not sent to the admin.
    - The admin sends fulfilment using `/deliver ORDER_ID service details`. The bot forwards those details to the Telegram chat attached to that order and marks it fulfilled. `/deliver` refuses orders that are not payment-verified.
 
 ## Selar configuration
@@ -24,9 +25,9 @@ Selar is the same payment provider for both products, but each product has its o
 - Second product: `SERVICE_PRICE_NGN`, `SERVICE_CHECKOUT_URL`, `SERVICE_PRODUCT_ID`
 - Shared: `SELAR_WEBHOOK_SECRET`
 
-Do not assume a URL slug is the provider's actual product identifier without checking the real Selar event. The webhook expects a trusted forwarding integration to send a normalized payload to `POST /webhooks/selar` with `X-Selar-Webhook-Secret`. The payload must contain a unique sale reference, buyer email, amount, currency, product code, and an authoritative successful-payment status. A generic “New Sale” event without trustworthy status must not be treated as proof of payment. If a sale matches zero or multiple pending orders, no order is unlocked; the admin is notified for reconciliation.
+Do not assume a URL slug is the provider's actual product identifier without checking the real Selar event. The webhook expects a trusted forwarding integration to send a normalized payload to `POST /webhooks/selar` with `X-Selar-Webhook-Secret`. The normalized contact-sale payload must contain a unique sale reference, buyer email, amount, currency, product code, and an authoritative successful-payment status. The normalized service-sale payload must contain a unique sale reference, the `FansLeak order ID` custom field mapped to `order_id`, amount, currency, product code, and an authoritative successful-payment status; service-sale matching does not depend on email. A generic “New Sale” event without trustworthy status must not be treated as proof of payment. If a sale matches zero or multiple pending orders, no order is unlocked; the admin is notified for reconciliation.
 
-The contact and service workflows share the Selar webhook but are separated by exact product code and price. Contact payments continue through the contact verification/approval process; service purchases use the separate order table and fulfilment process.
+The contact and service workflows share the Selar webhook but are separated by exact product code and price. Contact payments continue through the contact verification/approval process; service purchases use the separate order table and fulfilment process. The raw Selar custom-field payload mapping still must be verified against a real test sale before launch; until then, missing/unrecognized order IDs fail closed and no service request is released.
 
 ## Admin commands
 
