@@ -193,6 +193,10 @@ async function message(e: Env, m: Msg) {
         ]
       });
       const answer = String(result?.response || "").trim().slice(0, 2500);
+      if (answer) {
+        const transcript = (updated + "\nAssistant: " + answer).slice(-8000);
+        await e.DB.prepare("UPDATE service_orders SET request_text=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_request'").bind(transcript, serviceOrder.id).run();
+      }
       return say(e, chat, answer || "Thanks. Tell me a little more about what you need, or type PAY when you’re ready to purchase at " + money(servicePrice(e)!) + ".");
     } catch (err) {
       console.error("AI service conversation failed", String(err));
