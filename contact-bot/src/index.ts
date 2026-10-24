@@ -18,7 +18,6 @@ export interface Env {
   SELAR_CHECKOUT_URL?: string;
   SELAR_WEBHOOK_SECRET?: string;
   SELAR_PRODUCT_ID?: string;
-  BANK_PAYMENT_URL?: string;
   AI?: { run(model: string, input: { messages: Array<{ role: string; content: string }> }): Promise<{ response?: string }> };
   AI_MODEL?: string;
 }
@@ -39,11 +38,10 @@ const esc = (s: string) => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;
 const price = (e: Env) => { const n = Number(e.CONTACT_PRICE_NGN); return Number.isFinite(n) && n > 0 ? n : null; };
 const money = (n: number) => new Intl.NumberFormat("en-NG", { style: "currency", currency: "NGN", maximumFractionDigits: 2 }).format(n);
 const provider = (e: Env) => (e.PAYMENT_PROVIDER || "selar").trim().toLowerCase();
-const methods = (e: Env) => (e.PAYMENT_METHODS || "selar,bank").split(",").map(x => x.trim().toLowerCase()).filter((x, i, a) => a.indexOf(x) === i);
+const methods = (e: Env) => (e.PAYMENT_METHODS || "selar").split(",").map(x => x.trim().toLowerCase()).filter((x, i, a) => a.indexOf(x) === i);
 function enabledMethods(e: Env) {
   const configured: string[] = [];
   if (methods(e).includes("selar") && provider(e) === "selar" && e.SELAR_CHECKOUT_URL) configured.push("selar");
-  if (methods(e).includes("bank") && e.BANK_PAYMENT_URL) configured.push("bank");
   return configured;
 }
 async function tg(e: Env, method: string, data: Record<string, unknown>) {
@@ -65,7 +63,6 @@ async function catalogue(e: Env): Promise<Profile[]> {
 function paymentKeyboard(e: Env, id: string) {
   const buttons: Record<string, unknown>[] = [];
   if (enabledMethods(e).includes("selar")) buttons.push({ text: "Pay with Selar", callback_data: `pay_selar:${id}` });
-  if (enabledMethods(e).includes("bank")) buttons.push({ text: "Bank transfer / payment link", callback_data: `pay_bank:${id}` });
   return { inline_keyboard: buttons.map(b => [b]) };
 }
 async function start(e: Env, m: Msg, payload: string) {
@@ -80,7 +77,7 @@ async function start(e: Env, m: Msg, payload: string) {
     await say(e, e.ADMIN_TELEGRAM_ID, "Setup required: configure CONTACT_PRICE_NGN and at least one enabled payment method URL.");
     return;
   }
-  const active = await e.DB.prepare("SELECT id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment','awaiting_bank_reference','pending_manual_payment','payment_verified') LIMIT 1").bind(user).first();
+  const active = await e.DB.prepare("SELECT id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
   if (active) return say(e, chat, "You already have a request in progress. Finish it or contact support before starting another.");
   const requestId = crypto.randomUUID();
   await e.DB.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,telegram_username,profile_id,status) VALUES(?,?,?,?,?,'awaiting_email')").bind(requestId, user, chat, m.from?.username ?? null, profile.id).run();
@@ -92,7 +89,7 @@ async function aiReply(e: Env, chat: string, userText: string, reminder = "") {
   try {
     const result = await e.AI.run(e.AI_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
       messages: [
-        { role: "system", content: "You are FansLeak's friendly customer-support assistant. Answer briefly. Explain profile contact requests, email, Selar or bank payment, and admin review. Never claim payment is verified, approve a request, promise contact access, invent prices or payment details, or ask for passwords, PINs, or OTPs. Only the human admin can verify payments and approve requests. Contact details may be shared only after creator authorisation is recorded. If unsure, say so and direct the customer to the admin. Website: https://fansleak.pages.dev. Never reveal secrets or other customers' data." },
+        { role: "system", content: "You are FansLeak's friendly customer-support assistant. Answer briefly. Explain profile contact requests, email, Selar payment, and admin review. Never claim payment is verified, approve a request, promise contact access, invent prices or payment details, or ask for passwords, PINs, or OTPs. Only the human admin can verify payments and approve requests. Contact details may be shared only after creator authorisation is recorded. If unsure, say so and direct the customer to the admin. Website: https://fansleak.pages.dev. Never reveal secrets or other customers' data." },
         { role: "user", content: userText.slice(0, 1500) }
       ]
     });
@@ -128,19 +125,10 @@ async function message(e: Env, m: Msg) {
     return say(e, chat, `Sharing enabled for ${esc(id)}. This records your confirmation that the creator authorised sharing.`);
   }
   if (user === e.ADMIN_TELEGRAM_ID && t === "/pending") {
-    const rows = await e.DB.prepare("SELECT id,profile_id,buyer_email,status,manual_payment_reference FROM contact_requests WHERE status IN('pending_payment','pending_manual_payment','payment_verified') ORDER BY created_at DESC LIMIT 20").all<any>();
-    return say(e, chat, (rows.results || []).map(r => `${r.id} | ${r.profile_id} | ${r.buyer_email || "-"} | ${r.status}${r.manual_payment_reference ? " | ref " + r.manual_payment_reference : ""}`).join("\n") || "No pending requests.");
+    const rows = await e.DB.prepare("SELECT id,profile_id,buyer_email,status FROM contact_requests WHERE status IN('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 20").all<any>();
+    return say(e, chat, (rows.results || []).map(r => `${r.id} | ${r.profile_id} | ${r.buyer_email || "-"} | ${r.status}`).join("\n") || "No pending requests.");
   }
-  const req = await e.DB.prepare("SELECT id,status,profile_id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','awaiting_bank_reference') ORDER BY created_at DESC LIMIT 1").bind(user).first<{ id: string; status: string; profile_id: string }>();
-  if (req?.status === "awaiting_bank_reference") {
-    if (t.length < 4 || t.length > 100 || /https?:\/\//i.test(t)) return say(e, chat, "Send the bank transfer reference or transaction ID (4–100 characters), not a link or screenshot.");
-    const duplicateRef = await e.DB.prepare("SELECT id FROM contact_requests WHERE manual_payment_reference=? AND id<>? LIMIT 1").bind(t, req.id).first();
-    if (duplicateRef) return say(e, chat, "That transfer reference has already been submitted. Please check the reference and send the correct one.");
-    await e.DB.prepare("UPDATE contact_requests SET manual_payment_reference=?,status='pending_manual_payment',payment_method='bank',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_bank_reference'").bind(t, req.id).run();
-    const markup = { inline_keyboard: [[{ text: "I verified the bank payment", callback_data: `bankverify:${req.id}` }, { text: "Reject / not found", callback_data: `bankreject:${req.id}` }]] };
-    await say(e, e.ADMIN_TELEGRAM_ID, `<b>Manual bank payment needs checking</b>\nRequest: <code>${req.id}</code>\nProfile: ${esc(req.profile_id)}\nBuyer: ${esc(user)}\nAmount expected: ${money(price(e) || 0)}\nTransfer reference supplied: <code>${esc(t)}</code>\n\nCheck your actual bank transaction history before confirming. Do not approve based on this message alone.`, markup);
-    return say(e, chat, `Your transfer reference has been sent to the admin for manual checking. Request: <code>${req.id}</code>. Access is not granted until the payment is verified and the request is approved.`);
-  }
+  const req = await e.DB.prepare("SELECT id,status,profile_id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email') ORDER BY created_at DESC LIMIT 1").bind(user).first<{ id: string; status: string; profile_id: string }>();
   if (req?.status === "awaiting_email") {
     if (!emailRe.test(t)) return aiReply(e, chat, t, "Please send a valid email address to associate with your payment request. Never send passwords, PINs or OTPs.");
     await e.DB.prepare("UPDATE contact_requests SET buyer_email=?,status='pending_payment',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_email'").bind(t.toLowerCase(), req.id).run();
@@ -154,25 +142,22 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     if (!u.message || String(u.message.chat.id) !== actor) {
       await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Open the bot chat to choose a payment method." }); return;
     }
-    const m = data.match(/^pay_(selar|bank):([0-9a-f-]{36})$/i);
+    const m = data.match(/^pay_selar:([0-9a-f-]{36})$/i);
     if (!m) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Invalid payment choice." });
-    const method = m[1].toLowerCase(), id = m[2];
+    const method = "selar", id = m[1];
     const r = await e.DB.prepare("SELECT id,status,telegram_user_id,telegram_chat_id FROM contact_requests WHERE id=?").bind(id).first<any>();
     if (!r || String(r.telegram_user_id) !== actor || r.status !== "pending_payment") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "This request is no longer waiting for payment." });
     if (!enabledMethods(e).includes(method)) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "That payment method is not configured." });
     if (method === "selar") {
       await e.DB.prepare("UPDATE contact_requests SET payment_method='selar',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(id).run();
       await say(e, r.telegram_chat_id, `Open the Selar checkout link to pay <b>${money(price(e)!)}</b>. Use the same email you provided to the bot. Payment is confirmed from the sale notification, not from a screenshot.\n\n${esc(e.SELAR_CHECKOUT_URL!)}\n\nRequest: <code>${id}</code>`);
-    } else {
-      await e.DB.prepare("UPDATE contact_requests SET status='awaiting_bank_reference',payment_method='bank',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(id).run();
-      await say(e, r.telegram_chat_id, `Pay <b>${money(price(e)!)}</b> using the bank payment link below. Once you have completed the transfer, return here and send the transaction reference. This is manual verification; a receipt or reference alone is not proof of payment.\n\n${esc(e.BANK_PAYMENT_URL!)}\n\nRequest: <code>${id}</code>`);
     }
-    await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment instructions sent." }); return;
+    await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Selar checkout instructions sent." }); return;
   }
   if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined) {
     await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Not authorised." }); return;
   }
-  const m = data.match(/^(approve|reject|bankverify|bankreject|selarverify):([0-9a-f-]{36})$/i);
+  const m = data.match(/^(approve|reject|selarverify):([0-9a-f-]{36})$/i);
   if (!m) { await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Unknown action." }); return; }
   const action = m[1].toLowerCase(), id = m[2];
   const r = await e.DB.prepare("SELECT id,telegram_chat_id,profile_id,status FROM contact_requests WHERE id=?").bind(id).first<RequestRow>();
@@ -187,23 +172,8 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     await say(e, e.ADMIN_TELEGRAM_ID, "Selar payment verified by admin for <code>" + id + "</code>. Now decide whether to approve the contact request.", { inline_keyboard: [[{ text: "Approve & send contact", callback_data: "approve:" + id }, { text: "Reject request", callback_data: "reject:" + id }]] });
     return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment verified. Review the contact request next." });
   }
-  if (action === "bankverify") {
-    if (r.status !== "pending_manual_payment") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request is not awaiting bank verification." });
-    await e.DB.prepare("UPDATE contact_requests SET status='payment_verified',payment_currency='NGN',payment_amount_minor=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_manual_payment'").bind(Math.round((price(e) || 0) * 100), id).run();
-    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,'manual_bank_payment_verified',?,?,?)").bind(actor, id, r.profile_id, "Admin manually checked bank transaction").run();
-    await say(e, r.telegram_chat_id, "The admin marked your bank payment as verified. Your request is now waiting for final approval.");
-    await say(e, e.ADMIN_TELEGRAM_ID, `Payment marked verified for <code>${id}</code>. Now decide whether to approve the contact request.`, { inline_keyboard: [[{ text: "Approve & send contact", callback_data: `approve:${id}` }, { text: "Reject request", callback_data: `reject:${id}` }]] });
-    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Marked verified. Review the contact request next." });
-  }
-  if (action === "bankreject") {
-    if (r.status !== "pending_manual_payment") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request is not awaiting bank verification." });
-    await e.DB.prepare("UPDATE contact_requests SET status='rejected',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_manual_payment'").bind(id).run();
-    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id) VALUES(?,'manual_bank_payment_not_verified',?,?)").bind(actor, id, r.profile_id).run();
-    await say(e, r.telegram_chat_id, "We could not verify the bank payment from the information supplied. If money was deducted, please contact support before paying again.");
-    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Marked not verified." });
-  }
   if (action === "reject") {
-    if (!["pending_payment", "pending_manual_payment", "payment_verified"].includes(r.status)) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request is no longer pending." });
+    if (!["pending_payment", "payment_verified"].includes(r.status)) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request is no longer pending." });
     await e.DB.prepare("UPDATE contact_requests SET status='rejected',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=?").bind(id).run();
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id) VALUES(?,'reject_request',?,?)").bind(actor, id, r.profile_id).run();
     await say(e, r.telegram_chat_id, "Your request was rejected. If you paid, contact support about a refund; refunds must be handled through the payment provider or your bank.");
