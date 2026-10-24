@@ -207,7 +207,7 @@ async function selar(request: Request, e: Env) {
   let body: unknown;
   try { body = await request.json(); } catch { return json({ error: "invalid_json" }, 400); }
   const s = normalise(body);
-  if (!s) return json({ error: "invalid_sale_payload", expected: ["reference", "email", "amount", "currency", "product_id"] }, 400);
+  if (!s) return json({ error: "invalid_sale_payload", expected: ["reference", "email", "amount", "currency", "product_id", "payment_status"] }, 400);
   if (s.currency !== "NGN") return json({ error: "unsupported_currency" }, 422);
   if (!e.SELAR_PRODUCT_ID) return json({ error: "selar_product_id_not_configured" }, 503);
   if (!s.productId || s.productId !== e.SELAR_PRODUCT_ID) return json({ error: "wrong_product" }, 422);
