@@ -47,6 +47,24 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Validate both Selar product settings before any changes
+        env:
+          CONTACT_PRICE_NGN: ${{ inputs.contact_price_ngn }}
+          SELAR_CHECKOUT_URL: ${{ inputs.contact_selar_checkout_url }}
+          SELAR_PRODUCT_ID: ${{ inputs.contact_selar_product_id }}
+          SERVICE_PRICE_NGN: ${{ inputs.service_price_ngn }}
+          SERVICE_CHECKOUT_URL: ${{ inputs.service_selar_checkout_url }}
+          SERVICE_PRODUCT_ID: ${{ inputs.service_selar_product_id }}
+        run: |
+          set -euo pipefail
+          [[ "$CONTACT_PRICE_NGN" =~ ^[0-9]+([.][0-9]{1,2})?$ ]] || { echo "Invalid contact price"; exit 1; }
+          [[ "$SERVICE_PRICE_NGN" =~ ^[0-9]+([.][0-9]{1,2})?$ ]] || { echo "Invalid service price"; exit 1; }
+          awk "BEGIN { exit !($CONTACT_PRICE_NGN > 0) }" || { echo "Contact price must be positive"; exit 1; }
+          awk "BEGIN { exit !($SERVICE_PRICE_NGN > 0) }" || { echo "Service price must be positive"; exit 1; }
+          [[ "$SELAR_CHECKOUT_URL" == https://* ]] || { echo "Contact checkout URL must use HTTPS"; exit 1; }
+          [[ "$SERVICE_CHECKOUT_URL" == https://* ]] || { echo "Service checkout URL must use HTTPS"; exit 1; }
+          [[ -n "$SELAR_PRODUCT_ID" && -n "$SERVICE_PRODUCT_ID" && "$SELAR_PRODUCT_ID" != "$SERVICE_PRODUCT_ID" ]] || { echo "Use two distinct, non-empty Selar product codes"; exit 1; }
+
       - name: Apply the idempotent service-orders migration
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
