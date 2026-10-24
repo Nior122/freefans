@@ -73,6 +73,10 @@ jobs:
           SERVICE_PRODUCT_ID: ${{ inputs.service_selar_product_id }}
         run: |
           set -euo pipefail
+          [[ "$CONTACT_PRICE_NGN" =~ ^[0-9]+([.][0-9]{1,2})?$ ]] && awk "BEGIN { exit !($CONTACT_PRICE_NGN > 0) }"
+          [[ "$SERVICE_PRICE_NGN" =~ ^[0-9]+([.][0-9]{1,2})?$ ]] && awk "BEGIN { exit !($SERVICE_PRICE_NGN > 0) }"
+          [[ "$SELAR_CHECKOUT_URL" == https://* && "$SERVICE_CHECKOUT_URL" == https://* ]]
+          [[ -n "$SELAR_PRODUCT_ID" && -n "$SERVICE_PRODUCT_ID" && "$SELAR_PRODUCT_ID" != "$SERVICE_PRODUCT_ID" ]]
           printf '%s' "$CONTACT_PRICE_NGN" | npx --yes wrangler@4 secret put CONTACT_PRICE_NGN --config contact-bot/wrangler.toml
           printf '%s' "$SELAR_CHECKOUT_URL" | npx --yes wrangler@4 secret put SELAR_CHECKOUT_URL --config contact-bot/wrangler.toml
           printf '%s' "$SELAR_PRODUCT_ID" | npx --yes wrangler@4 secret put SELAR_PRODUCT_ID --config contact-bot/wrangler.toml
