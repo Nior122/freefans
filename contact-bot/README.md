@@ -22,7 +22,7 @@ Cloudflare Worker + D1 backend for @KasiQueenbot. The bot logic is separate from
 2. From the repo root, apply the schema: `npx wrangler d1 execute fansleak-contact-requests --remote --file=contact-bot/schema.sql`.
 3. Deploy from `contact-bot/` using Wrangler.
 4. Set Worker secrets (never commit them): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `ADMIN_TELEGRAM_ID`, `SELAR_WEBHOOK_SECRET`.
-5. Set Worker variables: `SELAR_CHECKOUT_URL` (actual Selar product URL), `CONTACT_PRICE_NGN` (actual product price), optional `SELAR_PRODUCT_ID`, `SITE_URL=https://fansleak.pages.dev`, `PAYMENT_PROVIDER=selar`.
+5. Set Worker variables: `SELAR_CHECKOUT_URL` (actual Selar product URL), `CONTACT_PRICE_NGN` (actual product price), required exact `SELAR_PRODUCT_ID`, `SITE_URL=https://fansleak.pages.dev`, `PAYMENT_PROVIDER=selar`. Keep `SELAR_APPROVED_FOR_CONTACT_ACCESS` unset unless Selar has explicitly confirmed in writing that this specific contact-access service is permitted. The checkout and webhook are blocked unless this variable is exactly `true`.
 6. Configure a Selar New Sale trigger in an integration such as Zapier and forward a normalized payload to `/webhooks/selar`, setting header `X-Selar-Webhook-Secret` to the same secret. Validate the trigger fields with a real test sale before production.
 7. Set Telegram's webhook URL to `https://YOUR-WORKER-DOMAIN/telegram/webhook`, with Telegram's `secret_token` set to `TELEGRAM_WEBHOOK_SECRET`.
 8. Configure the website button to open `https://t.me/KasiQueenbot?start=contact_PROFILE_ID`. The current button code is in the website integration PR.
