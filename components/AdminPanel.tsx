@@ -576,7 +576,7 @@ export const AdminPanel = () => {
                 <div className="flex-1 overflow-y-auto p-4 bg-slate-100/50 grid grid-cols-2 md:grid-cols-4 gap-3">
                    {candidates.map(cand => (
                      <div key={cand.id} className="bg-white rounded-xl border-2 border-white shadow-sm overflow-hidden group relative">
-                        <img src={cand.processedUrl} className="w-full aspect-square object-cover" alt="" />
+                        <img src={cand.processedUrl} className="w-full aspect-square object-cover" alt="Candidate profile image" />
                         <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center p-2 text-center">
                            <span className="text-[10px] text-white font-bold">{cand.size}</span>
                            <span className="text-[8px] text-emerald-400 truncate w-full">{cand.processedUrl}</span>
@@ -627,7 +627,7 @@ export const AdminPanel = () => {
            {profiles.map(p => (
              <div key={p.id} className="bg-white p-6 rounded-2xl border shadow-sm flex flex-col">
                 <div className="flex items-center gap-4 mb-4">
-                   <img src={p.avatarUrl} className="w-16 h-16 rounded-2xl object-cover bg-slate-100" alt="" />
+                   <img src={p.avatarUrl} className="w-16 h-16 rounded-2xl object-cover bg-slate-100" alt="Profile avatar" />
                    <div>
                       <h3 className="font-black text-slate-900 text-xl tracking-tighter">{p.name}</h3>
                       <p className="text-gray-500 font-mono text-xs">{p.handle}</p>
