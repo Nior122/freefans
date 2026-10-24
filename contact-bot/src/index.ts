@@ -285,7 +285,7 @@ async function selar(request: Request, e: Env) {
   } else {
     const result = await e.DB.prepare("UPDATE service_orders SET payment_method='selar',payment_reference=?,payment_amount_minor=?,payment_currency=?,status='payment_verified',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(s.reference, s.amountMinor, s.currency, target.id).run();
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_payment_confirmed',?,?)").bind(e.ADMIN_TELEGRAM_ID, target.id, "Validated Selar sale for second product").run();
-    await say(e, e.ADMIN_TELEGRAM_ID, "<b>Service payment confirmed</b>\\nOrder: <code>" + target.id + "</code>\\nService: " + esc(target.profile_id) + "\\nBuyer: " + esc(s.email) + "\\nAmount: " + money(s.amountMinor / 100) + "\\nPayment reference: " + esc(s.reference) + "\\nCustomer request: " + esc(String(target.request_text || "Not provided")) + "\\n\\nReply with: /deliver " + target.id + " your service details");
+    await say(e, e.ADMIN_TELEGRAM_ID, "<b>Service payment confirmed</b>\nOrder: <code>" + target.id + "</code>\nService: " + esc(target.profile_id) + "\nBuyer: " + esc(s.email) + "\nAmount: " + money(s.amountMinor / 100) + "\nPayment reference: " + esc(s.reference) + "\nCustomer request: " + esc(String(target.request_text || "Not provided")) + "\n\nReply with: /deliver " + target.id + " your service details");
     await say(e, target.telegram_chat_id, "Payment confirmed for order <code>" + target.id + "</code>. The admin has been notified. Your service details will be sent here after fulfilment.");
   }
   return json({ ok: true, matched: true });
