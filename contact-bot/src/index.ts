@@ -257,23 +257,33 @@ async function selar(request: Request, e: Env) {
   const s = normalise(body);
   if (!s) return json({ error: "invalid_sale_payload", expected: ["reference", "email", "amount", "currency", "product_id", "payment_status"] }, 400);
   if (s.currency !== "NGN") return json({ error: "unsupported_currency" }, 422);
-  if (!e.SELAR_PRODUCT_ID) return json({ error: "selar_product_id_not_configured" }, 503);
-  if (!s.productId || s.productId !== e.SELAR_PRODUCT_ID) return json({ error: "wrong_product" }, 422);
-  const p = price(e);
-  if (!p || s.amountMinor !== Math.round(p * 100)) return json({ error: "amount_mismatch" }, 422);
+  const kind: "contact" | "service" | null = s.productId === e.SELAR_PRODUCT_ID ? "contact" : s.productId === e.SERVICE_PRODUCT_ID ? "service" : null;
+  if (!kind) return json({ error: "wrong_product" }, 422);
+  const p = kind === "contact" ? price(e) : servicePrice(e);
+  if (!p) return json({ error: "product_price_not_configured" }, 503);
+  if (s.amountMinor !== Math.round(p * 100)) return json({ error: "amount_mismatch" }, 422);
   if (await e.DB.prepare("SELECT provider_reference FROM processed_sales WHERE provider_reference=?").bind(s.reference).first()) return json({ ok: true, duplicate: true });
-  const rows = await e.DB.prepare("SELECT id,profile_id,telegram_chat_id FROM contact_requests WHERE buyer_email=? AND status='pending_payment' AND payment_method='selar' ORDER BY created_at DESC LIMIT 2").bind(s.email).all<any>();
+  const rows = kind === "contact"
+    ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id FROM contact_requests WHERE buyer_email=? AND status='pending_payment' AND payment_method='selar' ORDER BY created_at DESC LIMIT 2").bind(s.email).all<any>()
+    : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id FROM service_orders WHERE buyer_email=? AND status='pending_payment' ORDER BY created_at DESC LIMIT 2").bind(s.email).all<any>();
   if (rows.results.length !== 1) {
     await say(e, e.ADMIN_TELEGRAM_ID, `Selar sale ${esc(s.reference)} for ${esc(s.email)} matched ${rows.results.length} pending requests. No request unlocked; reconcile manually.`);
     return json({ ok: true, matched: false });
   }
   const target = rows.results[0];
   await e.DB.prepare("INSERT INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id) VALUES(?,?,?,?,?,?)").bind(s.reference, s.email, s.amountMinor, s.currency, s.productId ?? null, target.id).run();
-  await e.DB.prepare("UPDATE contact_requests SET payment_method='selar',payment_reference=?,payment_amount_minor=?,payment_currency=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment' AND payment_method='selar'").bind(s.reference, s.amountMinor, s.currency, target.id).run();
-  const contact = await e.DB.prepare("SELECT sharing_enabled FROM creator_contacts WHERE profile_id=?").bind(target.profile_id).first<any>();
+  if (kind === "contact") {
+    await e.DB.prepare("UPDATE contact_requests SET payment_method='selar',payment_reference=?,payment_amount_minor=?,payment_currency=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment' AND payment_method='selar'").bind(s.reference, s.amountMinor, s.currency, target.id).run();
+    const contact = await e.DB.prepare("SELECT sharing_enabled FROM creator_contacts WHERE profile_id=?").bind(target.profile_id).first<any>();
   const markup = { inline_keyboard: [[{ text: "Verify Selar payment", callback_data: "selarverify:" + target.id }, { text: "Reject payment/request", callback_data: "reject:" + target.id }]] };
   await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar payment notification — admin verification required</b>\nRequest: <code>${target.id}</code>\nProfile: ${esc(target.profile_id)}\nBuyer: ${esc(s.email)}\nAmount: ${money(s.amountMinor / 100)}\nPayment ref: ${esc(s.reference)}\nContact sharing enabled: ${contact?.sharing_enabled === 1 ? "yes" : "no"}`, markup);
-  await say(e, target.telegram_chat_id, "A Selar payment notification was received. The admin must review and verify it before your request can be approved.");
+    await say(e, target.telegram_chat_id, "A Selar payment notification was received. The admin must review and verify it before your request can be approved.");
+  } else {
+    const result = await e.DB.prepare("UPDATE service_orders SET payment_method='selar',payment_reference=?,payment_amount_minor=?,payment_currency=?,status='payment_verified',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(s.reference, s.amountMinor, s.currency, target.id).run();
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_payment_confirmed',?,?)").bind(e.ADMIN_TELEGRAM_ID, target.id, "Validated Selar sale for second product").run();
+    await say(e, e.ADMIN_TELEGRAM_ID, "<b>Service payment confirmed</b>\\nOrder: <code>" + target.id + "</code>\\nService: " + esc(target.profile_id) + "\\nBuyer: " + esc(s.email) + "\\nAmount: " + money(s.amountMinor / 100) + "\\nPayment reference: " + esc(s.reference) + "\\n\\nReply with: /deliver " + target.id + " your service details");
+    await say(e, target.telegram_chat_id, "Payment confirmed for order <code>" + target.id + "</code>. The admin has been notified. Your service details will be sent here after fulfilment.");
+  }
   return json({ ok: true, matched: true });
 }
 export default {
