@@ -79,7 +79,7 @@ export const ProfilePage = () => {
   const REQUIRED_WAIT_MS = 4000; // 4 seconds
 
   const profile = profiles.find(p => p.id === id);
-  const telegramBotUsername = (import.meta.env.VITE_TELEGRAM_BOT_USERNAME || '').trim().replace(/^@/, '');
+  const telegramBotUsername = (import.meta.env.VITE_TELEGRAM_BOT_USERNAME || 'KasiQueenbot').trim().replace(/^@/, '');
   const contactBotUrl = telegramBotUsername
     ? `https://t.me/${telegramBotUsername}?start=contact_${profile?.id ?? ''}`
     : undefined;
