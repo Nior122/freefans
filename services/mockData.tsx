@@ -55,6 +55,8 @@ import miss_dxxxData from './miss_dxxxData';
 import emmafioреData from './emmafioreData';
 import belledelphineData from './belledelphineData.json';
 import sweetiefoxData from './sweetiefoxData.json';
+import bigtittygotheggData from './bigtittygotheggData.json';
+import imsadspiceData from './imsadspiceData.json';
 
 // Subset of data for demo purposes from the Belle Delphine dataset
 const BELLE_FULL_DATA = [
@@ -5467,6 +5469,18 @@ const BELLEDLPHINE_IMAGES: Image[] = (belledelphineData as any[]).map((item) => 
 
 // Sweetie Fox (coomer.st) — 200 images imported from coomer.st/onlyfans/user/sweetiefox_of
 const SWEETIEFOX_IMAGES: Image[] = (sweetiefoxData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+// bigtittygothegg (coomer.st) — 200 images imported from coomer.st/onlyfans/user/bigtittygothegg
+const BIGTITTYGOTHEGG_IMAGES: Image[] = (bigtittygotheggData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+// imsadspice (coomer.st) — 200 images imported from coomer.st/onlyfans/user/imsadspice
+const IMSADSPICE_IMAGES: Image[] = (imsadspiceData as any[]).map((item) => ({
   ...item,
   mediaType: item.mediaType as MediaType
 }));
@@ -11841,6 +11855,46 @@ const PROFILES: Profile[] = [
       likes: 70886,
       views: 450000,
       followers: 15000
+    },
+    isVerified: true,
+    isVisible: true,
+    pricePerMonth: 19.99
+  },
+  {
+    id: 'bigtittygothegg',
+    name: 'BigTittyGothegg',
+    handle: '@bigtittygothegg',
+    bio: 'Goth alt-girl creator sharing exclusive premium content. Imported from coomer.st/onlyfans/user/bigtittygothegg — 1,384 posts, 75,763 favorites.',
+    avatarUrl: 'https://img.coomer.st/thumbnail/data/5e/da/5edab09d00ba3699f1183c3fb6da18f96d036264318219247217c36a870c1865.jpg',
+    heroUrl: 'https://img.coomer.st/thumbnail/data/11/09/11092ee261569b6772cd0b13a51df940980d94cd75f2e57b2deaadcdf14760f1.jpg',
+    tags: ['onlyfans', 'premium', 'exclusive', 'goth', 'alt', 'adult'],
+    category: 'OnlyFans',
+    images: BIGTITTYGOTHEGG_IMAGES,
+    stats: {
+      posts: BIGTITTYGOTHEGG_IMAGES.length,
+      likes: 75763,
+      views: 800000,
+      followers: 25000
+    },
+    isVerified: true,
+    isVisible: true,
+    pricePerMonth: 19.99
+  },
+  {
+    id: 'imsadspice',
+    name: 'Imsadspice',
+    handle: '@imsadspice',
+    bio: 'OnlyFans creator sharing exclusive premium content. Imported from coomer.st/onlyfans/user/imsadspice — 936 posts, 43,483 favorites.',
+    avatarUrl: 'https://img.coomer.st/thumbnail/data/ae/ce/aece4ec4f53f4f069e5c70f7af39c630f6fd3ee156ae7faee58b049e4ac7377d.jpg',
+    heroUrl: 'https://img.coomer.st/thumbnail/data/67/f6/67f64050cea5a21b32871e7cee30ffa25f455d2cba7c56908c75711ff945e7a0.jpg',
+    tags: ['onlyfans', 'premium', 'exclusive', 'adult'],
+    category: 'OnlyFans',
+    images: IMSADSPICE_IMAGES,
+    stats: {
+      posts: IMSADSPICE_IMAGES.length,
+      likes: 43483,
+      views: 600000,
+      followers: 18000
     },
     isVerified: true,
     isVisible: true,
