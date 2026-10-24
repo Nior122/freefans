@@ -1,51 +1,53 @@
-# FansLeak Telegram Contact Bot
+# FansLeak Telegram Bot
 
-The bot uses Cloudflare Workers AI for customer support when a message does not match an active payment/request step. AI replies can explain the flow, but cannot verify payments, approve requests, or release contacts.
+One Telegram bot, two separate Selar products, and two distinct customer journeys. The link the customer opens decides the workflow; customers are not shown a universal product menu.
 
-Cloudflare Worker + D1 backend for @KasiQueenbot. Selar is the single payment method. Payment URLs, price, product ID, and active provider are runtime configuration—not hard-coded into the bot. A future provider can be added as a separate adapter without rewriting Telegram request handling or the database workflow.
+## The two links
 
-## Payment options
+1. **FansLeak contact and assessment:** `https://t.me/KasiQueenbot?start=contact_PROFILE_ID`
+   - The profile ID comes from the FansLeak profile's Message button.
+   - The bot starts the contact request immediately, collects the customer's email, and sends the customer to the contact/assessment Selar checkout.
+   - The contact product's price, checkout URL, and Selar product code are configured separately.
+   - A validated sale event is matched to the contact product and request. The admin still verifies the payment and separately approves/rejects the request. Contact sharing requires recorded creator authorisation.
 
-- Set `PAYMENT_PROVIDER=selar` to enable the Selar adapter. Set `PAYMENT_METHODS=selar` to show Selar only.
-- Set `SELAR_CHECKOUT_URL`, `SELAR_PRODUCT_ID`, and `SELAR_WEBHOOK_SECRET` for Selar. The webhook accepts only a normalized sale notification forwarded by a trusted integration and requires an explicit successful payment status (`paid`, `completed`, `success`, or `successful`), explicit currency, exact product ID, buyer email, NGN amount, unique sale reference, and a request that selected Selar. Missing status/currency/product fields are rejected; the handler never assumes a generic New Sale event proves payment.
-- Set `CONTACT_PRICE_NGN` to the exact price in naira. It is shared by the payment options. Do not accept a sale at a different amount.
-- Workers AI is bound as `AI` in `wrangler.toml`; `AI_MODEL` selects the model. The AI is customer support only and cannot verify payment, approve requests, or release contact details.
-- If you later change providers, implement that provider's own verified webhook adapter and update the configuration. Never route another provider's payload through the Selar handler.
+2. **Second service/product purchase:** `https://t.me/KasiQueenbot?start=service_SERVICE_ID`
+   - The service ID identifies the second link; no product menu is shown.
+   - The bot collects the customer's request and email, then provides the second product's Selar checkout URL and price.
+   - A validated sale event must match the second product code and exact NGN amount. The bot marks the order paid and notifies the admin and customer.
+   - The admin sends fulfilment using `/deliver ORDER_ID service details`. The bot forwards those details to the Telegram chat attached to that order and marks it fulfilled. `/deliver` refuses orders that are not payment-verified.
 
-## Request and privacy flow
+## Selar configuration
 
-1. A visitor clicks the profile's Message button, which opens `https://t.me/KasiQueenbot?start=contact_PROFILE_ID`.
-2. The bot looks up the profile in `https://fansleak.pages.dev/contact-catalogue.json` and records the request.
-3. The buyer provides an email address, then proceeds to Selar checkout.
-4. Selar sale events are validated before the admin manually verifies payment.
-5. Admin approves or rejects the contact request after payment verification.
-6. Creator contact details are disabled by default. Admin uses `/setcontact PROFILE_ID @handle`, then `/enablecontact PROFILE_ID` only after confirming that the creator explicitly authorised sharing. Both actions are audit logged.
+Selar is the same payment provider for both products, but each product has its own configuration:
 
-## Deployment setup
+- Contact: `CONTACT_PRICE_NGN`, `SELAR_CHECKOUT_URL`, `SELAR_PRODUCT_ID`
+- Second product: `SERVICE_PRICE_NGN`, `SERVICE_CHECKOUT_URL`, `SERVICE_PRODUCT_ID`
+- Shared: `SELAR_WEBHOOK_SECRET`
 
-The D1 database is already created and its schema has been applied. The Worker is not yet deployed.
+Do not assume a URL slug is the provider's actual product identifier without checking the real Selar event. The webhook expects a trusted forwarding integration to send a normalized payload to `POST /webhooks/selar` with `X-Selar-Webhook-Secret`. The payload must contain a unique sale reference, buyer email, amount, currency, product code, and an authoritative successful-payment status. A generic “New Sale” event without trustworthy status must not be treated as proof of payment. If a sale matches zero or multiple pending orders, no order is unlocked; the admin is notified for reconciliation.
 
-1. Add these GitHub repository Actions secrets under **Settings → Secrets and variables → Actions → New repository secret**:
-   - `CLOUDFLARE_API_TOKEN` — token with permission to edit Workers and D1 in the configured Cloudflare account.
-   - `TELEGRAM_BOT_TOKEN` — token for `@KasiQueenbot`.
-   - `TELEGRAM_WEBHOOK_SECRET` — a random 1–256 character value using only letters, numbers, underscores or hyphens.
-   - `ADMIN_TELEGRAM_ID` — your numeric Telegram user ID.
-   - `SELAR_WEBHOOK_SECRET` — a separate strong random secret for the incoming Selar integration.
-2. Merge this PR into the repository's default branch so GitHub exposes the manual deployment workflow.
-3. Open **Actions → Deploy FansLeak contact bot → Run workflow**. Supply the exact contact price in NGN, the real Selar checkout URL and Selar product/checkout code.
-4. The workflow deploys the Worker, stores runtime values and secrets, and connects Telegram's webhook. It is manual-dispatch only; it will not deploy automatically on every push.
-5. Configure the Selar integration to send a normalized payload to `POST /webhooks/selar` with header `X-Selar-Webhook-Secret`. The payload must contain a real unique sale reference, buyer email, amount, currency, exact product ID and an authoritative successful payment status. If Selar's available trigger does not supply trustworthy payment status, do not fabricate it; keep automated Selar verification disabled until a trustworthy source is available.
-6. The Worker URL is `https://fansleak-contact-bot.<your-workers.dev-subdomain>.workers.dev`. The deployment workflow automatically sets Telegram's webhook URL after deploying and configuring the required secrets.
+The contact and service workflows share the Selar webhook but are separated by exact product code and price. Contact payments continue through the contact verification/approval process; service purchases use the separate order table and fulfilment process.
 
 ## Admin commands
 
-- `/pending` — list payment/request records requiring attention.
-- `/setcontact PROFILE_ID @handle` — save a contact but keep sharing disabled.
-- `/enablecontact PROFILE_ID` — record the admin's confirmation that creator sharing is authorised.
+- `/pending` — contact requests awaiting payment verification or approval.
+- `/orders` — second-product orders awaiting payment or fulfilment.
+- `/deliver ORDER_ID service details` — send fulfilment details to a payment-verified service customer.
+- `/setcontact PROFILE_ID @handle` — save a creator contact with sharing disabled.
+- `/enablecontact PROFILE_ID` — record admin confirmation that the creator authorised sharing.
 
-## Launch checks
+## Runtime and database
 
-- The Worker and D1 database have not yet been deployed by this PR.
-- The Selar checkout URL/product code, price, admin Telegram numeric ID, and secret values must be configured in Cloudflare. Do not paste bot tokens or secrets into GitHub or this chat.
-- Selar sale-event fields must be tested in the actual account; this code deliberately expects a normalized event from the forwarding integration.
-- The website catalogue is generated from the existing visible profile source during the website build, so it stays in sync when new profiles are added and deployed.
+Cloudflare Worker + D1 for `@KasiQueenbot`; Workers AI is customer support only. It cannot confirm payment, approve contact requests, or release contact details. The `service_orders` table is included in `schema.sql` and must be applied before the updated Worker is launched. This change has not been deployed or applied to the live D1 database.
+
+## Deployment workflow
+
+The GitHub Actions deployment workflow is manual only. It accepts separate contact and second-product prices, checkout URLs, and Selar product codes, configures the shared bot/webhook secrets, deploys the Worker, and connects Telegram's webhook. Do not run it until both product configurations and the real normalized Selar event mapping have been verified.
+
+Required GitHub repository Actions secrets: `CLOUDFLARE_API_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `ADMIN_TELEGRAM_ID`, and `SELAR_WEBHOOK_SECRET`. Never paste secret values into GitHub issues or chat messages.
+
+## Current status
+
+- Changes are on the feature branch / PR only.
+- No Worker deployment, Telegram webhook connection, live D1 migration, or PR merge has been performed.
+- Test the real Selar payload mapping and run the non-deploying Wrangler compile check before launch.
