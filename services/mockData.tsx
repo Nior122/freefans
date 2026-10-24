@@ -59,6 +59,8 @@ import bigtittygotheggData from './bigtittygotheggData.json';
 import imsadspiceData from './imsadspiceData.json';
 import sierralisabethData from './sierralisabethData.json';
 import yellz00Data from './yellz00Data.json';
+import miaKhalifaData from './mia_khalifaData.json';
+import lanaRhoadesData from './lana_rhoadesData.json';
 
 // Subset of data for demo purposes from the Belle Delphine dataset
 const BELLE_FULL_DATA = [
@@ -5495,6 +5497,18 @@ const SIERRA_LISABETH_IMAGES: Image[] = (sierralisabethData as any[]).map((item)
 
 // yellz00 (coomer.st) — 200 images imported from coomer.st/onlyfans/user/yellz00
 const YELLZ00_IMAGES: Image[] = (yellz00Data as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+// mia_khalifa (coomer.st) — 200 images imported from coomer.st/onlyfans/user/mia_khalifa
+const MIA_KHALIFA_IMAGES: Image[] = (miaKhalifaData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+// lana_rhoades (coomer.st) — 200 images imported from coomer.st/onlyfans/user/lana_rhoades
+const LANA_RHOADES_IMAGES: Image[] = (lanaRhoadesData as any[]).map((item) => ({
   ...item,
   mediaType: item.mediaType as MediaType
 }));
@@ -11953,6 +11967,46 @@ const PROFILES: Profile[] = [
     isVerified: true,
     isVisible: true,
     pricePerMonth: 19.99
+  },
+  {
+    id: 'mia_khalifa',
+    name: 'Mia Khalifa',
+    handle: '@mia_khalifa',
+    bio: 'Lebanese goddess with iconic glasses & unstoppable curves 🇱🇧👓 | 1,200+ posts of raw, unfiltered heat 🔥 | OnlyFans royalty since 2014 👑 | Sweet laugh, savage energy — your favorite bad habit you’ll never quit 😈💋💦✨',
+    avatarUrl: 'https://img.coomer.st/thumbnail/data/00/08/000837a4bfaa521bd45675768a9cda643b33e294d02b8a0156e840da5bd6a051.jpg',
+    heroUrl: 'https://img.coomer.st/thumbnail/data/9b/5d/9b5dea66d0afa8165e56cd12abbba2e25eab7a3961991646132cc237edc57568.jpg',
+    tags: ['onlyfans', 'premium', 'exclusive', 'curvy', 'brunette', 'glasses'],
+    category: 'OnlyFans',
+    images: MIA_KHALIFA_IMAGES,
+    stats: {
+      posts: MIA_KHALIFA_IMAGES.length,
+      likes: 82500,
+      views: 1240000,
+      followers: 64200
+    },
+    isVerified: true,
+    isVisible: true,
+    pricePerMonth: 9.99
+  },
+  {
+    id: 'lana_rhoades',
+    name: 'Lana Rhoades',
+    handle: '@lana_rhoades',
+    bio: 'Sun-kissed California dream with a wicked side 🌴☀️ | 1,500+ posts of exclusive, uncensored bliss 💦 | Blonde bombshell, ocean eyes & pure temptation ✨ | Subscribe and let this west coast queen ruin you in the best way 😈💋🔥',
+    avatarUrl: 'https://img.coomer.st/thumbnail/data/01/b4/01b40e3ad0a05dd23011d439ddb769979ba9dac63883b93827f27a183a65606b.jpg',
+    heroUrl: 'https://img.coomer.st/thumbnail/data/90/43/904354e3843e1d0e124ebf4f582d394262e2e68d1da99a8eeecbe7d3328ab76c.jpg',
+    tags: ['onlyfans', 'premium', 'exclusive', 'blonde', 'california', 'bombshell'],
+    category: 'OnlyFans',
+    images: LANA_RHOADES_IMAGES,
+    stats: {
+      posts: LANA_RHOADES_IMAGES.length,
+      likes: 91200,
+      views: 1380000,
+      followers: 71800
+    },
+    isVerified: true,
+    isVisible: true,
+    pricePerMonth: 12.99
   }
 ];
 
