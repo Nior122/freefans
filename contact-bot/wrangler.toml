@@ -1,4 +1,5 @@
 name = "fansleak-contact-bot"
+account_id = "5f7678c82c50be845dba6bd8280bfae5"
 main = "src/index.ts"
 compatibility_date = "2026-10-24"
 
