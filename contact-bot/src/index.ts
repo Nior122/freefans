@@ -115,6 +115,8 @@ async function message(e: Env, m: Msg) {
   const req = await e.DB.prepare("SELECT id,status,profile_id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','awaiting_bank_reference') ORDER BY created_at DESC LIMIT 1").bind(user).first<{ id: string; status: string; profile_id: string }>();
   if (req?.status === "awaiting_bank_reference") {
     if (t.length < 4 || t.length > 100 || /https?:\/\//i.test(t)) return say(e, chat, "Send the bank transfer reference or transaction ID (4–100 characters), not a link or screenshot.");
+    const duplicateRef = await e.DB.prepare("SELECT id FROM contact_requests WHERE manual_payment_reference=? AND id<>? LIMIT 1").bind(t, req.id).first();
+    if (duplicateRef) return say(e, chat, "That transfer reference has already been submitted. Please check the reference and send the correct one.");
     await e.DB.prepare("UPDATE contact_requests SET manual_payment_reference=?,status='pending_manual_payment',payment_method='bank',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_bank_reference'").bind(t, req.id).run();
     const markup = { inline_keyboard: [[{ text: "I verified the bank payment", callback_data: `bankverify:${req.id}` }, { text: "Reject / not found", callback_data: `bankreject:${req.id}` }]] };
     await say(e, e.ADMIN_TELEGRAM_ID, `<b>Manual bank payment needs checking</b>\nRequest: <code>${req.id}</code>\nProfile: ${esc(req.profile_id)}\nBuyer: ${esc(user)}\nAmount expected: ${money(price(e) || 0)}\nTransfer reference supplied: <code>${esc(t)}</code>\n\nCheck your actual bank transaction history before confirming. Do not approve based on this message alone.`, markup);
