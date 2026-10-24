@@ -49,10 +49,12 @@ import haileyrosexxxData from './haileyrosexxxData.json';
 import mikomihokinaData from './mikomihokinaData.json';
 import delightfulhugData from './delightfulhugData.json';
 import hot404foundData from './hot404foundData.json';
+import hongkongdollData from './hongkongdollData.json';
 import prosexxData from './prosexxData.json';
 import lovebyelenitaData from './lovebyelenitaData';
 import miss_dxxxData from './miss_dxxxData';
 import emmafioреData from './emmafioreData';
+import evaelfieData from './evaelfieData.json';
 import belledelphineData from './belledelphineData.json';
 import sweetiefoxData from './sweetiefoxData.json';
 import bigtittygotheggData from './bigtittygotheggData.json';
@@ -5495,6 +5497,18 @@ const SIERRA_LISABETH_IMAGES: Image[] = (sierralisabethData as any[]).map((item)
 
 // yellz00 (coomer.st) — 200 images imported from coomer.st/onlyfans/user/yellz00
 const YELLZ00_IMAGES: Image[] = (yellz00Data as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+// evaelfie (coomer.st) — 200 images imported from coomer.st/onlyfans/user/evaelfie
+const EVAELFIE_IMAGES: Image[] = (evaelfieData as any[]).map((item) => ({
+  ...item,
+  mediaType: item.mediaType as MediaType
+}));
+
+// hongkongdoll (coomer.st) — 200 images imported from coomer.st/onlyfans/user/hongkongdoll
+const HONGKONGDOLL_IMAGES: Image[] = (hongkongdollData as any[]).map((item) => ({
   ...item,
   mediaType: item.mediaType as MediaType
 }));
@@ -11949,6 +11963,46 @@ const PROFILES: Profile[] = [
       likes: 36954,
       views: 500000,
       followers: 15000
+    },
+    isVerified: true,
+    isVisible: true,
+    pricePerMonth: 19.99
+  },
+  {
+    id: 'evaelfie',
+    name: 'Eva Elfie',
+    handle: '@evaelfie',
+    bio: 'Eva Elfie — your favorite blonde bombshell 🍭✨ | 2,057+ posts of exclusive premium content | Soft curves, playful energy, endless charm 😈💋 | Subscribe for the full experience 🔥📸',
+    avatarUrl: 'https://img.coomer.st/thumbnail/data/b2/0c/b20cfc18a22693313938e91014f40f9a467a3dbc3f81c837471e9f73c01bebd7.jpg',
+    heroUrl: 'https://img.coomer.st/thumbnail/data/17/c8/17c8dc596f708c8ced475a3594a36b7d54cf59bb4895723129f765b9fcb173fd.jpg',
+    tags: ['onlyfans', 'premium', 'exclusive', 'adult', 'blonde'],
+    category: 'OnlyFans',
+    images: EVAELFIE_IMAGES,
+    stats: {
+      posts: EVAELFIE_IMAGES.length,
+      likes: 45000,
+      views: 1200000,
+      followers: 28000
+    },
+    isVerified: true,
+    isVisible: true,
+    pricePerMonth: 19.99
+  },
+  {
+    id: 'hongkongdoll',
+    name: 'HongKongDoll',
+    handle: '@hongkongdoll',
+    bio: 'HongKongDoll — sweet Asian charm meets wild fantasies 🇭🇰🔥 | 801+ posts of exclusive premium content | Soft curves, dangerous energy, endless tease 😈💋 | Unlock the real me — subscribe and let\'s get personal ✨📸',
+    avatarUrl: 'https://img.coomer.st/thumbnail/data/a2/9b/a29b8eee65da678a29d3e19188f4f8c801668a369bb50702578023d353b8a0d3.jpg',
+    heroUrl: 'https://img.coomer.st/thumbnail/data/2b/de/2bdecb423115578fa904fc730215259e48d2048be386469929427e11a140cbc3.jpg',
+    tags: ['onlyfans', 'premium', 'exclusive', 'adult', 'asian'],
+    category: 'OnlyFans',
+    images: HONGKONGDOLL_IMAGES,
+    stats: {
+      posts: HONGKONGDOLL_IMAGES.length,
+      likes: 32000,
+      views: 850000,
+      followers: 18000
     },
     isVerified: true,
     isVisible: true,
