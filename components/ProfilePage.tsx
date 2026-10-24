@@ -40,11 +40,6 @@ export const ProfilePage = () => {
   // Live visitor counter
   const [visitorCount, setVisitorCount] = useState(() => Math.floor(Math.random() * 180) + 120);
 
-  // Flaunting button counts (generated once, stable per session)
-  const fmtK = (n: number) => n >= 1000 ? (n / 1000).toFixed(1) + 'K' : n.toString();
-  const [subCount]  = useState(() => fmtK(Math.floor(Math.random() * 60000) + 18000));
-  const [msgCount]  = useState(() => fmtK(Math.floor(Math.random() * 30000) + 8000));
-  const [callCount] = useState(() => fmtK(Math.floor(Math.random() * 20000) + 5000));
 
   // Social proof toast
   const NAMES = [
