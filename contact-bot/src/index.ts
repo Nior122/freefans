@@ -179,7 +179,7 @@ async function message(e: Env, m: Msg) {
       await e.DB.prepare("UPDATE service_orders SET status='pending_payment',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_request'").bind(serviceOrder.id).run();
       const checkout = new URL(e.SERVICE_CHECKOUT_URL);
       checkout.searchParams.set("add_to_cart", "1");
-      return say(e, chat, "Your order reference is <code>" + serviceOrder.id + "</code>.\n\nThe price for this Selar product is <b>" + money(servicePrice(e)!) + "</b>. Open checkout below. In Selar’s custom checkout form, enter this order reference in the required field named <b>${esc(e.SERVICE_ORDER_FIELD_NAME!.trim())}</b>. No email is needed in this Telegram chat; Selar may still request its standard checkout details.\n\n" + esc(checkout.toString()) + "\n\nI’ll notify you here after the payment is verified.");
+      return say(e, chat, "Your order reference is <code>" + serviceOrder.id + "</code>.\n\nThe price for this Selar product is <b>" + money(servicePrice(e)!) + "</b>. Open checkout below. In Selar’s custom checkout form, enter this order reference in the required field named <b>" + esc(e.SERVICE_ORDER_FIELD_NAME!.trim()) + "</b>. No email is needed in this Telegram chat; Selar may still request its standard checkout details.\n\n" + esc(checkout.toString()) + "\n\nI’ll notify you here after the payment is verified.");
     }
     if (t.length < 2 || t.length > 2000) return say(e, chat, "Please send a message between 2 and 2,000 characters.");
     const previous = String(serviceOrder.request_text || "");
