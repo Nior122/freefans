@@ -1,0 +1,27 @@
+name: Check FansLeak contact bot
+
+on:
+  pull_request:
+    paths:
+      - "contact-bot/**"
+      - ".github/workflows/check-contact-bot.yml"
+  push:
+    branches:
+      - "feature/selar-bank-contact-bot"
+    paths:
+      - "contact-bot/**"
+      - ".github/workflows/check-contact-bot.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  worker-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Compile Worker and validate Wrangler configuration without deploying
+        run: npx --yes wrangler@4 deploy --dry-run --outdir /tmp/fansleak-contact-bot-build --config contact-bot/wrangler.toml
