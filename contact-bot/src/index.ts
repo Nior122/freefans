@@ -1,3 +1,13 @@
+interface D1PreparedStatement {
+  bind(...values: unknown[]): D1PreparedStatement;
+  first<T = Record<string, unknown>>(): Promise<T | null>;
+  all<T = Record<string, unknown>>(): Promise<{ results: T[] }>;
+  run(): Promise<unknown>;
+}
+interface D1Database {
+  prepare(query: string): D1PreparedStatement;
+}
+
 export interface Env {
  DB: D1Database; TELEGRAM_BOT_TOKEN: string; TELEGRAM_WEBHOOK_SECRET: string;
  ADMIN_TELEGRAM_ID: string; SELAR_CHECKOUT_URL: string; SELAR_WEBHOOK_SECRET: string;
