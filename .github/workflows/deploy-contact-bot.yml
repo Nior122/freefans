@@ -1,0 +1,80 @@
+name: Deploy FansLeak contact bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      contact_price_ngn:
+        description: "Exact contact request fee in NGN"
+        required: true
+        type: string
+      selar_checkout_url:
+        description: "Selar checkout URL for the configured product"
+        required: true
+        type: string
+      selar_product_id:
+        description: "Exact Selar product ID"
+        required: true
+        type: string
+      bank_payment_url:
+        description: "Bank payment instructions/link"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-fansleak-contact-bot
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out selected branch
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Deploy Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "Missing GitHub secret CLOUDFLARE_API_TOKEN"; exit 1; }
+          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "Missing GitHub secret CLOUDFLARE_ACCOUNT_ID"; exit 1; }
+          npx --yes wrangler@4 deploy --config contact-bot/wrangler.toml
+
+      - name: Configure runtime variables
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CONTACT_PRICE_NGN: ${{ inputs.contact_price_ngn }}
+          SELAR_CHECKOUT_URL: ${{ inputs.selar_checkout_url }}
+          SELAR_PRODUCT_ID: ${{ inputs.selar_product_id }}
+          BANK_PAYMENT_URL: ${{ inputs.bank_payment_url }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$CONTACT_PRICE_NGN" | npx --yes wrangler@4 secret put CONTACT_PRICE_NGN --config contact-bot/wrangler.toml
+          printf '%s' "$SELAR_CHECKOUT_URL" | npx --yes wrangler@4 secret put SELAR_CHECKOUT_URL --config contact-bot/wrangler.toml
+          printf '%s' "$SELAR_PRODUCT_ID" | npx --yes wrangler@4 secret put SELAR_PRODUCT_ID --config contact-bot/wrangler.toml
+          printf '%s' "$BANK_PAYMENT_URL" | npx --yes wrangler@4 secret put BANK_PAYMENT_URL --config contact-bot/wrangler.toml
+
+      - name: Configure required Worker secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
+          ADMIN_TELEGRAM_ID: ${{ secrets.ADMIN_TELEGRAM_ID }}
+          SELAR_WEBHOOK_SECRET: ${{ secrets.SELAR_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          for name in TELEGRAM_BOT_TOKEN TELEGRAM_WEBHOOK_SECRET ADMIN_TELEGRAM_ID SELAR_WEBHOOK_SECRET; do
+            value="${!name}"
+            test -n "$value" || { echo "Missing GitHub Actions secret: $name"; exit 1; }
+            printf '%s' "$value" | npx --yes wrangler@4 secret put "$name" --config contact-bot/wrangler.toml
+          done
