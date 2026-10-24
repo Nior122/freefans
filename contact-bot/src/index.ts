@@ -12,6 +12,9 @@ export interface Env {
   TELEGRAM_WEBHOOK_SECRET: string;
   ADMIN_TELEGRAM_ID: string;
   CONTACT_PRICE_NGN: string;
+  SERVICE_PRICE_NGN?: string;
+  SERVICE_CHECKOUT_URL?: string;
+  SERVICE_PRODUCT_ID?: string;
   PAYMENT_PROVIDER?: string;
   PAYMENT_METHODS?: string;
   SITE_URL?: string;
@@ -36,12 +39,13 @@ function safeEq(a: string, b: string) {
 }
 const esc = (s: string) => s.replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] || c));
 const price = (e: Env) => { const n = Number(e.CONTACT_PRICE_NGN); return Number.isFinite(n) && n > 0 ? n : null; };
+const servicePrice = (e: Env) => { const n = Number(e.SERVICE_PRICE_NGN); return Number.isFinite(n) && n > 0 ? n : null; };
 const money = (n: number) => new Intl.NumberFormat("en-NG", { style: "currency", currency: "NGN", maximumFractionDigits: 2 }).format(n);
 const provider = (e: Env) => (e.PAYMENT_PROVIDER || "selar").trim().toLowerCase();
 const methods = (e: Env) => (e.PAYMENT_METHODS || "selar").split(",").map(x => x.trim().toLowerCase()).filter((x, i, a) => a.indexOf(x) === i);
 function enabledMethods(e: Env) {
   const configured: string[] = [];
-  if (methods(e).includes("selar") && provider(e) === "selar" && e.SELAR_CHECKOUT_URL) configured.push("selar");
+  if (methods(e).includes("selar") && provider(e) === "selar" && e.SELAR_CHECKOUT_URL && e.SELAR_PRODUCT_ID) configured.push("selar");
   return configured;
 }
 async function tg(e: Env, method: string, data: Record<string, unknown>) {
@@ -100,13 +104,45 @@ async function aiReply(e: Env, chat: string, userText: string, reminder = "") {
     return say(e, chat, reminder || "I can't answer that just now. Please try again shortly or contact the admin.");
   }
 }
+
+async function startService(e: Env, m: Msg, serviceId: string) {
+  const chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
+  if (!/^[A-Za-z0-9._-]{1,40}$/.test(serviceId)) return say(e, chat, "Invalid service purchase link.");
+  if (!servicePrice(e) || !e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || provider(e) !== "selar") {
+    await say(e, chat, "This service purchase is not accepting orders yet. Please try again later.");
+    await say(e, e.ADMIN_TELEGRAM_ID, "Service purchase setup required: configure SERVICE_PRICE_NGN, SERVICE_CHECKOUT_URL and SERVICE_PRODUCT_ID.");
+    return;
+  }
+  const active = await e.DB.prepare("SELECT id FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
+  if (active) return say(e, chat, "You already have a service order in progress. Finish it or contact support before starting another.");
+  const id = crypto.randomUUID();
+  await e.DB.prepare("INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,telegram_username,status) VALUES(?,?,?,?,?,'awaiting_request')").bind(id, serviceId, user, chat, m.from?.username ?? null).run();
+  return say(e, chat, "Welcome to the service purchase. Order: <code>" + id + "</code>\nPrice: <b>" + money(servicePrice(e)!) + "</b>\n\nBriefly describe the service or item you need (3–2,000 characters). Then I will collect your email and give you the Selar checkout link.");
+}
+
 async function message(e: Env, m: Msg) {
   const t = (m.text || "").trim(), chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
   if (!t) return;
   if (t.startsWith("/start")) {
     const arg = t.split(/\s+/, 2)[1] || "";
     if (arg.startsWith("contact_")) return start(e, m, arg);
-    return say(e, chat, "Welcome to the FansLeak contact bot. Open a profile's Message button at https://fansleak.pages.dev to begin. Never send passwords, PINs or OTPs here.");
+    if (arg.startsWith("service_")) return startService(e, m, arg.slice("service_".length));
+    return say(e, chat, "Open a FansLeak profile Message link for contact and assessment, or use the service purchase link you were given. Never send passwords, PINs or OTPs here.");
+  }
+
+  if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/deliver ")) {
+    const match = t.match(/^\/deliver\s+([0-9a-f-]{36})\s+([\s\S]{1,3500})$/i);
+    if (!match) return say(e, chat, "Usage: /deliver ORDER_ID service details or fulfilment text");
+    const order = await e.DB.prepare("SELECT id,telegram_chat_id,status FROM service_orders WHERE id=?").bind(match[1]).first<any>();
+    if (!order || order.status !== "payment_verified") return say(e, chat, "Order not found or payment has not been verified. Nothing was sent.");
+    await say(e, order.telegram_chat_id, "Your service order is ready. Details from the provider:\n\n" + esc(match[2]));
+    await e.DB.prepare("UPDATE service_orders SET status='fulfilled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='payment_verified'").bind(order.id).run();
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_order_fulfilled',?,?)").bind(user, order.id, "Admin sent service fulfilment").run();
+    return say(e, chat, "Fulfilment sent to customer for order " + order.id);
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && t === "/orders") {
+    const rows = await e.DB.prepare("SELECT id,service_id,buyer_email,status FROM service_orders WHERE status IN('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 20").all<any>();
+    return say(e, chat, (rows.results || []).map(r => r.id + " | " + r.service_id + " | " + (r.buyer_email || "-") + " | " + r.status).join("\n") || "No service orders awaiting payment or fulfilment.");
   }
   if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/setcontact ")) {
     const [, id, handle] = t.split(/\s+/);
@@ -127,6 +163,19 @@ async function message(e: Env, m: Msg) {
   if (user === e.ADMIN_TELEGRAM_ID && t === "/pending") {
     const rows = await e.DB.prepare("SELECT id,profile_id,buyer_email,status FROM contact_requests WHERE status IN('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 20").all<any>();
     return say(e, chat, (rows.results || []).map(r => `${r.id} | ${r.profile_id} | ${r.buyer_email || "-"} | ${r.status}`).join("\n") || "No pending requests.");
+  }
+
+  const serviceOrder = await e.DB.prepare("SELECT id,status FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email') ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
+  if (serviceOrder?.status === "awaiting_request") {
+    if (t.length < 3 || t.length > 2000) return say(e, chat, "Please describe what you need in 3–2,000 characters.");
+    await e.DB.prepare("UPDATE service_orders SET request_text=?,status='awaiting_email',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_request'").bind(t, serviceOrder.id).run();
+    return say(e, chat, "Request saved. Now send your email address for payment and order confirmation.");
+  }
+  if (serviceOrder?.status === "awaiting_email") {
+    if (!emailRe.test(t)) return say(e, chat, "Please send a valid email address. Never send passwords, PINs or OTPs.");
+    if (!servicePrice(e) || !e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || provider(e) !== "selar") return say(e, chat, "The service checkout is not configured yet. Please try again later.");
+    await e.DB.prepare("UPDATE service_orders SET buyer_email=?,status='pending_payment',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_email'").bind(t.toLowerCase(), serviceOrder.id).run();
+    return say(e, chat, "Order reference: <code>" + serviceOrder.id + "</code>\n\nService fee: <b>" + money(servicePrice(e)!) + "</b>. Pay using the Selar product link below and use the same email you provided. The bot will confirm a validated payment and notify the admin; service details will be sent here after fulfilment.\n\n" + esc(e.SERVICE_CHECKOUT_URL) + "\n\nNever send passwords, PINs or OTPs.");
   }
   const req = await e.DB.prepare("SELECT id,status,profile_id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email') ORDER BY created_at DESC LIMIT 1").bind(user).first<{ id: string; status: string; profile_id: string }>();
   if (req?.status === "awaiting_email") {
