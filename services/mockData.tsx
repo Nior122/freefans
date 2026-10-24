@@ -11862,9 +11862,9 @@ const PROFILES: Profile[] = [
   },
   {
     id: 'bigtittygothegg',
-    name: 'BigTittyGothegg',
+    name: 'Big Titty Gothegg',
     handle: '@bigtittygothegg',
-    bio: 'Goth alt-girl creator sharing exclusive premium content. Imported from coomer.st/onlyfans/user/bigtittygothegg — 1,384 posts, 75,763 favorites.',
+    bio: 'Goth alt-girl creator sharing exclusive premium content 🖤 | Dark aesthetics, soft curves, dangerous energy 😈 | Subscribe and let\'s get personal 💋✨',
     avatarUrl: 'https://img.coomer.st/thumbnail/data/5e/da/5edab09d00ba3699f1183c3fb6da18f96d036264318219247217c36a870c1865.jpg',
     heroUrl: 'https://img.coomer.st/thumbnail/data/11/09/11092ee261569b6772cd0b13a51df940980d94cd75f2e57b2deaadcdf14760f1.jpg',
     tags: ['onlyfans', 'premium', 'exclusive', 'goth', 'alt', 'adult'],
@@ -11882,9 +11882,9 @@ const PROFILES: Profile[] = [
   },
   {
     id: 'imsadspice',
-    name: 'Imsadspice',
+    name: 'Imsad Spice',
     handle: '@imsadspice',
-    bio: 'OnlyFans creator sharing exclusive premium content. Imported from coomer.st/onlyfans/user/imsadspice — 936 posts, 43,483 favorites.',
+    bio: 'Exclusive content from imsadspice. Join for the most captivating and premium experiences.',
     avatarUrl: 'https://img.coomer.st/thumbnail/data/ae/ce/aece4ec4f53f4f069e5c70f7af39c630f6fd3ee156ae7faee58b049e4ac7377d.jpg',
     heroUrl: 'https://img.coomer.st/thumbnail/data/67/f6/67f64050cea5a21b32871e7cee30ffa25f455d2cba7c56908c75711ff945e7a0.jpg',
     tags: ['onlyfans', 'premium', 'exclusive', 'adult'],
