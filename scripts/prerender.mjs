@@ -88,6 +88,8 @@ function renderShell(meta) {
   let html = shell
     .replace(/<title>[\s\S]*?<\/title>/, `<title>${title}</title>`)
     .replace(/<meta name="description"[^>]*>/, `<meta name="description" content="${description}" />`)
+    // Drop shell-level canonical so per-page canonical is the only one present.
+    .replace(/\s*<link rel="canonical"[^>]*>/g, '')
     // Drop shell-level social tags so per-page tags are the only ones present.
     .replace(/\s*<meta property="og:(?!site_name)[^>]*>/g, '')
     .replace(/\s*<meta name="twitter:[^>]*>/g, '');
