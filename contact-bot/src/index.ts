@@ -371,7 +371,10 @@ export default {
       catch (err) { console.error("Telegram update failed", String(err)); }
       return json({ ok: true });
     }
-    if (request.method === "POST" && u.pathname === "/webhooks/selar-abandoned-cart") {\n      try { return await abandonedCart(request, env); } catch (err) { console.error("Selar abandoned-cart webhook failed", String(err)); return json({ error: "internal_error" }, 500); }\n    }\n    if (request.method === "POST" && u.pathname === "/webhooks/selar") {
+    if (request.method === "POST" && u.pathname === "/webhooks/selar-abandoned-cart") {
+      try { return await abandonedCart(request, env); } catch (err) { console.error("Selar abandoned-cart webhook failed", String(err)); return json({ error: "internal_error" }, 500); }
+    }
+    if (request.method === "POST" && u.pathname === "/webhooks/selar") {
       try { return await selar(request, env); } catch (err) { console.error("Selar webhook failed", String(err)); return json({ error: "internal_error" }, 500); }
     }
     return json({ error: "not_found" }, 404);
