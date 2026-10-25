@@ -316,6 +316,49 @@ async function selar(request: Request, e: Env) {
   }
   return json({ ok: true, matched: true });
 }
+
+async function abandonedCart(request: Request, e: Env) {
+  if (provider(e) !== "selar" || !methods(e).includes("selar")) return json({ error: "selar_is_not_enabled" }, 409);
+  if (!e.SELAR_WEBHOOK_SECRET || !safeEq(request.headers.get("x-selar-webhook-secret") || "", e.SELAR_WEBHOOK_SECRET)) return json({ error: "unauthorised" }, 401);
+  let body: unknown;
+  try { body = await request.json(); } catch { return json({ error: "invalid_json" }, 400); }
+  if (!body || typeof body !== "object") return json({ error: "invalid_cart_payload" }, 400);
+  const o = body as Record<string, any>;
+  const email = String(o.customer_email ?? o.email ?? o.customer?.email ?? "").trim().toLowerCase();
+  const productCode = String(o.product_code ?? o.productCode ?? o.all_product_codes ?? "").split(",")[0].trim();
+  const abandonedAt = String(o.abandoned_at ?? o.abandonedAt ?? "").trim();
+  if (!emailRe.test(email) || !productCode || !abandonedAt || !Number.isFinite(Date.parse(abandonedAt))) {
+    return json({ error: "invalid_cart_payload", expected: ["customer_email", "product_code", "abandoned_at"] }, 400);
+  }
+  // Only route events for a configured product. Do not guess a Telegram chat from email alone.
+  const kind: "contact" | "service" | null = productCode === e.SELAR_PRODUCT_ID ? "contact" : productCode === e.SERVICE_PRODUCT_ID ? "service" : null;
+  if (!kind) return json({ error: "wrong_product" }, 422);
+  const eventKey = await crypto.subtle.digest("SHA-256", new TextEncoder().encode([productCode, email, new Date(abandonedAt).toISOString()].join("|")));
+  const eventId = Array.from(new Uint8Array(eventKey)).map(b => b.toString(16).padStart(2, "0")).join("");
+  if (await e.DB.prepare("SELECT event_key FROM processed_abandoned_carts WHERE event_key=?").bind(eventId).first()) {
+    return json({ ok: true, duplicate: true });
+  }
+  let target: any = null;
+  if (kind === "contact") {
+    const rows = await e.DB.prepare("SELECT id,telegram_chat_id FROM contact_requests WHERE lower(buyer_email)=? AND status='pending_payment' AND payment_method='selar' ORDER BY created_at DESC LIMIT 2").bind(email).all<any>();
+    if (rows.results.length === 1) target = rows.results[0];
+  } else {
+    // Service orders intentionally do not collect email in Telegram. This match only works
+    // if a trusted integration has already linked the checkout email to that exact order.
+    const rows = await e.DB.prepare("SELECT id,telegram_chat_id FROM service_orders WHERE lower(buyer_email)=? AND status='pending_payment' ORDER BY created_at DESC LIMIT 2").bind(email).all<any>();
+    if (rows.results.length === 1) target = rows.results[0];
+  }
+  await e.DB.prepare("INSERT OR IGNORE INTO processed_abandoned_carts(event_key,product_code,request_id,abandoned_at) VALUES(?,?,?,?)").bind(eventId, productCode, target?.id ?? null, new Date(abandonedAt).toISOString()).run();
+  if (!target) return json({ ok: true, matched: false });
+  const checkout = kind === "service" ? e.SERVICE_CHECKOUT_URL : e.SELAR_CHECKOUT_URL;
+  if (!checkout) return json({ ok: true, matched: true, reminder_sent: false, reason: "checkout_not_configured" });
+  const extra = kind === "service"
+    ? "\\nIf you still want to continue, open checkout and enter your Fans order ID in the required checkout field."
+    : "\\nIf you still want to continue, you can return to the Selar checkout here.";
+  await say(e, target.telegram_chat_id, "It looks like your Selar checkout was not completed. If you already paid, please contact support and we will check it manually. We do not automatically mark payments as paid." + extra + "\\n\\n" + esc(checkout));
+  return json({ ok: true, matched: true, reminder_sent: true });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const u = new URL(request.url);
@@ -328,7 +371,7 @@ export default {
       catch (err) { console.error("Telegram update failed", String(err)); }
       return json({ ok: true });
     }
-    if (request.method === "POST" && u.pathname === "/webhooks/selar") {
+    if (request.method === "POST" && u.pathname === "/webhooks/selar-abandoned-cart") {\n      try { return await abandonedCart(request, env); } catch (err) { console.error("Selar abandoned-cart webhook failed", String(err)); return json({ error: "internal_error" }, 500); }\n    }\n    if (request.method === "POST" && u.pathname === "/webhooks/selar") {
       try { return await selar(request, env); } catch (err) { console.error("Selar webhook failed", String(err)); return json({ error: "internal_error" }, 500); }
     }
     return json({ error: "not_found" }, 404);
