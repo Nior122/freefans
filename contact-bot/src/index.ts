@@ -267,15 +267,24 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined) {
     await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Not authorised." }); return;
   }
-  const m = data.match(/^(approve|reject|selarverify):([0-9a-f-]{36})$/i);
+  const m = data.match(/^(approve|reject|selarverify|serviceverify):([0-9a-f-]{36})$/i);
   if (!m) { await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Unknown action." }); return; }
   const action = m[1].toLowerCase(), id = m[2];
+  if (action === "serviceverify") {
+    const service = await e.DB.prepare("SELECT id,telegram_chat_id,status,payment_method,payment_reference FROM service_orders WHERE id=?").bind(id).first<any>();
+    if (!service || service.status !== "pending_payment" || service.payment_method !== "selar" || !service.payment_reference) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "No sale notification is attached to this pending service order." });
+    await e.DB.prepare("UPDATE service_orders SET status='payment_verified',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(id).run();
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_payment_admin_verified',?,'Admin manually confirmed Selar payment')").bind(actor, id).run();
+    await say(e, service.telegram_chat_id, "The admin has manually confirmed your payment. Your service order is awaiting fulfilment.");
+    await say(e, e.ADMIN_TELEGRAM_ID, "Payment manually confirmed for service order <code>" + id + "</code>. Use /deliver " + id + " your service details when ready.");
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment confirmed by your admin action." });
+  }
   const r = await e.DB.prepare("SELECT id,telegram_chat_id,profile_id,status FROM contact_requests WHERE id=?").bind(id).first<RequestRow>();
   if (!r) { await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request not found." }); return; }
   if (action === "selarverify") {
     if (r.status !== "pending_payment") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request is not awaiting Selar verification." });
-    const paid = await e.DB.prepare("SELECT payment_reference,payment_amount_minor,payment_currency,payment_method FROM contact_requests WHERE id=?").bind(id).first<any>();
-    if (!paid || paid.payment_method !== "selar" || !paid.payment_reference || paid.payment_currency !== "NGN" || paid.payment_amount_minor !== Math.round((price(e) || 0) * 100)) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "No matching validated Selar sale is attached to this request." });
+    const paid = await e.DB.prepare("SELECT payment_reference,payment_method FROM contact_requests WHERE id=?").bind(id).first<any>();
+    if (!paid || paid.payment_method !== "selar" || !paid.payment_reference) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "No Selar sale notification is attached. Check Selar before confirming." });
     await e.DB.prepare("UPDATE contact_requests SET status='payment_verified',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment' AND payment_method='selar'").bind(id).run();
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,'selar_payment_admin_verified',?,?,?)").bind(actor, id, r.profile_id, "Admin reviewed validated Selar sale event").run();
     await say(e, r.telegram_chat_id, "The admin reviewed your Selar payment notification. Your request is now waiting for final approval.");
@@ -297,54 +306,53 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   await say(e, r.telegram_chat_id, `Request approved. Creator contact: <b>${esc(c.contact_value)}</b>\n\nPlease respect the creator's boundaries.`);
   return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Approved and sent." });
 }
-type Sale = { reference: string; email: string; orderId: string; amountMinor: number; currency: string; productId: string; paymentStatus: string };
-function normalise(body: unknown, orderFieldName: string): Sale | null {
+type Sale = { reference: string; email: string; customerName: string; productId: string };
+function normalise(body: unknown): Sale | null {
   if (!body || typeof body !== "object") return null;
   const o = body as Record<string, any>;
   const reference = String(o.reference ?? o.transaction_reference ?? o.transactionReference ?? o.sale_reference ?? o.saleReference ?? "").trim();
   const email = String(o.email ?? o.customer_email ?? o.customerEmail ?? o.customer?.email ?? "").trim().toLowerCase();
-  const orderId = String(o.fans_order_id ?? o.fansOrderId ?? o.order_id ?? o.custom_fields?.[orderFieldName] ?? o.checkout_form?.[orderFieldName] ?? "").trim();
-  const currency = String(o.currency ?? "").toUpperCase();
-  const raw = o.amount_minor ?? o.amountMinor ?? o.amount, amount = Number(raw);
-  const productId = String(o.product_id ?? o.productId ?? o.product ?? "").trim();
-  const paymentStatus = String(o.payment_status ?? o.paymentStatus ?? o.status ?? "").trim().toLowerCase();
-  // Fail closed: never infer currency or successful payment from a generic "New Sale" event.
-  if (!reference || (!emailRe.test(email) && !orderId) || !Number.isFinite(amount) || amount <= 0 || !/^[A-Z]{3}$/.test(currency) || !productId || !["paid", "completed", "success", "successful"].includes(paymentStatus)) return null;
-  const isMinor = o.amount_minor !== undefined || o.amountMinor !== undefined;
-  return { reference, email, orderId, amountMinor: isMinor ? Math.round(amount) : Math.round(amount * (10 ** currencyDigits(currency))), currency, productId, paymentStatus };
+  const customerName = String(o.customer_full_name ?? o.customer_name ?? o.full_name ?? o.fullName ?? o.name ?? o.customer?.name ?? "").trim();
+  const productId = String(o.product_code ?? o.productCode ?? o.product_id ?? o.productId ?? o.product ?? "").trim();
+  // Sale events notify the admin only. Amount, currency and payment status never verify payment.
+  if (!reference || !customerName || !productId) return null;
+  return { reference, email, customerName, productId };
 }
 async function selar(request: Request, e: Env) {
   if (provider(e) !== "selar" || !methods(e).includes("selar")) return json({ error: "selar_is_not_enabled" }, 409);
   if (!e.SELAR_WEBHOOK_SECRET || !safeEq(request.headers.get("x-selar-webhook-secret") || "", e.SELAR_WEBHOOK_SECRET)) return json({ error: "unauthorised" }, 401);
   let body: unknown;
   try { body = await request.json(); } catch { return json({ error: "invalid_json" }, 400); }
-  const s = normalise(body, (e.SERVICE_ORDER_FIELD_NAME || "").trim());
-  if (!s) return json({ error: "invalid_sale_payload", expected: ["reference", "email", "amount", "currency", "product_id", "payment_status"] }, 400);
+  const s = normalise(body);
+  if (!s) return json({ error: "invalid_sale_payload", expected: ["reference", "customer_full_name", "product_code"] }, 400);
   const kind: "contact" | "service" | null = s.productId === e.SELAR_PRODUCT_ID ? "contact" : s.productId === e.SERVICE_PRODUCT_ID ? "service" : null;
   if (!kind) return json({ error: "wrong_product" }, 422);
-  if (kind === "contact" && !emailRe.test(s.email)) return json({ error: "contact_sale_requires_buyer_email" }, 400);
-  if (kind === "service" && !/^[0-9a-f-]{36}$/i.test(s.orderId)) return json({ error: "service_sale_requires_fans_order_id", expected: "order_id mapped from Selar's configured Fans order ID custom checkout field" }, 400);
+  const code = codeInName(s.customerName);
+  if (!code) return json({ error: "sale_name_missing_order_code" }, 422);
   if (await e.DB.prepare("SELECT provider_reference FROM processed_sales WHERE provider_reference=?").bind(s.reference).first()) return json({ ok: true, duplicate: true });
   const rows = kind === "contact"
-    ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id FROM contact_requests WHERE buyer_email=? AND status='pending_payment' AND payment_method='selar' ORDER BY created_at DESC LIMIT 2").bind(s.email).all<any>()
-    : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id FROM service_orders WHERE id=? AND status='pending_payment' LIMIT 2").bind(s.orderId).all<any>();
+    ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name FROM contact_requests WHERE checkout_code=? AND status='pending_payment' AND payment_method='selar' LIMIT 2").bind(code).all<any>()
+    : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name FROM service_orders WHERE checkout_code=? AND status='pending_payment' LIMIT 2").bind(code).all<any>();
   if (rows.results.length !== 1) {
-    await say(e, e.ADMIN_TELEGRAM_ID, `Selar sale ${esc(s.reference)} for ${kind === "service" ? "FansLeak order " + esc(s.orderId) : esc(s.email)} matched ${rows.results.length} pending requests. No request unlocked; reconcile manually.`);
+    await say(e, e.ADMIN_TELEGRAM_ID, `Selar sale ${esc(s.reference)} with checkout code ${esc(code)} matched ${rows.results.length} pending orders. No payment status changed; reconcile manually.`);
     return json({ ok: true, matched: false });
   }
   const target = rows.results[0];
-  await e.DB.prepare("INSERT INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id) VALUES(?,?,?,?,?,?)").bind(s.reference, s.email, s.amountMinor, s.currency, s.productId ?? null, target.id).run();
+  const saleName = s.customerName.replace(new RegExp("\\s*" + code + "\\s*$", "i"), "").trim();
+  if (target.checkout_name && normName(target.checkout_name) !== normName(saleName)) {
+    await say(e, e.ADMIN_TELEGRAM_ID, "Selar sale " + esc(s.reference) + " includes code " + esc(code) + " but the name differs from the name submitted by the customer. Please check manually; no payment status changed.");
+    return json({ ok: true, matched: false, reason: "name_mismatch" });
+  }
+  await e.DB.prepare("INSERT INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id) VALUES(?,?,?,?,?,?)").bind(s.reference, s.email || "", 0, "UNK", s.productId, target.id).run();
   if (kind === "contact") {
-    await e.DB.prepare("UPDATE contact_requests SET payment_method='selar',payment_reference=?,payment_amount_minor=?,payment_currency=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment' AND payment_method='selar'").bind(s.reference, s.amountMinor, s.currency, target.id).run();
+    await e.DB.prepare("UPDATE contact_requests SET payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment' AND payment_method='selar'").bind(s.reference, target.id).run();
     const contact = await e.DB.prepare("SELECT sharing_enabled FROM creator_contacts WHERE profile_id=?").bind(target.profile_id).first<any>();
-  const markup = { inline_keyboard: [[{ text: "Verify Selar payment", callback_data: "selarverify:" + target.id }, { text: "Reject payment/request", callback_data: "reject:" + target.id }]] };
-  await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar payment notification — admin verification required</b>\nRequest: <code>${target.id}</code>\nProfile: ${esc(target.profile_id)}\nBuyer: ${esc(s.email)}\nAmount: ${saleMoney(s.amountMinor, s.currency)}\nPayment ref: ${esc(s.reference)}\nContact sharing enabled: ${contact?.sharing_enabled === 1 ? "yes" : "no"}`, markup);
+  const markup = { inline_keyboard: [[{ text: "Confirm payment manually", callback_data: "selarverify:" + target.id }, { text: "Reject request", callback_data: "reject:" + target.id }]] };
+  await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nRequest: <code>${target.id}</code>\nProfile: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nPayment reference: ${esc(s.reference)}\nContact sharing enabled: ${contact?.sharing_enabled === 1 ? "yes" : "no"}`, markup);
     await say(e, target.telegram_chat_id, "A Selar payment notification was received. The admin must review and verify it before your request can be approved.");
   } else {
-    const result = await e.DB.prepare("UPDATE service_orders SET payment_method='selar',payment_reference=?,payment_amount_minor=?,payment_currency=?,status='payment_verified',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(s.reference, s.amountMinor, s.currency, target.id).run();
-    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_payment_confirmed',?,?)").bind(e.ADMIN_TELEGRAM_ID, target.id, "Validated Selar sale for second product").run();
-    await say(e, e.ADMIN_TELEGRAM_ID, "<b>Service payment confirmed</b>\nOrder: <code>" + target.id + "</code>\nService: " + esc(target.profile_id) + "\nCustomer: @" + esc(target.telegram_username || "unknown") + " (Telegram ID " + esc(String(target.telegram_user_id)) + ")\nAmount: " + saleMoney(s.amountMinor, s.currency) + "\nPayment reference: " + esc(s.reference) + "\nCustomer request/conversation: " + esc(String(target.request_text || "Not provided").slice(-1800)) + "\n\nReply with: /deliver " + target.id + " your service details");
-    await say(e, target.telegram_chat_id, "Payment confirmed for order <code>" + target.id + "</code>. The admin has been notified. Your service details will be sent here after fulfilment.");
+    await e.DB.prepare("UPDATE service_orders SET payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(s.reference, target.id).run();
+    await say(e, e.ADMIN_TELEGRAM_ID, "<b>Selar sale received — please check manually</b>\nOrder: <code>" + target.id + "</code>\nService: " + esc(target.profile_id) + "\nCustomer name: " + esc(s.customerName) + "\nPayment reference: " + esc(s.reference) + "\nCustomer request/conversation: " + esc(String(target.request_text || "Not provided").slice(-1800)) + "\n\nConfirm only after checking Selar manually.", { inline_keyboard: [[{ text: "Confirm payment manually", callback_data: "serviceverify:" + target.id }]] });
   }
   return json({ ok: true, matched: true });
 }
