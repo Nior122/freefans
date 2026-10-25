@@ -15,7 +15,6 @@ export interface Env {
   SERVICE_PRICE_NGN?: string;
   SERVICE_CHECKOUT_URL?: string;
   SERVICE_PRODUCT_ID?: string;
-  SERVICE_ORDER_FIELD_NAME?: string;
   PAYMENT_PROVIDER?: string;
   PAYMENT_METHODS?: string;
   SITE_URL?: string;
