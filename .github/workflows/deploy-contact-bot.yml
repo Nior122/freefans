@@ -27,11 +27,6 @@ on:
         description: "Exact Selar product code for the second service/product"
         required: true
         type: string
-      service_order_field_name:
-        description: "Exact required Selar custom checkout field label for the Fans order ID"
-        required: true
-        default: "Fans order ID"
-        type: string
 
 permissions:
   contents: read
@@ -60,7 +55,6 @@ jobs:
           SERVICE_PRICE_NGN: ${{ inputs.service_price_ngn }}
           SERVICE_CHECKOUT_URL: ${{ inputs.service_selar_checkout_url }}
           SERVICE_PRODUCT_ID: ${{ inputs.service_selar_product_id }}
-          SERVICE_ORDER_FIELD_NAME: ${{ inputs.service_order_field_name }}
         run: |
           set -euo pipefail
           [[ "$CONTACT_PRICE_NGN" =~ ^[0-9]+([.][0-9]{1,2})?$ ]] || { echo "Invalid contact price"; exit 1; }
@@ -70,7 +64,6 @@ jobs:
           [[ "$SELAR_CHECKOUT_URL" == https://* ]] || { echo "Contact checkout URL must use HTTPS"; exit 1; }
           [[ "$SERVICE_CHECKOUT_URL" == https://* ]] || { echo "Service checkout URL must use HTTPS"; exit 1; }
           [[ -n "$SELAR_PRODUCT_ID" && -n "$SERVICE_PRODUCT_ID" && "$SELAR_PRODUCT_ID" != "$SERVICE_PRODUCT_ID" ]] || { echo "Use two distinct, non-empty Selar product codes"; exit 1; }
-          [[ -n "$SERVICE_ORDER_FIELD_NAME" ]] || { echo "Service order field name must be non-empty"; exit 1; }
 
       - name: Apply the idempotent service-orders migration
         env:
@@ -116,7 +109,6 @@ jobs:
           SERVICE_PRICE_NGN: ${{ inputs.service_price_ngn }}
           SERVICE_CHECKOUT_URL: ${{ inputs.service_selar_checkout_url }}
           SERVICE_PRODUCT_ID: ${{ inputs.service_selar_product_id }}
-          SERVICE_ORDER_FIELD_NAME: ${{ inputs.service_order_field_name }}
         run: |
           set -euo pipefail
           [[ "$CONTACT_PRICE_NGN" =~ ^[0-9]+([.][0-9]{1,2})?$ ]] || { echo "Invalid contact price"; exit 1; }
@@ -126,14 +118,12 @@ jobs:
           [[ "$SELAR_CHECKOUT_URL" == https://* ]] || { echo "Contact checkout URL must use HTTPS"; exit 1; }
           [[ "$SERVICE_CHECKOUT_URL" == https://* ]] || { echo "Service checkout URL must use HTTPS"; exit 1; }
           [[ -n "$SELAR_PRODUCT_ID" && -n "$SERVICE_PRODUCT_ID" && "$SELAR_PRODUCT_ID" != "$SERVICE_PRODUCT_ID" ]] || { echo "Use two distinct, non-empty Selar product codes"; exit 1; }
-          [[ -n "$SERVICE_ORDER_FIELD_NAME" ]] || { echo "Service order field name must be non-empty"; exit 1; }
           printf '%s' "$CONTACT_PRICE_NGN" | npx --yes wrangler@4 secret put CONTACT_PRICE_NGN --config contact-bot/wrangler.toml
           printf '%s' "$SELAR_CHECKOUT_URL" | npx --yes wrangler@4 secret put SELAR_CHECKOUT_URL --config contact-bot/wrangler.toml
           printf '%s' "$SELAR_PRODUCT_ID" | npx --yes wrangler@4 secret put SELAR_PRODUCT_ID --config contact-bot/wrangler.toml
           printf '%s' "$SERVICE_PRICE_NGN" | npx --yes wrangler@4 secret put SERVICE_PRICE_NGN --config contact-bot/wrangler.toml
           printf '%s' "$SERVICE_CHECKOUT_URL" | npx --yes wrangler@4 secret put SERVICE_CHECKOUT_URL --config contact-bot/wrangler.toml
           printf '%s' "$SERVICE_PRODUCT_ID" | npx --yes wrangler@4 secret put SERVICE_PRODUCT_ID --config contact-bot/wrangler.toml
-          printf '%s' "$SERVICE_ORDER_FIELD_NAME" | npx --yes wrangler@4 secret put SERVICE_ORDER_FIELD_NAME --config contact-bot/wrangler.toml
 
       - name: Configure required Worker secrets
         env:
