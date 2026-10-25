@@ -335,11 +335,14 @@ async function selar(request: Request, e: Env) {
   const s = normalise(body);
   if (!s) return json({ error: "invalid_sale_payload", expected: ["reference", "customer_full_name", "product_code"] }, 400);
   const kind: "contact" | "service" | null = s.productId === e.SELAR_PRODUCT_ID ? "contact" : s.productId === e.SERVICE_PRODUCT_ID ? "service" : null;
-  if (!kind) return json({ error: "wrong_product" }, 422);
+  if (!kind) {
+    await notifyAdminIfConfigured(e, `<b>Selar sale was for the wrong configured product</b>\nReference: <code>${esc(s.reference)}</code>\nCustomer name: ${esc(s.customerName)}\nProduct ID: ${esc(s.productId)}${s.email ? `\nEmail: ${esc(s.email)}` : "\nEmail: not supplied"}\nNo payment was verified automatically.`);
+    return json({ error: "wrong_product" }, 422);
+  }
   const code = codeInName(s.customerName);
   if (!code) {
     const adminEmail = s.email ? `\nSelar email: ${esc(s.email)}` : "";
-    await notifyAdminIfConfigured(e, `<b>Selar sale missing order code</b>\nReference: <code>${esc(s.reference)}</code>\nCustomer name: ${esc(s.customerName)}${adminEmail}\nThis is a customer-provided reconciliation clue only and does not verify payment or approve the request.`);
+    await notifyAdminIfConfigured(e, `<b>Selar sale missing order code</b>\nReference: <code>${esc(s.reference)}</code>\nCustomer name: ${esc(s.customerName)}${adminEmail}\nThis is a reconciliation clue only and does not verify payment or approve the request.`);
     return json({ ok: true, matched: false, reason: "missing_order_code" });
   }
   if (await e.DB.prepare("SELECT provider_reference FROM processed_sales WHERE provider_reference=?").bind(s.reference).first()) return json({ ok: true, duplicate: true });
@@ -347,8 +350,8 @@ async function selar(request: Request, e: Env) {
     ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE checkout_code=? AND status='pending_payment' AND payment_method='selar' LIMIT 2").bind(code).all<any>()
     : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name FROM service_orders WHERE checkout_code=? AND status='pending_payment' LIMIT 2").bind(code).all<any>();
   if (rows.results.length !== 1) {
-    const email = rows.results.length === 1 && rows.results[0]?.buyer_email ? rows.results[0].buyer_email : s.email;
-    const adminEmail = email ? `\nEmail: ${esc(email)}` : "\nEmail: not supplied";
+    const fallbackEmail = rows.results.length === 1 && rows.results[0]?.buyer_email ? rows.results[0].buyer_email : s.email;
+    const adminEmail = fallbackEmail ? `\nEmail: ${esc(fallbackEmail)}` : "\nEmail: not supplied";
     await notifyAdminIfConfigured(e, `<b>Selar sale requires manual reconciliation</b>\nReference: <code>${esc(s.reference)}</code>\nOrder code: <code>${esc(code)}</code>\nCustomer name: ${esc(s.customerName)}${adminEmail}\nMatched pending orders: ${rows.results.length}\nThis email is a reconciliation clue only and does not verify payment.`);
     return json({ ok: true, matched: false, reason: rows.results.length === 0 ? "no_matching_pending_order" : "ambiguous_match" });
   }
@@ -365,14 +368,13 @@ async function selar(request: Request, e: Env) {
     await e.DB.prepare("UPDATE contact_requests SET payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment' AND payment_method='selar'").bind(s.reference, target.id).run();
     const contact = await e.DB.prepare("SELECT sharing_enabled FROM creator_contacts WHERE profile_id=?").bind(target.profile_id).first<any>();
     const markup = { inline_keyboard: [[{ text: "Confirm payment manually", callback_data: "selarverify:" + target.id }, { text: "Reject request", callback_data: "reject:" + target.id }]] };
-    await notifyAdminIfConfigured(e, `<b>Selar sale received — please check manually</b>\nRequest: <code>${target.id}</code>\nProfile: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nOrder code: <code>${esc(code)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}\nThis email is a reconciliation clue only and does not verify payment.`);
-    await say(e, e.ADMIN_TELEGRAM_ID, "", markup);
+    await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nRequest: <code>${target.id}</code>\nProfile: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nOrder code: <code>${esc(code)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}\nThis email is a reconciliation clue only and does not verify payment.`, markup);
     if (contact?.sharing_enabled === 1) {
       await say(e, target.telegram_chat_id, "A Selar payment notification was received. The admin must review and verify it before your request can be approved.");
     }
   } else {
     await e.DB.prepare("UPDATE service_orders SET payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(s.reference, target.id).run();
-    await notifyAdminIfConfigured(e, "<b>Selar sale received — please check manually</b>\nOrder: <code>" + target.id + "</code>\nService: " + esc(target.profile_id) + "\nCustomer name: " + esc(s.customerName) + "\nOrder code: <code>" + esc(code) + "</code>\nEmail: " + esc(s.email || "not provided") + "\nThis email is a reconciliation clue only and does not verify payment.");
+    await say(e, e.ADMIN_TELEGRAM_ID, "<b>Selar sale received — please check manually</b>\nOrder: <code>" + target.id + "</code>\nService: " + esc(target.profile_id) + "\nCustomer name: " + esc(s.customerName) + "\nOrder code: <code>" + esc(code) + "</code>\nEmail: " + esc(s.email || "not provided") + "\nThis email is a reconciliation clue only and does not verify payment.");
   }
   return json({ ok: true, matched: true });
 }
