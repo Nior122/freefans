@@ -227,7 +227,7 @@ async function message(e: Env, m: Msg) {
   const req = await e.DB.prepare("SELECT id,status,profile_id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email') ORDER BY created_at DESC LIMIT 1").bind(user).first<{ id: string; status: string; profile_id: string }>();
   if (req?.status === "awaiting_email") {
     if (!emailRe.test(t)) return aiReply(e, chat, t, "Please send a valid email address to associate with your payment request. Never send passwords, PINs or OTPs.");
-    await e.DB.prepare("UPDATE contact_requests SET buyer_email=?,status='pending_payment',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_email'").bind(t.toLowerCase(), req.id).run();
+    await e.DB.prepare("UPDATE contact_requests SET buyer_email=?,status='pending_payment',payment_method='selar',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_email'").bind(t.toLowerCase(), req.id).run();
     const order = await e.DB.prepare("SELECT checkout_code FROM contact_requests WHERE id=?").bind(req.id).first<any>();
     return say(e, chat, `Open the Selar checkout. In the name field, enter your full name followed by this code exactly: <code>${esc(order?.checkout_code || "")}</code>. Example: <code>Joseph Unaogu ${esc(order?.checkout_code || "")}</code>. Use the same email you provided to the bot.\n\n${esc(e.SELAR_CHECKOUT_URL || "")}`, { inline_keyboard: [[{ text: "Done", callback_data: "done:" + req.id }]] });
   }
