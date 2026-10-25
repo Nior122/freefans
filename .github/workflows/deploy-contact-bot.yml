@@ -151,8 +151,8 @@ jobs:
           set -euo pipefail
           test -n "$TELEGRAM_BOT_TOKEN" || { echo "Missing GitHub secret TELEGRAM_BOT_TOKEN"; exit 1; }
           test -n "$TELEGRAM_WEBHOOK_SECRET" || { echo "Missing GitHub secret TELEGRAM_WEBHOOK_SECRET"; exit 1; }
-          subdomain="$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "https://api.cloudflare.com/client/v4/accounts/5f7678c82c50be845dba6bd8280bfae5/workers/scripts/fansleak-contact-bot/subdomain" | jq -er '.result.subdomain')"
-          test -n "$subdomain"
+          subdomain="$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "https://api.cloudflare.com/client/v4/accounts/5f7678c82c50be845dba6bd8280bfae5/workers/subdomain" | jq -er '.result.subdomain')"
+          test -n "$subdomain" || { echo "Could not determine the Cloudflare workers.dev account subdomain"; exit 1; }
           worker_url="https://fansleak-contact-bot.${subdomain}.workers.dev/telegram/webhook"
           curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
             --data-urlencode "url=$worker_url" \
