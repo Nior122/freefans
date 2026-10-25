@@ -307,13 +307,24 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Approved and sent." });
 }
 type Sale = { reference: string; email: string; customerName: string; productId: string };
+function selarProductCode(o: Record<string, any>): string {
+  // Zapier's actual Selar samples commonly leave product_code null and populate all_product_codes.
+  // Accept only one unambiguous product code; never guess from product name, amount, or currency.
+  const raw = [o.product_code, o.productCode, o.all_product_codes, o.allProductCodes]
+    .find(value => typeof value === "string" && value.trim());
+  if (typeof raw !== "string") return "";
+  const codes = [...new Set(raw.split(/[,;\\n]+/).map(value => value.trim()).filter(Boolean))];
+  return codes.length === 1 ? codes[0] : "";
+}
 function normalise(body: unknown): Sale | null {
   if (!body || typeof body !== "object") return null;
   const o = body as Record<string, any>;
-  const reference = String(o.reference ?? o.transaction_reference ?? o.transactionReference ?? o.sale_reference ?? o.saleReference ?? "").trim();
-  const email = String(o.email ?? o.customer_email ?? o.customerEmail ?? o.customer?.email ?? "").trim().toLowerCase();
-  const customerName = String(o.customer_full_name ?? o.customer_name ?? o.full_name ?? o.fullName ?? o.name ?? o.customer?.name ?? "").trim();
-  const productId = String(o.product_code ?? o.productCode ?? o.product_id ?? o.productId ?? o.product ?? "").trim();
+  // Selar's Zapier New Sale trigger exposes receipt_url, buyer_full_name, buyer_email,
+  // and all_product_codes. It does not expose a separate fans_order_id.
+  const reference = String(o.reference ?? o.transaction_reference ?? o.transactionReference ?? o.sale_reference ?? o.saleReference ?? o.receipt_url ?? o.receiptUrl ?? "").trim();
+  const email = String(o.email ?? o.buyer_email ?? o.customer_email ?? o.customerEmail ?? o.customer?.email ?? "").trim().toLowerCase();
+  const customerName = String(o.customer_full_name ?? o.buyer_full_name ?? o.customer_name ?? o.full_name ?? o.fullName ?? o.name ?? o.customer?.name ?? "").trim();
+  const productId = selarProductCode(o);
   // Sale events notify the admin only. Amount, currency and payment status never verify payment.
   if (!reference || !customerName || !productId) return null;
   return { reference, email, customerName, productId };
@@ -364,12 +375,9 @@ async function abandonedCart(request: Request, e: Env) {
   try { body = await request.json(); } catch { return json({ error: "invalid_json" }, 400); }
   if (!body || typeof body !== "object") return json({ error: "invalid_cart_payload" }, 400);
   const o = body as Record<string, any>;
-  const customerName = String(o.customer_full_name ?? o.customer_name ?? o.full_name ?? o.fullName ?? o.name ?? o.customer?.name ?? "").trim();
-  const productCode = String(o.product_code ?? o.productCode ?? o.all_product_codes ?? "").split(",")[0].trim();
+  const customerName = String(o.customer_full_name ?? o.buyer_full_name ?? o.customer_name ?? o.full_name ?? o.fullName ?? o.name ?? o.customer?.name ?? "").trim();
+  const productCode = selarProductCode(o);
   const abandonedAt = String(o.abandoned_at ?? o.abandonedAt ?? "").trim();
-  // This optional identifier is useful only if a trusted source actually includes it in the cart event.
-  // Selar's current Abandoned Cart sample does not include it, so never synthesize or infer it.
-  const fansOrderId = String(o.fans_order_id ?? o.fansOrderId ?? o.order_id ?? "").trim();
   if (!customerName || !productCode || !abandonedAt || !Number.isFinite(Date.parse(abandonedAt))) {
     return json({ error: "invalid_cart_payload", expected: ["customer_name", "product_code", "abandoned_at"] }, 400);
   }
