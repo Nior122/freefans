@@ -1,62 +1,64 @@
 # FansLeak Telegram Bot
 
-One Telegram bot, two separate Selar products, and two distinct customer journeys. The link the customer opens decides the workflow; customers are not shown a universal product menu.
+One Telegram bot supports two separate Selar products. The incoming link chooses the flow; customers are not shown a product menu.
 
-## The two links
+## Customer flows
 
-1. **FansLeak contact and assessment:** `https://t.me/KasiQueenbot?start=contact_PROFILE_ID`
-   - The profile ID comes from the FansLeak profile's Message button.
-   - The bot starts the contact request immediately, collects the customer's email, and sends the customer to the contact/assessment Selar checkout.
-   - The contact product's price, checkout URL, and Selar product code are configured separately.
-   - A validated sale event is matched to the contact product and request. The admin still verifies the payment and separately approves/rejects the request. Contact sharing requires recorded creator authorisation.
+### FansLeak contact/assessment
 
-2. **Second service/product purchase:** `https://t.me/KasiQueenbot?start=service_SERVICE_ID`
-   - The service ID identifies the second link; no product menu is shown.
-   - The AI chats with the customer to understand their request, asks clarifying questions, and shows the configured fixed price when the customer types `PAY`. No email is collected in Telegram.
-   - The checkout message includes a unique Fans order ID. Configure a required Selar custom checkout field named **Fans order ID** and have the trusted webhook adapter pass that field as `fans_order_id` (or `order_id` in the documented normalized payload) to this Worker. The exact field label is configurable as `SERVICE_ORDER_FIELD_NAME`. Selar may still request its standard checkout details separately.
-   - A validated sale event must match the exact second product code and pending Fans order ID, with an authoritative successful-payment status and a unique sale reference. Product identity is determined by the product code—not by price or currency. The bot records the transaction amount in the currency reported by Selar, marks that order paid, and notifies the admin and customer. Unpaid request text is hidden from `/orders` and is not sent to the admin.
-   - The admin sends fulfilment using `/deliver ORDER_ID service details`. The bot forwards those details to the Telegram chat attached to that order and marks it fulfilled. `/deliver` refuses orders that are not payment-verified.
+1. The customer opens a profile's Message link.
+2. The bot collects the customer's email in Telegram.
+3. The bot creates a unique checkout code such as `FL-7K4P9A` and sends the Selar checkout instructions.
+4. The customer must enter their full name followed by the exact code in Selar's **name field**, for example `Joseph Unaogu FL-7K4P9A`.
+5. After checkout, the customer taps **Done**. If the name and code have not been submitted to the bot yet, it asks the customer to send the exact name used at checkout, including the code.
+6. A matching Selar New Sale event notifies the admin. The bot does not verify payment. The admin checks Selar manually and uses the confirmation button only after confirming the payment. Contact approval and creator-authorised contact sharing remain separate steps.
 
-## Selar configuration
+### Second product/service
 
-Selar is the same payment provider for both products, but each product has its own configuration:
+1. The customer opens `https://t.me/KasiQueenbot?start=service_SERVICE_ID`.
+2. The AI assistant chats with the customer to understand the request. The customer types `PAY` when ready.
+3. The bot sends checkout instructions with a unique code, to be entered after the customer's full name in Selar's **name field**.
+4. The customer taps **Done** and, if asked, sends the exact full name including the code.
+5. A matching Selar New Sale event notifies the admin. The bot does not mark the order paid. The admin checks Selar manually and confirms payment using the button. Fulfilment is sent with `/deliver ORDER_ID service details` only after manual confirmation.
 
-- Contact: `CONTACT_PRICE_NGN`, `SELAR_CHECKOUT_URL`, `SELAR_PRODUCT_ID`
-- Second product: `SERVICE_PRICE_NGN`, `SERVICE_CHECKOUT_URL`, `SERVICE_PRODUCT_ID`, `SERVICE_ORDER_FIELD_NAME`
-- Shared: `SELAR_WEBHOOK_SECRET`
+## Selar event mapping
 
-Do not assume a URL slug is the provider's actual product identifier without checking the real Selar event. The webhook expects a trusted forwarding integration to send a normalized payload to `POST /webhooks/selar` with `X-Selar-Webhook-Secret`. The normalized contact-sale payload must contain a unique sale reference, buyer email, amount, currency, product code, and an authoritative successful-payment status. The normalized service-sale payload must contain a unique sale/transaction reference (never the customer order ID), the configured `Fans order ID` custom field mapped to `fans_order_id` or normalized `order_id`, amount, currency, product code, and an authoritative successful-payment status; service-sale matching does not depend on email. A generic “New Sale” event without trustworthy status must not be treated as proof of payment. If a sale matches zero or multiple pending orders, no order is unlocked; the admin is notified for reconciliation.
+The existing Zapier New Sale workflow should POST to `/webhooks/selar` with `X-Selar-Webhook-Secret` and normalized fields:
 
-### Abandoned-cart follow-up
+- `reference`: unique Selar sale/transaction reference
+- `customer_full_name`: full name exactly as Selar received it, including the `FL-XXXXXX` code
+- `product_code`: the exact Selar product code
 
-Zapier's Selar **Abandoned Cart** trigger should POST the trigger's original fields to `/webhooks/selar-abandoned-cart` with the header `X-Selar-Webhook-Secret` set to the same secret used by the sale webhook. Required fields are `customer_email`, `product_code`, and `abandoned_at`; map them from Selar's `customer_email`, `product_code`, and `abandoned_at` fields. This is a separate backend route from `/webhooks/selar`, so an abandoned cart never creates a payment-verification alert.
+The existing Abandoned Cart workflow should POST to `/webhooks/selar-abandoned-cart` with the same secret and:
 
-The Worker deduplicates repeated abandoned-cart events and sends a neutral reminder only when the event uniquely identifies a pending bot request. Contact requests match the email already collected by the contact flow, exact product code, and pending Selar-payment state. It never marks payment as verified. If an event cannot be matched uniquely, it records the event and does not message a customer or notify the admin.
+- `customer_name`: full name entered in Selar, including the code
+- `product_code`: the exact Selar product code
+- `abandoned_at`: the event timestamp
 
-**Service-order identification is deliberately stricter:** the service flow does not collect an email in Telegram. A service abandoned-cart event must include the exact `fans_order_id` (or `fansOrderId` / `order_id`) from a trusted source, and that ID must match exactly one pending service order. Selar's current Abandoned Cart sample does not include that field or a Telegram chat ID, so the standard event will be safely recorded without a service reminder. Do not match by email, most-recent order, price, or timing. Service reminders can be enabled only after the event source can provide the exact order ID reliably. The existing contact-request flow can be matched by the email the customer already provided to the bot.
+Both endpoints route to the correct order by the configured product code plus the unique code in the customer's name. Abandoned-cart events send a customer reminder only when the name/code matches one pending order. Duplicate abandoned-cart events are deduplicated. An event with missing or ambiguous fields fails closed.
 
-The contact and service workflows share the Selar webhook and are separated by exact product code. Price and currency are recorded from the successful sale but are not used to identify which product was purchased. Contact payments continue through the contact verification/approval process; service purchases use the separate order table and fulfilment process. The raw Selar custom-field payload mapping still must be verified against a real test sale before launch; until then, missing/unrecognized order IDs fail closed and no service request is released.
+**Important:** the current Zapier trigger samples showed a product-code mismatch during inspection. Confirm the real field mappings and product codes before any live launch. Do not send a test purchase or test message to production for this check.
+
+## Payment rules
+
+- **The admin alone confirms payment.** A New Sale event only triggers an admin notification; it never changes an order to payment-verified by itself.
+- Amount, currency, and the product's configured price are not used to match an order or verify payment.
+- A customer's Done tap or submitted name/code is not proof of payment.
+- A name/code mismatch, missing code, unknown product code, or ambiguous match does not verify payment.
+- Contact requests still require the existing separate admin approval and creator authorisation before sharing contact details.
+- Service fulfilment remains blocked until an admin manually confirms payment.
+
+## Runtime and deployment
+
+- Cloudflare Worker + D1; the Worker has not been deployed by this change.
+- Migration `0004_checkout_codes.sql` adds per-order checkout codes and tracks the customer-name prompt after Done.
+- The GitHub Actions deploy workflow is manual. Do not run it without explicit authorization; it applies D1 migrations, deploys the Worker, updates secrets, and connects Telegram's webhook.
+- Existing Zapier configuration is not changed by this PR.
+- Required GitHub Actions secrets: `CLOUDFLARE_API_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `ADMIN_TELEGRAM_ID`, and `SELAR_WEBHOOK_SECRET`.
 
 ## Admin commands
 
 - `/pending` — contact requests awaiting payment verification or approval.
-- `/orders` — second-product orders awaiting payment or fulfilment.
-- `/deliver ORDER_ID service details` — send fulfilment details to a payment-verified service customer.
-- `/setcontact PROFILE_ID @handle` — save a creator contact with sharing disabled.
-- `/enablecontact PROFILE_ID` — record admin confirmation that the creator authorised sharing.
-
-## Runtime and database
-
-Cloudflare Worker + D1 for `@KasiQueenbot`; Workers AI is customer support only. It cannot confirm payment, approve contact requests, or release contact details. The `service_orders` table is included in `schema.sql` and must be applied before the updated Worker is launched. This change has not been deployed or applied to the live D1 database.
-
-## Deployment workflow
-
-The GitHub Actions deployment workflow is manual only. It accepts separate contact and second-product prices, checkout URLs, and Selar product codes, configures the shared bot/webhook secrets, deploys the Worker, and connects Telegram's webhook. Do not run it until both product configurations and the real normalized Selar event mapping have been verified.
-
-Required GitHub repository Actions secrets: `CLOUDFLARE_API_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `ADMIN_TELEGRAM_ID`, and `SELAR_WEBHOOK_SECRET`. Never paste secret values into GitHub issues or chat messages.
-
-## Current status
-
-- Changes are on the feature branch / PR only.
-- No Worker deployment, Telegram webhook connection, live D1 migration, or PR merge has been performed.
-- Test the real Selar payload mapping and run the non-deploying Wrangler compile check before launch.
+- `/orders` — service orders awaiting payment or fulfilment.
+- `/deliver ORDER_ID service details` — send fulfilment to a service customer after manual payment confirmation.
+- `/setcontact PROFILE_ID @handle` and `/enablecontact PROFILE_ID` — manage creator contact sharing consent.
