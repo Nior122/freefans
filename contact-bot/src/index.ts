@@ -55,6 +55,10 @@ async function tg(e: Env, method: string, data: Record<string, unknown>) {
 async function say(e: Env, chat: string | number, text: string, markup?: unknown) {
   return tg(e, "sendMessage", { chat_id: chat, text, parse_mode: "HTML", disable_web_page_preview: true, ...(markup ? { reply_markup: markup } : {}) });
 }
+async function notifyAdminIfConfigured(e: Env, text: string) {
+  if (!e.ADMIN_TELEGRAM_ID) return;
+  await say(e, e.ADMIN_TELEGRAM_ID, text);
+}
 async function catalogue(e: Env): Promise<Profile[]> {
   const r = await fetch(`${(e.SITE_URL || "https://fansleak.pages.dev").replace(/\/$/, "")}/contact-catalogue.json`);
   if (!r.ok) throw new Error("profile catalogue unavailable");
@@ -76,7 +80,7 @@ async function start(e: Env, m: Msg, payload: string) {
   if (!profile) return say(e, chat, "That profile is not currently in the public FansLeak catalogue.");
   if (enabledMethods(e).length === 0) {
     await say(e, chat, "Contact requests are not accepting payments yet. Please try again later.");
-    await say(e, e.ADMIN_TELEGRAM_ID, "Setup required: configure the Selar checkout URL and product code.");
+    await notifyAdminIfConfigured(e, "Setup required: configure the Selar checkout URL and product code.");
     return;
   }
   const activeService = await e.DB.prepare("SELECT id FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
@@ -84,10 +88,9 @@ async function start(e: Env, m: Msg, payload: string) {
   const active = await e.DB.prepare("SELECT id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
   if (active) return say(e, chat, "You already have a request in progress. Finish it or contact support before starting another.");
   const requestId = crypto.randomUUID(), code = checkoutCode();
-  await e.DB.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,telegram_username,profile_id,status,checkout_code) VALUES(?,?,?,?,?,'pending_payment',?)").bind(requestId, user, chat, m.from?.username || "", profile.id, code).run();
-  const handle = profile.handle ? ` (@${profile.handle.replace(/^@/, "")})` : "";
-  const intro = `Hi! I’m the FansLeak contact assistant for ${esc(profile.name)}${handle}. I’ve started your contact request for ${esc(profile.name)} and created your unique order code: <code>${esc(code)}</code>.`;
-  const instructions = `Tap the Selar button below to open the checkout. In the customer name field, enter your full name followed by this code exactly, for example: <code>Joseph Unaogu ${esc(code)}</code>. This lets the admin match your payment to the correct request. If the payment later needs manual reconciliation, you can send your email as a fallback clue.`;
+  await e.DB.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,telegram_username,profile_id,status,payment_method,checkout_code) VALUES(?,?,?,?,?,'pending_payment','selar',?)").bind(requestId, user, chat, m.from?.username || "", profile.id, code).run();
+  const intro = `Hi! I’m the FansLeak contact assistant for ${esc(profile.name)}. I’ve started your contact request for ${esc(profile.name)} and created your unique order code: <code>${esc(code)}</code>.`;
+  const instructions = `Tap the Selar button below to open the checkout. In the customer name field, enter your full name followed by this code exactly, for example: <code>Joseph Unaogu ${esc(code)}</code>. This lets the admin match your payment to the correct request. If matching later needs help, you can send your email as a fallback clue.`;
   return say(e, chat, `${intro}\n\n${instructions}`, paymentKeyboard(e, requestId));
 }
 
@@ -113,7 +116,7 @@ async function startService(e: Env, m: Msg, serviceId: string) {
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(serviceId)) return say(e, chat, "Invalid service purchase link.");
   if (!e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || provider(e) !== "selar") {
     await say(e, chat, "This service purchase is not accepting orders yet. Please try again later.");
-    await say(e, e.ADMIN_TELEGRAM_ID, "Service purchase setup required: configure the service Selar checkout URL and product code.");
+    await notifyAdminIfConfigured(e, "Service purchase setup required: configure the service Selar checkout URL and product code.");
     return;
   }
   const activeContact = await e.DB.prepare("SELECT id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
@@ -219,16 +222,14 @@ async function message(e: Env, m: Msg) {
   }
   const submittedCode = codeInName(t);
   if (submittedCode) return say(e, chat, "To submit your checkout name, tap Done on your checkout instructions first.");
-  const req = await e.DB.prepare("SELECT id,status,profile_id,buyer_email FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment') ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
+  const req = await e.DB.prepare("SELECT id,status,profile_id,buyer_email,checkout_code FROM contact_requests WHERE telegram_user_id=? AND status IN('pending_payment') ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
   if (req?.status === "pending_payment" && emailRe.test(t) && !req.buyer_email) {
-    await e.DB.prepare("UPDATE contact_requests SET buyer_email=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(t.toLowerCase(), req.id).run();
-    return say(e, chat, "Thanks — your email has been saved as a fallback reconciliation clue. It is only used if the admin needs to match a payment manually.");
-  }
-  if (req?.status === "awaiting_email") {
-    if (!emailRe.test(t)) return aiReply(e, chat, t, "Please send a valid email address to associate with your payment request. Never send passwords, PINs or OTPs.");
-    await e.DB.prepare("UPDATE contact_requests SET buyer_email=?,status='pending_payment',payment_method='selar',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_email'").bind(t.toLowerCase(), req.id).run();
-    const order = await e.DB.prepare("SELECT checkout_code FROM contact_requests WHERE id=?").bind(req.id).first<any>();
-    return say(e, chat, `Open the Selar checkout. In the name field, enter your full name followed by this code exactly: <code>${esc(order?.checkout_code || "")}</code>. Example: <code>Joseph Unaogu ${esc(order?.checkout_code || "FL-7K4P9A")}</code>. If payment needs troubleshooting later, send your email as a fallback clue.`);
+    const email = t.toLowerCase();
+    await e.DB.prepare("UPDATE contact_requests SET buyer_email=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(email, req.id).run();
+    if (e.ADMIN_TELEGRAM_ID) {
+      await say(e, e.ADMIN_TELEGRAM_ID, `Customer supplied a reconciliation clue for contact request <code>${esc(req.id)}</code>\nProfile: ${esc(req.profile_id || "unknown")}\nOrder code: <code>${esc(req.checkout_code || "")}</code>\nEmail: <code>${esc(email)}</code>\nThis is a customer-provided reconciliation clue only and does not verify payment or approve the request.`);
+    }
+    return say(e, chat, "Thanks — your email has been saved as a fallback reconciliation clue. It is only used if the admin needs to match a payment manually, and it does not verify payment.");
   }
   return aiReply(e, chat, t, "To start a contact request, open a profile on FansLeak and tap its Message button. Payment always requires admin verification and approval.");
 }
@@ -337,35 +338,41 @@ async function selar(request: Request, e: Env) {
   if (!kind) return json({ error: "wrong_product" }, 422);
   const code = codeInName(s.customerName);
   if (!code) {
-    await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale missing order code</b>\nReference: <code>${esc(s.reference)}</code>\nCustomer name: ${esc(s.customerName)}${s.email ? `\nEmail: ${esc(s.email)}` : ""}\nThis email is only a reconciliation clue; no payment was verified automatically.`);
+    const adminEmail = s.email ? `\nSelar email: ${esc(s.email)}` : "";
+    await notifyAdminIfConfigured(e, `<b>Selar sale missing order code</b>\nReference: <code>${esc(s.reference)}</code>\nCustomer name: ${esc(s.customerName)}${adminEmail}\nThis is a customer-provided reconciliation clue only and does not verify payment or approve the request.`);
     return json({ ok: true, matched: false, reason: "missing_order_code" });
   }
   if (await e.DB.prepare("SELECT provider_reference FROM processed_sales WHERE provider_reference=?").bind(s.reference).first()) return json({ ok: true, duplicate: true });
   const rows = kind === "contact"
-    ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name FROM contact_requests WHERE checkout_code=? AND status='pending_payment' AND payment_method='selar' LIMIT 2").bind(code).all<any>()
+    ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE checkout_code=? AND status='pending_payment' AND payment_method='selar' LIMIT 2").bind(code).all<any>()
     : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name FROM service_orders WHERE checkout_code=? AND status='pending_payment' LIMIT 2").bind(code).all<any>();
   if (rows.results.length !== 1) {
-    await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale requires manual reconciliation</b>\nReference: <code>${esc(s.reference)}</code>\nOrder code: <code>${esc(code)}</code>\nCustomer name: ${esc(s.customerName)}${s.email ? `\nEmail: ${esc(s.email)}` : ""}\nMatched pending orders: ${rows.results.length}\nThis email is only a reconciliation clue; no payment was verified automatically.`);
+    const email = rows.results.length === 1 && rows.results[0]?.buyer_email ? rows.results[0].buyer_email : s.email;
+    const adminEmail = email ? `\nEmail: ${esc(email)}` : "\nEmail: not supplied";
+    await notifyAdminIfConfigured(e, `<b>Selar sale requires manual reconciliation</b>\nReference: <code>${esc(s.reference)}</code>\nOrder code: <code>${esc(code)}</code>\nCustomer name: ${esc(s.customerName)}${adminEmail}\nMatched pending orders: ${rows.results.length}\nThis email is a reconciliation clue only and does not verify payment.`);
     return json({ ok: true, matched: false, reason: rows.results.length === 0 ? "no_matching_pending_order" : "ambiguous_match" });
   }
   const target = rows.results[0];
   const saleName = s.customerName.replace(new RegExp("\\s*" + code + "\\s*$", "i"), "").trim();
   if (target.checkout_name && normName(target.checkout_name) !== normName(saleName)) {
-    await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale name mismatch</b>\nReference: <code>${esc(s.reference)}</code>\nOrder code: <code>${esc(code)}</code>\nCustomer name: ${esc(s.customerName)}${s.email ? `\nEmail: ${esc(s.email)}` : ""}\nSubmitted name: ${esc(target.checkout_name)}\nThis email is only a reconciliation clue; no payment was verified automatically.`);
+    const email = String(target.buyer_email || s.email || "").trim();
+    const adminEmail = email ? `\nEmail: ${esc(email)}` : "\nEmail: not supplied";
+    await notifyAdminIfConfigured(e, `<b>Selar sale name mismatch</b>\nReference: <code>${esc(s.reference)}</code>\nOrder code: <code>${esc(code)}</code>\nCustomer name: ${esc(s.customerName)}\nSubmitted name: ${esc(target.checkout_name)}${adminEmail}\nThis email is a reconciliation clue only and does not verify payment.`);
     return json({ ok: true, matched: false, reason: "name_mismatch" });
   }
-  await e.DB.prepare("INSERT INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id) VALUES(?,?,?,?,?,?)").bind(s.reference, s.email || "", 0, "UNK", s.productId, target.id).run();
+  await e.DB.prepare("INSERT INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id) VALUES(?,?,?,?,?,?)").bind(s.reference, s.email || target.buyer_email || "", 0, "UNK", s.productId, target.id).run();
   if (kind === "contact") {
     await e.DB.prepare("UPDATE contact_requests SET payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment' AND payment_method='selar'").bind(s.reference, target.id).run();
     const contact = await e.DB.prepare("SELECT sharing_enabled FROM creator_contacts WHERE profile_id=?").bind(target.profile_id).first<any>();
     const markup = { inline_keyboard: [[{ text: "Confirm payment manually", callback_data: "selarverify:" + target.id }, { text: "Reject request", callback_data: "reject:" + target.id }]] };
-    await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nRequest: <code>${target.id}</code>\nProfile: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nOrder code: <code>${esc(code)}</code>\nEmail: ${esc(s.email || "not provided")}\nThis email is only a reconciliation clue; do not approve payment based on it alone.`, markup);
+    await notifyAdminIfConfigured(e, `<b>Selar sale received — please check manually</b>\nRequest: <code>${target.id}</code>\nProfile: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nOrder code: <code>${esc(code)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}\nThis email is a reconciliation clue only and does not verify payment.`);
+    await say(e, e.ADMIN_TELEGRAM_ID, "", markup);
     if (contact?.sharing_enabled === 1) {
       await say(e, target.telegram_chat_id, "A Selar payment notification was received. The admin must review and verify it before your request can be approved.");
     }
   } else {
     await e.DB.prepare("UPDATE service_orders SET payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(s.reference, target.id).run();
-    await say(e, e.ADMIN_TELEGRAM_ID, "<b>Selar sale received — please check manually</b>\nOrder: <code>" + target.id + "</code>\nService: " + esc(target.profile_id) + "\nCustomer name: " + esc(s.customerName) + "\nOrder code: <code>" + esc(code) + "</code>\nEmail: " + esc(s.email || "not provided") + "\nThis email is only a reconciliation clue; no payment was verified automatically.");
+    await notifyAdminIfConfigured(e, "<b>Selar sale received — please check manually</b>\nOrder: <code>" + target.id + "</code>\nService: " + esc(target.profile_id) + "\nCustomer name: " + esc(s.customerName) + "\nOrder code: <code>" + esc(code) + "</code>\nEmail: " + esc(s.email || "not provided") + "\nThis email is a reconciliation clue only and does not verify payment.");
   }
   return json({ ok: true, matched: true });
 }
