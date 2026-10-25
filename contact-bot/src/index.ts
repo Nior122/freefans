@@ -348,10 +348,10 @@ async function abandonedCart(request: Request, e: Env) {
     const rows = await e.DB.prepare("SELECT id,telegram_chat_id FROM service_orders WHERE lower(buyer_email)=? AND status='pending_payment' ORDER BY created_at DESC LIMIT 2").bind(email).all<any>();
     if (rows.results.length === 1) target = rows.results[0];
   }
+  const checkout = kind === "service" ? e.SERVICE_CHECKOUT_URL : e.SELAR_CHECKOUT_URL;
+  if (target && !checkout) return json({ ok: true, matched: true, reminder_sent: false, reason: "checkout_not_configured" });
   await e.DB.prepare("INSERT OR IGNORE INTO processed_abandoned_carts(event_key,product_code,request_id,abandoned_at) VALUES(?,?,?,?)").bind(eventId, productCode, target?.id ?? null, new Date(abandonedAt).toISOString()).run();
   if (!target) return json({ ok: true, matched: false });
-  const checkout = kind === "service" ? e.SERVICE_CHECKOUT_URL : e.SELAR_CHECKOUT_URL;
-  if (!checkout) return json({ ok: true, matched: true, reminder_sent: false, reason: "checkout_not_configured" });
   const extra = kind === "service"
     ? "\nIf you still want to continue, open checkout and enter your Fans order ID in the required checkout field."
     : "\nIf you still want to continue, you can return to the Selar checkout here.";
