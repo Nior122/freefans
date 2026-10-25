@@ -364,14 +364,14 @@ async function abandonedCart(request: Request, e: Env) {
   try { body = await request.json(); } catch { return json({ error: "invalid_json" }, 400); }
   if (!body || typeof body !== "object") return json({ error: "invalid_cart_payload" }, 400);
   const o = body as Record<string, any>;
-  const email = String(o.customer_email ?? o.email ?? o.customer?.email ?? "").trim().toLowerCase();
+  const customerName = String(o.customer_full_name ?? o.customer_name ?? o.full_name ?? o.fullName ?? o.name ?? o.customer?.name ?? "").trim();
   const productCode = String(o.product_code ?? o.productCode ?? o.all_product_codes ?? "").split(",")[0].trim();
   const abandonedAt = String(o.abandoned_at ?? o.abandonedAt ?? "").trim();
   // This optional identifier is useful only if a trusted source actually includes it in the cart event.
   // Selar's current Abandoned Cart sample does not include it, so never synthesize or infer it.
   const fansOrderId = String(o.fans_order_id ?? o.fansOrderId ?? o.order_id ?? "").trim();
-  if (!emailRe.test(email) || !productCode || !abandonedAt || !Number.isFinite(Date.parse(abandonedAt))) {
-    return json({ error: "invalid_cart_payload", expected: ["customer_email", "product_code", "abandoned_at"] }, 400);
+  if (!customerName || !productCode || !abandonedAt || !Number.isFinite(Date.parse(abandonedAt))) {
+    return json({ error: "invalid_cart_payload", expected: ["customer_name", "product_code", "abandoned_at"] }, 400);
   }
   // Only route events for a configured product. Do not guess a Telegram chat from email alone.
   const kind: "contact" | "service" | null = productCode === e.SELAR_PRODUCT_ID ? "contact" : productCode === e.SERVICE_PRODUCT_ID ? "service" : null;
@@ -381,26 +381,24 @@ async function abandonedCart(request: Request, e: Env) {
   if (await e.DB.prepare("SELECT event_key FROM processed_abandoned_carts WHERE event_key=?").bind(eventId).first()) {
     return json({ ok: true, duplicate: true });
   }
+  const code = codeInName(customerName);
   let target: any = null;
-  if (kind === "contact") {
-    const rows = await e.DB.prepare("SELECT id,telegram_chat_id FROM contact_requests WHERE lower(buyer_email)=? AND status='pending_payment' AND payment_method='selar' ORDER BY created_at DESC LIMIT 2").bind(email).all<any>();
-    if (rows.results.length === 1) target = rows.results[0];
-  } else if (/^[0-9a-f-]{36}$/i.test(fansOrderId)) {
-    // Service customers do not provide email in Telegram. Match only an exact order ID
-    // explicitly supplied by a trusted event adapter; never guess from email or recency.
-    const rows = await e.DB.prepare("SELECT id,telegram_chat_id FROM service_orders WHERE id=? AND status='pending_payment' LIMIT 2").bind(fansOrderId).all<any>();
-    if (rows.results.length === 1) target = rows.results[0];
+  const saleName = code ? customerName.replace(new RegExp("\\s*" + code + "\\s*$", "i"), "").trim() : "";
+  if (code && kind === "contact") {
+    const rows = await e.DB.prepare("SELECT id,telegram_chat_id,checkout_name FROM contact_requests WHERE checkout_code=? AND status='pending_payment' AND payment_method='selar' LIMIT 2").bind(code).all<any>();
+    if (rows.results.length === 1 && (!rows.results[0].checkout_name || normName(rows.results[0].checkout_name) === normName(saleName))) target = rows.results[0];
+  } else if (code && kind === "service") {
+    const rows = await e.DB.prepare("SELECT id,telegram_chat_id,checkout_name FROM service_orders WHERE checkout_code=? AND status='pending_payment' LIMIT 2").bind(code).all<any>();
+    if (rows.results.length === 1 && (!rows.results[0].checkout_name || normName(rows.results[0].checkout_name) === normName(saleName))) target = rows.results[0];
   }
   const checkout = kind === "service" ? e.SERVICE_CHECKOUT_URL : e.SELAR_CHECKOUT_URL;
   if (target && !checkout) return json({ ok: true, matched: true, reminder_sent: false, reason: "checkout_not_configured" });
   const recorded = await e.DB.prepare("INSERT OR IGNORE INTO processed_abandoned_carts(event_key,product_code,request_id,abandoned_at) VALUES(?,?,?,?)").bind(eventId, productCode, target?.id ?? null, new Date(abandonedAt).toISOString()).run();
   if (recorded.meta?.changes === 0) return json({ ok: true, duplicate: true });
   if (!target) return json({ ok: true, matched: false });
-  const extra = kind === "service"
-    ? "\nIf you still want to continue, open checkout and enter your Fans order ID in the required checkout field."
-    : "\nIf you still want to continue, you can return to the Selar checkout here.";
+  const extra = "\nIf you still want to continue, enter your full name followed by the unique code in the Selar name field.";
   try {
-    await say(e, target.telegram_chat_id, "It looks like your Selar checkout was not completed. If you already paid, please contact support and we will check it manually. We do not automatically mark payments as paid." + extra + "\n\n" + esc(checkout));
+    await say(e, target.telegram_chat_id, "It looks like your Selar checkout was not completed. If you already paid, please contact support and we will check it manually. The bot does not confirm payments." + extra + "\n\n" + esc(checkout), { inline_keyboard: [[{ text: "Done", callback_data: "done:" + target.id }]] });
   } catch (err) {
     // Let a provider retry if Telegram rejected the send; don't permanently consume the event.
     await e.DB.prepare("DELETE FROM processed_abandoned_carts WHERE event_key=?").bind(eventId).run();
