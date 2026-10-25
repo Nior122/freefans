@@ -204,7 +204,7 @@ async function message(e: Env, m: Msg) {
   const prompt = await e.DB.prepare("SELECT order_id,order_kind FROM checkout_name_prompts WHERE telegram_user_id=?").bind(user).first<any>();
   if (prompt) {
     const code = codeInName(t);
-    if (!code) return say(e, chat, "I couldn't find the order code. Please send your exact full name followed by the code shown in checkout, for example: Joseph Unaogu FL-7K4P9.");
+    if (!code) return say(e, chat, "I couldn't find the order code. Please send your exact full name followed by the code shown in checkout, for example: Joseph Unaogu FL-7K4P9A.");
     const fullName = t.replace(new RegExp("\\s*" + code + "\\s*$", "i"), "").trim();
     if (fullName.length < 2) return say(e, chat, "Please include your full name before the code, for example: Joseph Unaogu " + code + ".");
     const table = prompt.order_kind === "contact" ? "contact_requests" : "service_orders";
@@ -305,7 +305,7 @@ function selarProductCode(o: Record<string, any>): string {
   const raw = [o.product_code, o.productCode, o.all_product_codes, o.allProductCodes]
     .find(value => typeof value === "string" && value.trim());
   if (typeof raw !== "string") return "";
-  const codes = [...new Set(raw.split(/[,;\\n]+/).map(value => value.trim()).filter(Boolean))];
+  const codes = [...new Set(raw.split(/[,;\n]+/).map(value => value.trim()).filter(Boolean))];
   return codes.length === 1 ? codes[0] : "";
 }
 function normalise(body: unknown): Sale | null {
