@@ -376,7 +376,7 @@ async function abandonedCart(request: Request, e: Env) {
   // Only route events for a configured product. Do not guess a Telegram chat from email alone.
   const kind: "contact" | "service" | null = productCode === e.SELAR_PRODUCT_ID ? "contact" : productCode === e.SERVICE_PRODUCT_ID ? "service" : null;
   if (!kind) return json({ error: "wrong_product" }, 422);
-  const eventKey = await crypto.subtle.digest("SHA-256", new TextEncoder().encode([productCode, email, new Date(abandonedAt).toISOString(), fansOrderId].join("|")));
+  const eventKey = await crypto.subtle.digest("SHA-256", new TextEncoder().encode([productCode, normName(customerName), new Date(abandonedAt).toISOString()].join("|")));
   const eventId = Array.from(new Uint8Array(eventKey)).map(b => b.toString(16).padStart(2, "0")).join("");
   if (await e.DB.prepare("SELECT event_key FROM processed_abandoned_carts WHERE event_key=?").bind(eventId).first()) {
     return json({ ok: true, duplicate: true });
