@@ -150,11 +150,16 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$TELEGRAM_BOT_TOKEN" || { echo "Missing GitHub secret TELEGRAM_BOT_TOKEN"; exit 1; }
-          test -n "$TELEGRAM_WEBHOOK_SECRET" || { echo "Missing GitHub secret TELEGRAM_WEBHOOK_SECRET"; exit 1; }
+          [[ "$TELEGRAM_WEBHOOK_SECRET" =~ ^[A-Za-z0-9_-]{1,256}$ ]] || { echo "TELEGRAM_WEBHOOK_SECRET must be 1-256 characters using only letters, numbers, underscore, or hyphen; secret value was not printed."; exit 1; }
           subdomain="$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "https://api.cloudflare.com/client/v4/accounts/5f7678c82c50be845dba6bd8280bfae5/workers/subdomain" | jq -er '.result.subdomain')"
           test -n "$subdomain" || { echo "Could not determine the Cloudflare workers.dev account subdomain"; exit 1; }
           worker_url="https://fansleak-contact-bot.${subdomain}.workers.dev/telegram/webhook"
-          curl -fsS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
+          response="$(curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
             --data-urlencode "url=$worker_url" \
             --data-urlencode "secret_token=$TELEGRAM_WEBHOOK_SECRET" \
-            --data-urlencode "drop_pending_updates=false" | jq -e '.ok == true'
+            --data-urlencode "drop_pending_updates=false")"
+          if ! printf '%s' "$response" | jq -e '.ok == true' >/dev/null; then
+            printf '%s\n' "$response" | jq -r '"Telegram rejected setWebhook: " + (.description // "No error description returned")'
+            exit 1
+          fi
+          echo "Telegram webhook configured successfully for $worker_url"
