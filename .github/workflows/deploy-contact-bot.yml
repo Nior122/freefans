@@ -80,6 +80,14 @@ jobs:
           test -n "$CLOUDFLARE_API_TOKEN" || { echo "Missing GitHub secret CLOUDFLARE_API_TOKEN"; exit 1; }
           npx --yes wrangler@4 d1 execute fansleak-contact-requests --remote --file contact-bot/migrations/0002_service_orders.sql --config contact-bot/wrangler.toml
 
+      - name: Apply the abandoned-cart idempotency migration
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$CLOUDFLARE_API_TOKEN" || { echo "Missing GitHub secret CLOUDFLARE_API_TOKEN"; exit 1; }
+          npx --yes wrangler@4 d1 execute fansleak-contact-requests --remote --file contact-bot/migrations/0003_abandoned_carts.sql --config contact-bot/wrangler.toml
+
       - name: Deploy Worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
