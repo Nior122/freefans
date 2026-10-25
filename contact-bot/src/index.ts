@@ -327,13 +327,16 @@ async function abandonedCart(request: Request, e: Env) {
   const email = String(o.customer_email ?? o.email ?? o.customer?.email ?? "").trim().toLowerCase();
   const productCode = String(o.product_code ?? o.productCode ?? o.all_product_codes ?? "").split(",")[0].trim();
   const abandonedAt = String(o.abandoned_at ?? o.abandonedAt ?? "").trim();
+  // This optional identifier is useful only if a trusted source actually includes it in the cart event.
+  // Selar's current Abandoned Cart sample does not include it, so never synthesize or infer it.
+  const fansOrderId = String(o.fans_order_id ?? o.fansOrderId ?? o.order_id ?? "").trim();
   if (!emailRe.test(email) || !productCode || !abandonedAt || !Number.isFinite(Date.parse(abandonedAt))) {
     return json({ error: "invalid_cart_payload", expected: ["customer_email", "product_code", "abandoned_at"] }, 400);
   }
   // Only route events for a configured product. Do not guess a Telegram chat from email alone.
   const kind: "contact" | "service" | null = productCode === e.SELAR_PRODUCT_ID ? "contact" : productCode === e.SERVICE_PRODUCT_ID ? "service" : null;
   if (!kind) return json({ error: "wrong_product" }, 422);
-  const eventKey = await crypto.subtle.digest("SHA-256", new TextEncoder().encode([productCode, email, new Date(abandonedAt).toISOString()].join("|")));
+  const eventKey = await crypto.subtle.digest("SHA-256", new TextEncoder().encode([productCode, email, new Date(abandonedAt).toISOString(), fansOrderId].join("|")));
   const eventId = Array.from(new Uint8Array(eventKey)).map(b => b.toString(16).padStart(2, "0")).join("");
   if (await e.DB.prepare("SELECT event_key FROM processed_abandoned_carts WHERE event_key=?").bind(eventId).first()) {
     return json({ ok: true, duplicate: true });
@@ -342,10 +345,10 @@ async function abandonedCart(request: Request, e: Env) {
   if (kind === "contact") {
     const rows = await e.DB.prepare("SELECT id,telegram_chat_id FROM contact_requests WHERE lower(buyer_email)=? AND status='pending_payment' AND payment_method='selar' ORDER BY created_at DESC LIMIT 2").bind(email).all<any>();
     if (rows.results.length === 1) target = rows.results[0];
-  } else {
-    // Service orders intentionally do not collect email in Telegram. This match only works
-    // if a trusted integration has already linked the checkout email to that exact order.
-    const rows = await e.DB.prepare("SELECT id,telegram_chat_id FROM service_orders WHERE lower(buyer_email)=? AND status='pending_payment' ORDER BY created_at DESC LIMIT 2").bind(email).all<any>();
+  } else if (/^[0-9a-f-]{36}$/i.test(fansOrderId)) {
+    // Service customers do not provide email in Telegram. Match only an exact order ID
+    // explicitly supplied by a trusted event adapter; never guess from email or recency.
+    const rows = await e.DB.prepare("SELECT id,telegram_chat_id FROM service_orders WHERE id=? AND status='pending_payment' LIMIT 2").bind(fansOrderId).all<any>();
     if (rows.results.length === 1) target = rows.results[0];
   }
   const checkout = kind === "service" ? e.SERVICE_CHECKOUT_URL : e.SELAR_CHECKOUT_URL;
