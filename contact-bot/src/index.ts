@@ -116,7 +116,7 @@ async function aiReply(e: Env, chat: string, userText: string, reminder = "") {
 async function startService(e: Env, m: Msg, serviceId: string) {
   const chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(serviceId)) return say(e, chat, "Invalid service purchase link.");
-  if (!servicePrice(e) || !e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || !e.SERVICE_ORDER_FIELD_NAME?.trim() || provider(e) !== "selar") {
+  if (!servicePrice(e) || !e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || provider(e) !== "selar") {
     await say(e, chat, "This service purchase is not accepting orders yet. Please try again later.");
     await say(e, e.ADMIN_TELEGRAM_ID, "Service purchase setup required: configure SERVICE_PRICE_NGN, SERVICE_CHECKOUT_URL, SERVICE_PRODUCT_ID and SERVICE_ORDER_FIELD_NAME.");
     return;
@@ -180,7 +180,7 @@ async function message(e: Env, m: Msg) {
     if (/^\/?(pay|checkout|ready to pay)$/i.test(t)) {
       const requestText = String(serviceOrder.request_text || "").trim();
       if (requestText.length < 3) return say(e, chat, "First, tell me what you need so I can understand your request.");
-      if (!servicePrice(e) || !e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || !e.SERVICE_ORDER_FIELD_NAME?.trim() || provider(e) !== "selar") return say(e, chat, "The service checkout is not configured yet. Please try again later.");
+      if (!servicePrice(e) || !e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || provider(e) !== "selar") return say(e, chat, "The service checkout is not configured yet. Please try again later.");
       await e.DB.prepare("UPDATE service_orders SET status='pending_payment',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_request'").bind(serviceOrder.id).run();
       const checkout = new URL(e.SERVICE_CHECKOUT_URL);
       checkout.searchParams.set("add_to_cart", "1");
