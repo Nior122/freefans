@@ -359,7 +359,13 @@ async function abandonedCart(request: Request, e: Env) {
   const extra = kind === "service"
     ? "\nIf you still want to continue, open checkout and enter your Fans order ID in the required checkout field."
     : "\nIf you still want to continue, you can return to the Selar checkout here.";
-  await say(e, target.telegram_chat_id, "It looks like your Selar checkout was not completed. If you already paid, please contact support and we will check it manually. We do not automatically mark payments as paid." + extra + "\n\n" + esc(checkout));
+  try {
+    await say(e, target.telegram_chat_id, "It looks like your Selar checkout was not completed. If you already paid, please contact support and we will check it manually. We do not automatically mark payments as paid." + extra + "\n\n" + esc(checkout));
+  } catch (err) {
+    // Let a provider retry if Telegram rejected the send; don't permanently consume the event.
+    await e.DB.prepare("DELETE FROM processed_abandoned_carts WHERE event_key=?").bind(eventId).run();
+    throw err;
+  }
   return json({ ok: true, matched: true, reminder_sent: true });
 }
 
