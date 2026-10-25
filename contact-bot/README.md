@@ -27,6 +27,14 @@ Selar is the same payment provider for both products, but each product has its o
 
 Do not assume a URL slug is the provider's actual product identifier without checking the real Selar event. The webhook expects a trusted forwarding integration to send a normalized payload to `POST /webhooks/selar` with `X-Selar-Webhook-Secret`. The normalized contact-sale payload must contain a unique sale reference, buyer email, amount, currency, product code, and an authoritative successful-payment status. The normalized service-sale payload must contain a unique sale/transaction reference (never the customer order ID), the configured `Fans order ID` custom field mapped to `fans_order_id` or normalized `order_id`, amount, currency, product code, and an authoritative successful-payment status; service-sale matching does not depend on email. A generic “New Sale” event without trustworthy status must not be treated as proof of payment. If a sale matches zero or multiple pending orders, no order is unlocked; the admin is notified for reconciliation.
 
+### Abandoned-cart follow-up
+
+Zapier's Selar **Abandoned Cart** trigger should POST the trigger's original fields to `/webhooks/selar-abandoned-cart` with the header `X-Selar-Webhook-Secret` set to the same secret used by the sale webhook. Required fields are `customer_email`, `product_code`, and `abandoned_at`; map them from Selar's `customer_email`, `product_code`, and `abandoned_at` fields. This is a separate backend route from `/webhooks/selar`, so an abandoned cart never creates a payment-verification alert.
+
+The Worker deduplicates repeated abandoned-cart events and sends a neutral reminder only when the email and product identify exactly one pending bot request. It never marks payment as verified. If the event cannot be matched uniquely, it records the event and does not message a customer or notify the admin.
+
+**Known limitation:** the current service-purchase conversation deliberately does not collect an email, and Selar's abandoned-cart sample does not contain the Fans order ID or Telegram chat ID. Therefore, service-product abandoned carts cannot yet be reliably linked to the correct Telegram conversation unless a trusted integration supplies that link. Do not guess based on the most recent order. The existing contact-request flow can be matched by the email the customer already provided to the bot.
+
 The contact and service workflows share the Selar webhook and are separated by exact product code. Price and currency are recorded from the successful sale but are not used to identify which product was purchased. Contact payments continue through the contact verification/approval process; service purchases use the separate order table and fulfilment process. The raw Selar custom-field payload mapping still must be verified against a real test sale before launch; until then, missing/unrecognized order IDs fail closed and no service request is released.
 
 ## Admin commands
