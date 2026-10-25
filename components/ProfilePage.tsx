@@ -452,13 +452,13 @@ export const ProfilePage = () => {
 
         {/* Actions */}
         <div className="flex items-center gap-4 w-full max-w-sm justify-center mb-3">
-          <a href="https://t.me/+jrCwPGduIDoxN2Rk" target="_blank" rel="noopener noreferrer" className="animate-wobble flex-1 bg-red-700 hover:bg-red-600 text-white py-2 rounded-full font-bold text-base transition-colors shadow-lg shadow-red-900/40 flex flex-col items-center justify-center gap-0">
+          <button className="animate-wobble flex-1 bg-red-700 hover:bg-red-600 text-white py-2 rounded-full font-bold text-base transition-colors shadow-lg shadow-red-900/40 flex flex-col items-center justify-center gap-0">
             <div className="flex items-center gap-2">
               <MessageSquare size={18} />
               <span>Subscribe</span>
             </div>
             <span className="text-[11px] font-semibold text-red-200 tracking-wide">{subCount} subscribers</span>
-          </a>
+          </button>
           <button
             onClick={handleFavorite}
             className={`p-3 rounded-full border transition-all ${isFav
