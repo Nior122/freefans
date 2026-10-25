@@ -1,7 +1,7 @@
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS contact_requests (
  id TEXT PRIMARY KEY, telegram_user_id TEXT NOT NULL, telegram_chat_id TEXT NOT NULL,
- telegram_username TEXT, profile_id TEXT NOT NULL, buyer_email TEXT,
+ telegram_username TEXT, profile_id TEXT NOT NULL, buyer_email TEXT, checkout_code TEXT UNIQUE, checkout_name TEXT,
  status TEXT NOT NULL CHECK(status IN ('awaiting_email','pending_payment','awaiting_bank_reference','pending_manual_payment','payment_verified','approved','rejected','expired')),
  payment_method TEXT, manual_payment_reference TEXT,
  payment_reference TEXT UNIQUE, payment_amount_minor INTEGER, payment_currency TEXT,
@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS service_orders (
  telegram_username TEXT,
  request_text TEXT,
  buyer_email TEXT,
+ checkout_code TEXT UNIQUE,
+ checkout_name TEXT,
  status TEXT NOT NULL CHECK(status IN ('awaiting_request','awaiting_email','pending_payment','payment_verified','fulfilled','cancelled','payment_review')),
  payment_method TEXT,
  payment_reference TEXT UNIQUE,
