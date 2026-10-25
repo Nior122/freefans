@@ -353,9 +353,9 @@ async function abandonedCart(request: Request, e: Env) {
   const checkout = kind === "service" ? e.SERVICE_CHECKOUT_URL : e.SELAR_CHECKOUT_URL;
   if (!checkout) return json({ ok: true, matched: true, reminder_sent: false, reason: "checkout_not_configured" });
   const extra = kind === "service"
-    ? "\\nIf you still want to continue, open checkout and enter your Fans order ID in the required checkout field."
-    : "\\nIf you still want to continue, you can return to the Selar checkout here.";
-  await say(e, target.telegram_chat_id, "It looks like your Selar checkout was not completed. If you already paid, please contact support and we will check it manually. We do not automatically mark payments as paid." + extra + "\\n\\n" + esc(checkout));
+    ? "\nIf you still want to continue, open checkout and enter your Fans order ID in the required checkout field."
+    : "\nIf you still want to continue, you can return to the Selar checkout here.";
+  await say(e, target.telegram_chat_id, "It looks like your Selar checkout was not completed. If you already paid, please contact support and we will check it manually. We do not automatically mark payments as paid." + extra + "\n\n" + esc(checkout));
   return json({ ok: true, matched: true, reminder_sent: true });
 }
 
