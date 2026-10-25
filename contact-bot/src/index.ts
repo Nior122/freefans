@@ -28,7 +28,10 @@ export interface Env {
 type Msg = { chat: { id: number }; from?: { id: number; username?: string; first_name?: string }; text?: string };
 type Update = { message?: Msg; callback_query?: { id: string; from: { id: number }; message?: Msg; data?: string } };
 type Profile = { id: string; name: string; handle: string };
-type RequestRow = { id: string; telegram_chat_id: string; profile_id: string; status: string; buyer_email?: string; manual_payment_reference?: string };
+type RequestRow = { id: string; telegram_chat_id: string; profile_id: string; status: string; buyer_email?: string; manual_payment_reference?: string; checkout_code?: string; checkout_name?: string };
+const checkoutCode = () => "FL-" + crypto.randomUUID().replace(/-/g, "").slice(0, 6).toUpperCase();
+const normName = (value: string) => value.trim().replace(/\s+/g, " ").toLocaleLowerCase("en");
+const codeInName = (value: string) => (value.match(/\bFL-[A-Z0-9]{6}\b/i)?.[0] || "").toUpperCase();
 const headers = { "content-type": "application/json; charset=utf-8" };
 const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/i;
 const json = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers });
@@ -88,8 +91,8 @@ async function start(e: Env, m: Msg, payload: string) {
   if (activeService) return say(e, chat, "You already have a service purchase in progress. Finish it or contact support before starting a contact request.");
   const active = await e.DB.prepare("SELECT id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
   if (active) return say(e, chat, "You already have a request in progress. Finish it or contact support before starting another.");
-  const requestId = crypto.randomUUID();
-  await e.DB.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,telegram_username,profile_id,status) VALUES(?,?,?,?,?,'awaiting_email')").bind(requestId, user, chat, m.from?.username ?? null, profile.id).run();
+  const requestId = crypto.randomUUID(), code = checkoutCode();
+  await e.DB.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,telegram_username,profile_id,status,checkout_code) VALUES(?,?,?,?,?,'awaiting_email',?)").bind(requestId, user, chat, m.from?.username ?? null, profile.id, code).run();
   await say(e, chat, `You selected <b>${esc(profile.name)}</b> (${esc(profile.handle || profile.id)}).\n\nRequest fee: <b>${money(price(e)!)}</b>. Choose a payment method after providing the email address associated with your request. Your payment will be checked; admin approval is still required. Contact details are only shared when the creator has authorised it.\n\nSend your email address to continue. Never send passwords, PINs or OTPs.`);
 }
 
@@ -122,8 +125,8 @@ async function startService(e: Env, m: Msg, serviceId: string) {
   if (activeContact) return say(e, chat, "You already have a FansLeak contact request in progress. Finish it or contact support before starting a service purchase.");
   const active = await e.DB.prepare("SELECT id FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
   if (active) return say(e, chat, "You already have a service order in progress. Finish it or contact support before starting another.");
-  const id = crypto.randomUUID();
-  await e.DB.prepare("INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,telegram_username,status) VALUES(?,?,?,?,?,'awaiting_request')").bind(id, serviceId, user, chat, m.from?.username ?? null).run();
+  const id = crypto.randomUUID(), code = checkoutCode();
+  await e.DB.prepare("INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,telegram_username,status,checkout_code) VALUES(?,?,?,?,?,'awaiting_request',?)").bind(id, serviceId, user, chat, m.from?.username ?? null, code).run();
   return say(e, chat, "Hi! I’m the FansLeak AI assistant. Tell me what you need, and I’ll ask a few questions so I understand your request.\n\nOrder reference: <code>" + id + "</code>\n\nWhen you’re ready to purchase, type PAY. This Selar product has a fixed price of " + money(servicePrice(e)!) + ". No email is needed in this Telegram chat.");
 }
 
@@ -172,7 +175,7 @@ async function message(e: Env, m: Msg) {
     return say(e, chat, (rows.results || []).map(r => `${r.id} | ${r.profile_id} | ${r.buyer_email || "-"} | ${r.status}`).join("\n") || "No pending requests.");
   }
 
-  const serviceOrder = await e.DB.prepare("SELECT id,status,request_text FROM service_orders WHERE telegram_user_id=? AND status='awaiting_request' ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
+  const serviceOrder = await e.DB.prepare("SELECT id,status,request_text,checkout_code FROM service_orders WHERE telegram_user_id=? AND status='awaiting_request' ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
   if (serviceOrder) {
     if (/^\/?(pay|checkout|ready to pay)$/i.test(t)) {
       const requestText = String(serviceOrder.request_text || "").trim();
@@ -181,7 +184,7 @@ async function message(e: Env, m: Msg) {
       await e.DB.prepare("UPDATE service_orders SET status='pending_payment',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_request'").bind(serviceOrder.id).run();
       const checkout = new URL(e.SERVICE_CHECKOUT_URL);
       checkout.searchParams.set("add_to_cart", "1");
-      return say(e, chat, "Your order reference is <code>" + serviceOrder.id + "</code>.\n\nThe price for this Selar product is <b>" + money(servicePrice(e)!) + "</b>. Open checkout below. In Selar’s custom checkout form, enter this order reference in the required field named <b>" + esc(e.SERVICE_ORDER_FIELD_NAME!.trim()) + "</b>. No email is needed in this Telegram chat; Selar may still request its standard checkout details.\n\n" + esc(checkout.toString()) + "\n\nI’ll notify you here after the payment is verified.");
+      return say(e, chat, "Open the Selar checkout below. In the name field, enter your full name followed by this code exactly: <code>" + esc(serviceOrder.checkout_code) + "</code>. Example: <code>Joseph Unaogu " + esc(serviceOrder.checkout_code) + "</code>. No email is needed in this Telegram chat; Selar may still request its standard checkout details.\n\n" + esc(checkout.toString()) + "\n\nAfter checkout, tap Done below. The admin—not the bot—checks payment manually.", { inline_keyboard: [[{ text: "Done", callback_data: "done:" + serviceOrder.id }]] });
     }
     if (t.length < 2 || t.length > 2000) return say(e, chat, "Please send a message between 2 and 2,000 characters.");
     const previous = String(serviceOrder.request_text || "");
@@ -206,16 +209,45 @@ async function message(e: Env, m: Msg) {
       return say(e, chat, "I saved your message. You can tell me more, or type PAY when you’re ready to purchase at " + money(servicePrice(e)!) + ".");
     }
   }
+  const prompt = await e.DB.prepare("SELECT order_id,order_kind FROM checkout_name_prompts WHERE telegram_user_id=?").bind(user).first<any>();
+  if (prompt) {
+    const code = codeInName(t);
+    if (!code) return say(e, chat, "I couldn't find the order code. Please send your exact full name followed by the code shown in checkout, for example: Joseph Unaogu FL-7K4P9.");
+    const fullName = t.replace(new RegExp("\\s*" + code + "\\s*$", "i"), "").trim();
+    if (fullName.length < 2) return say(e, chat, "Please include your full name before the code, for example: Joseph Unaogu " + code + ".");
+    const table = prompt.order_kind === "contact" ? "contact_requests" : "service_orders";
+    const order = await e.DB.prepare(`SELECT id,checkout_code,status FROM ${table} WHERE id=? AND telegram_user_id=?`).bind(prompt.order_id, user).first<any>();
+    if (!order || order.status !== "pending_payment" || order.checkout_code !== code) return say(e, chat, "That code doesn't match your pending order. Please copy the exact code shown by the bot and try again.");
+    await e.DB.prepare(`UPDATE ${table} SET checkout_name=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND telegram_user_id=? AND status='pending_payment'`).bind(fullName, order.id, user).run();
+    await e.DB.prepare("DELETE FROM checkout_name_prompts WHERE telegram_user_id=?").bind(user).run();
+    return say(e, chat, "Thanks. Your name and order code match. This does not confirm payment; the bot waits for Selar's sale event, and the admin checks payment manually.");
+  }
+  const submittedCode = codeInName(t);
+  if (submittedCode) return say(e, chat, "To submit your checkout name, tap Done on your checkout instructions first.");
   const req = await e.DB.prepare("SELECT id,status,profile_id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email') ORDER BY created_at DESC LIMIT 1").bind(user).first<{ id: string; status: string; profile_id: string }>();
   if (req?.status === "awaiting_email") {
     if (!emailRe.test(t)) return aiReply(e, chat, t, "Please send a valid email address to associate with your payment request. Never send passwords, PINs or OTPs.");
     await e.DB.prepare("UPDATE contact_requests SET buyer_email=?,status='pending_payment',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_email'").bind(t.toLowerCase(), req.id).run();
-    return say(e, chat, `Request reference: <code>${req.id}</code>\n\nFee: <b>${money(price(e)!)}</b>\nChoose how you want to pay:`, paymentKeyboard(e, req.id));
+    const order = await e.DB.prepare("SELECT checkout_code FROM contact_requests WHERE id=?").bind(req.id).first<any>();
+    return say(e, chat, `Open the Selar checkout. In the name field, enter your full name followed by this code exactly: <code>${esc(order?.checkout_code || "")}</code>. Example: <code>Joseph Unaogu ${esc(order?.checkout_code || "")}</code>. Use the same email you provided to the bot.\n\n${esc(e.SELAR_CHECKOUT_URL || "")}`, { inline_keyboard: [[{ text: "Done", callback_data: "done:" + req.id }]] });
   }
   return aiReply(e, chat, t, "To start a contact request, open a profile on FansLeak and tap its Message button. Payment always requires admin verification and approval.");
 }
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
+  if (data.startsWith("done:")) {
+    if (!u.message || String(u.message.chat.id) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Open the bot chat to continue." });
+    const id = data.slice(5);
+    const contact = await e.DB.prepare("SELECT id,status,telegram_user_id,checkout_code,checkout_name FROM contact_requests WHERE id=?").bind(id).first<any>();
+    const service = await e.DB.prepare("SELECT id,status,telegram_user_id,checkout_code,checkout_name FROM service_orders WHERE id=?").bind(id).first<any>();
+    const order = contact || service;
+    if (!order || String(order.telegram_user_id) !== actor || order.status !== "pending_payment") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "This order is not waiting for checkout confirmation." });
+    if (order.checkout_name) return say(e, actor, "Your checkout name and code have already been matched. Payment still needs to be checked manually.");
+    const kind = contact ? "contact" : "service";
+    await e.DB.prepare("INSERT OR REPLACE INTO checkout_name_prompts(telegram_user_id,order_id,order_kind) VALUES(?,?,?)").bind(actor, id, kind).run();
+    await say(e, actor, "Please send the exact full name you used in Selar's name field, including the code. Example: <code>Joseph Unaogu " + esc(order.checkout_code) + "</code>. This does not confirm payment.");
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Send your checkout name and code." });
+  }
   if (data.startsWith("pay_")) {
     if (!u.message || String(u.message.chat.id) !== actor) {
       await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Open the bot chat to choose a payment method." }); return;
