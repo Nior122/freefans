@@ -118,7 +118,7 @@ async function startService(e: Env, m: Msg, serviceId: string) {
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(serviceId)) return say(e, chat, "Invalid service purchase link.");
   if (!servicePrice(e) || !e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || provider(e) !== "selar") {
     await say(e, chat, "This service purchase is not accepting orders yet. Please try again later.");
-    await say(e, e.ADMIN_TELEGRAM_ID, "Service purchase setup required: configure SERVICE_PRICE_NGN, SERVICE_CHECKOUT_URL, SERVICE_PRODUCT_ID and SERVICE_ORDER_FIELD_NAME.");
+    await say(e, e.ADMIN_TELEGRAM_ID, "Service purchase setup required: configure SERVICE_PRICE_NGN, SERVICE_CHECKOUT_URL and SERVICE_PRODUCT_ID.");
     return;
   }
   const activeContact = await e.DB.prepare("SELECT id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
