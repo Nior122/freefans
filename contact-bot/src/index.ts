@@ -85,7 +85,12 @@ async function start(e: Env, m: Msg, payload: string) {
   if (active) return say(e, chat, "You already have a request in progress. Finish it or contact support before starting another.");
   const requestId = crypto.randomUUID(), code = checkoutCode();
   await e.DB.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,telegram_username,profile_id,status,checkout_code) VALUES(?,?,?,?,?,'awaiting_email',?)").bind(requestId, user, chat, m.from?.username ?? null, profile.id, code).run();
-  await say(e, chat, `You selected <b>${esc(profile.name)}</b> (${esc(profile.handle || profile.id)}).\n\nContinue to Selar after providing the email address associated with your request. Your payment will be checked manually; admin approval is still required. Contact details are only shared when the creator has authorised it.\n\nSend your email address to continue. Never send passwords, PINs or OTPs.`);
+  return aiReply(
+    e,
+    chat,
+    `A visitor has just opened the contact link from the FansLeak profile "${profile.name}" (profile ID: ${profile.id}; handle: ${profile.handle || profile.id}). Welcome them warmly as the FansLeak AI assistant, make clear which creator they selected, briefly explain that this starts a contact request rather than granting immediate access, and ask them for the email address associated with their request. Never promise access or claim payment is complete.`,
+    `Selected profile: ${profile.name} (${profile.handle || profile.id}). To continue, send the email address associated with your request. Never send passwords, PINs or OTPs. Payment is reviewed manually, and contact details are only shared if the creator has authorised it.`
+  );
 }
 
 async function aiReply(e: Env, chat: string, userText: string, reminder = "") {
