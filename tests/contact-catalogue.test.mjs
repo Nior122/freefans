@@ -5,12 +5,20 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
+import { readProfiles } from '../scripts/lib/site.mjs';
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const CATALOGUE_PATH = path.join(ROOT, 'public', 'contact-catalogue.json');
 const GENERATOR_SCRIPT = path.join(ROOT, 'scripts', 'generate-contact-catalogue.mjs');
 
 test('Public catalogue generator produces valid JSON with strict privacy guarantees', () => {
+  // Snapshot the committed catalogue before regenerating so profile drift
+  // (mockData changed without regenerating) fails in CI on a fresh checkout.
+  const committed = fs.existsSync(CATALOGUE_PATH)
+    ? JSON.parse(fs.readFileSync(CATALOGUE_PATH, 'utf8'))
+    : null;
+
   // Execute generator
   execFileSync(process.execPath, [GENERATOR_SCRIPT], { cwd: ROOT, encoding: 'utf8' });
 
@@ -46,6 +54,33 @@ test('Public catalogue generator produces valid JSON with strict privacy guarant
     // 4. No duplicate IDs
     assert.ok(!seenIds.has(profile.id), `Duplicate profile ID found in catalogue: ${profile.id}`);
     seenIds.add(profile.id);
+
+    // 5. Display names must never look like a Telegram handle.
+    assert.doesNotMatch(profile.name, /^@[A-Za-z0-9_]{5,32}$/, `Catalogue name for ${profile.id} looks like a private handle`);
+  }
+
+  // 6. Committed catalogue matches generator output (ignoring generatedAt).
+  assert.ok(committed, 'A committed contact-catalogue.json must exist');
+  assert.deepEqual(committed.profiles, data.profiles, 'Committed catalogue is stale: run node scripts/generate-contact-catalogue.mjs and commit the result');
+
+  // 7. No source profile handle appears anywhere in the public file, and every
+  // visible source profile is represented exactly once (dynamic completeness).
+  const source = readProfiles();
+  assert.ok(!raw.includes('"handle"'), 'Catalogue must not contain a handle key');
+  for (const p of source) {
+    if (p.handle) assert.ok(!raw.includes(p.handle), `Source handle ${p.handle} leaked into the public catalogue`);
+  }
+  const expectedIds = [...new Set(source.filter(p => p.isVisible && /^[A-Za-z0-9._-]{1,50}$/.test(p.id)).map(p => p.id))];
+  assert.deepEqual([...seenIds].sort(), expectedIds.sort(), 'Catalogue must contain every visible profile and nothing else');
+
+  // 8. Every profile ID must survive Telegram's ?start= charset after the
+  // documented dot encoding, without collisions with any other ID.
+  const encoded = new Map();
+  for (const profile of data.profiles) {
+    const startValue = `contact_${profile.id.replace(/\./g, '_dot_')}`;
+    assert.match(startValue, /^[A-Za-z0-9_-]{1,64}$/, `Start parameter for ${profile.id} is not Telegram-safe`);
+    assert.ok(!encoded.has(startValue), `Start-parameter collision between ${encoded.get(startValue)} and ${profile.id}`);
+    encoded.set(startValue, profile.id);
   }
 });
 

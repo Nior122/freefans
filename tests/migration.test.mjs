@@ -27,7 +27,8 @@ test('Migration: fresh database migrates to fully verified schema', () => {
     '0001_baseline',
     '0002_service_orders',
     '0003_abandoned_carts',
-    '0004_checkout_codes'
+    '0004_checkout_codes',
+    '0005_one_active_request_per_user'
   ]);
 
   const verified = verifySchema(db);
@@ -96,6 +97,53 @@ test('Migration: partially migrated database with existing prompts table but mis
 
   const verified = verifySchema(db);
   assert.equal(verified.ok, true);
+});
+
+test('Migration 0005: database rejects a second active request for the same user', () => {
+  const db = new DatabaseSync(':memory:');
+  applyAllMigrations(db);
+
+  const insertContact = (id, user, status) => db.prepare(
+    'INSERT INTO contact_requests (id, telegram_user_id, telegram_chat_id, profile_id, status) VALUES (?,?,?,?,?)'
+  ).run(id, user, user, 'anaimiya', status);
+
+  insertContact('req-active-1', '7001', 'pending_payment');
+  assert.throws(
+    () => insertContact('req-active-2', '7001', 'payment_verified'),
+    /UNIQUE constraint failed/i,
+    'Second active contact request for one user must be rejected by the database'
+  );
+  // Non-active rows and other users are unaffected.
+  insertContact('req-done-1', '7001', 'approved');
+  insertContact('req-active-3', '7002', 'pending_payment');
+
+  db.prepare("INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status) VALUES ('svc-1','svc','7003','7003','pending_payment')").run();
+  assert.throws(
+    () => db.prepare("INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status) VALUES ('svc-2','svc','7003','7003','awaiting_request')").run(),
+    /UNIQUE constraint failed/i
+  );
+});
+
+test('Migration 0005: pre-existing duplicate active rows block migration without data changes', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'schema.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0002_service_orders.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0003_abandoned_carts.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0004_checkout_codes.sql'), 'utf8'));
+  db.exec(`
+    INSERT INTO contact_requests (id, telegram_user_id, telegram_chat_id, profile_id, status) VALUES
+      ('dup-1', '7101', '7101', 'anaimiya', 'pending_payment'),
+      ('dup-2', '7101', '7101', 'rosebeck', 'pending_payment');
+  `);
+
+  assert.throws(() => applyAllMigrations(db), /Migration 0005/);
+  const rows = db.prepare("SELECT id FROM contact_requests WHERE telegram_user_id='7101' ORDER BY id").all();
+  assert.deepEqual(rows.map(r => r.id), ['dup-1', 'dup-2'], 'Blocked migration must not alter existing rows');
+
+  // After manual reconciliation, migration completes.
+  db.exec("UPDATE contact_requests SET status='rejected' WHERE id='dup-2'");
+  const result = applyAllMigrations(db);
+  assert.equal(result.ok, true);
 });
 
 test('Migration: partially migrated database with pre-existing columns does not fail on ALTER TABLE', () => {

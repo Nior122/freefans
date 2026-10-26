@@ -31,10 +31,11 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out deployment code from the feature branch
+      # Deploy exactly the ref this workflow was dispatched from. Run it from the
+      # `fan` branch after the contact-bot PR has merged; there is deliberately no
+      # pinned feature-branch ref here.
+      - name: Check out deployment code
         uses: actions/checkout@v4
-        with:
-          ref: feature/selar-bank-contact-bot
 
       - name: Set up Node.js
         uses: actions/setup-node@v4

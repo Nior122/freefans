@@ -64,8 +64,50 @@ export const MIGRATIONS = [
         );
       `);
     }
+  },
+  {
+    version: '0005_one_active_request_per_user',
+    description: 'Partial unique indexes allowing one active request/order per Telegram user',
+    apply(db) {
+      assertNoDuplicateActiveRows(db);
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0005_one_active_request_per_user.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
+
+export const ACTIVE_STATUSES = {
+  contact_requests: ['awaiting_email', 'pending_payment', 'payment_verified'],
+  service_orders: ['awaiting_request', 'awaiting_email', 'pending_payment', 'payment_verified']
+};
+
+export function findDuplicateActiveUsers(db, table) {
+  const statuses = ACTIVE_STATUSES[table];
+  if (!statuses) throw new Error(`Unknown table for duplicate-active check: ${table}`);
+  const placeholders = statuses.map(() => '?').join(',');
+  try {
+    return db.prepare(
+      `SELECT telegram_user_id, COUNT(*) AS active_count FROM ${table} WHERE status IN (${placeholders}) GROUP BY telegram_user_id HAVING COUNT(*) > 1`
+    ).all(...statuses);
+  } catch {
+    return [];
+  }
+}
+
+export function assertNoDuplicateActiveRows(db) {
+  const problems = [];
+  for (const table of Object.keys(ACTIVE_STATUSES)) {
+    const rows = findDuplicateActiveUsers(db, table);
+    if (rows.length > 0) problems.push(`${table}: ${rows.length} user(s) with multiple active rows`);
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `Migration 0005 cannot create its unique indexes yet: ${problems.join('; ')}. ` +
+      'Reconcile the duplicate active rows manually (keep the newest legitimate request, ' +
+      'reject/cancel the rest) and re-run the migration. No data was changed by this check.'
+    );
+  }
+}
 
 export function getTableColumns(db, tableName) {
   try {
@@ -177,6 +219,23 @@ export function verifySchema(db) {
   if (Object.keys(missingColumns).length > 0) {
     const details = Object.entries(missingColumns).map(([t, cols]) => `${t}: [${cols.join(', ')}]`).join('; ');
     throw new Error(`Schema verification failed: missing column(s): ${details}`);
+  }
+
+  const expectedIndexes = [
+    'idx_contact_requests_checkout_code',
+    'idx_service_orders_checkout_code',
+    'idx_contact_requests_one_active_per_user',
+    'idx_service_orders_one_active_per_user'
+  ];
+  let indexNames = [];
+  try {
+    indexNames = db.prepare("SELECT name FROM sqlite_master WHERE type='index'").all().map(r => r.name);
+  } catch {
+    indexNames = [];
+  }
+  const missingIndexes = expectedIndexes.filter(name => !indexNames.includes(name));
+  if (missingIndexes.length > 0) {
+    throw new Error(`Schema verification failed: missing index(es): ${missingIndexes.join(', ')}`);
   }
 
   return { ok: true, verifiedTables: Object.keys(EXPECTED_SCHEMA) };

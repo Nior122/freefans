@@ -78,7 +78,11 @@ export const ProfilePage = () => {
 
   const profile = profiles.find(p => p.id === id);
   const telegramBotUsername = (import.meta.env.VITE_TELEGRAM_BOT_USERNAME || 'KasiQueenbot').trim().replace(/^@/, '');
-  const contactBotUrl = telegramBotUsername ? `https://t.me/${telegramBotUsername}?start=contact_${profile?.id ?? ''}` : undefined;
+  // Telegram ?start= parameters only allow [A-Za-z0-9_-]. Profile IDs may contain
+  // "." (e.g. emanuela.ebony), so encode dots as "_dot_"; the bot resolves the
+  // encoded value back through the public contact catalogue.
+  const contactStartParam = `contact_${(profile?.id ?? '').replace(/\./g, '_dot_')}`;
+  const contactBotUrl = telegramBotUsername ? `https://t.me/${telegramBotUsername}?start=${contactStartParam}` : undefined;
 
   if (!profile) return <Navigate to="/" replace />;
 

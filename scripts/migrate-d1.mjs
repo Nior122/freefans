@@ -96,6 +96,29 @@ export function migrateRemote() {
     console.log('[migrate-d1] 0004_checkout_codes migration complete.');
   }
 
+  // Migration 5: one active request/order per Telegram user (partial unique indexes).
+  // Pre-check duplicates: index creation fails if a user already has multiple active
+  // rows, so surface that as an operator action instead of a raw SQLite error.
+  if (!applied.has('0005_one_active_request_per_user')) {
+    console.log('[migrate-d1] Checking for duplicate active rows before 0005_one_active_request_per_user...');
+    const duplicateChecks = [
+      ['contact_requests', "SELECT telegram_user_id, COUNT(*) AS active_count FROM contact_requests WHERE status IN ('awaiting_email','pending_payment','payment_verified') GROUP BY telegram_user_id HAVING COUNT(*) > 1"],
+      ['service_orders', "SELECT telegram_user_id, COUNT(*) AS active_count FROM service_orders WHERE status IN ('awaiting_request','awaiting_email','pending_payment','payment_verified') GROUP BY telegram_user_id HAVING COUNT(*) > 1"]
+    ];
+    for (const [table, query] of duplicateChecks) {
+      const duplicates = runWranglerCommand(query);
+      if (duplicates.length > 0) {
+        throw new Error(
+          `[migrate-d1] ${table} has ${duplicates.length} Telegram user(s) with multiple active rows. ` +
+          'Reconcile them manually (keep the newest legitimate request, reject/cancel the rest), then re-run. No data was changed by this check.'
+        );
+      }
+    }
+    console.log('[migrate-d1] Applying 0005_one_active_request_per_user migration...');
+    runWranglerFile(path.join(ROOT, 'contact-bot', 'migrations', '0005_one_active_request_per_user.sql'));
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0005_one_active_request_per_user')");
+  }
+
   // Final complete schema verification
   console.log('[migrate-d1] Verifying complete schema...');
   const tables = runWranglerCommand("SELECT name FROM sqlite_master WHERE type='table'").map(r => r.name);
