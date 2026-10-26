@@ -1090,7 +1090,7 @@ test('Non-admin users cannot invoke admin callbacks or commands', async () => {
 
 test('Selar webhook negative cases never mutate payment state', async () => {
   const db = createTestDb();
-  const { env, cleanup } = createTestEnv(db);
+  const { env, cleanup, sentTelegramMessages } = createTestEnv(db);
   try {
     const reqId = crypto.randomUUID();
     db.raw.prepare(`INSERT INTO contact_requests (id, telegram_user_id, telegram_chat_id, profile_id, status, payment_method, checkout_code, checkout_name)
@@ -1108,6 +1108,7 @@ test('Selar webhook negative cases never mutate payment state', async () => {
 
     const nameMismatch = await selarPost(env, { ...validSale, reference: 'ref-neg-5', customer_full_name: 'Other Person FL-NEG001' });
     assert.equal((await nameMismatch.json()).reason, 'name_mismatch');
+    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).length, 0, 'name mismatch must not send an unsolicited admin notification');
 
     assert.equal((await selarPost(env, { ...validSale, reference: 'ref-neg-6', status: 'failed' })).status, 422, 'explicitly non-paid events are rejected');
     assert.equal((await selarPost(env, { ...validSale, reference: 'ref-neg-7', padding: 'A'.repeat(70000) })).status, 413, 'oversized payload');
