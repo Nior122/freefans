@@ -511,12 +511,12 @@ async function aiReply(e: Env, chat: string, userText: string, reminder = "") {
     } catch { /* allow a conversation even if history is unavailable */ }
     const result = await e.AI.run(e.AI_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
       messages: [
-        { role: "system", content: "You are FansLeak's warm, professional front-desk manager. Use a helpful human tone and a few appropriate emojis; never sound like a cold error message. You have read-only context about this Telegram customer's own request history. Explain statuses and next steps only from that context. If a request is pending, say the admin is reviewing/matching the payment only when the saved state supports it; never promise an ETA. Invite them to say 'I've paid — check again' to trigger a real database reconciliation check. You cannot execute commands, SQL, payment verification, approval, or delivery yourself; deterministic bot handlers perform permitted actions. Never claim payment received, verified, approved, or fulfilled unless the saved status says so. Never invent profile, payment, or creator information. Never reveal or invent a creator's Telegram username, phone number, or private contact details. Never ask for passwords, card PINs, bank credentials, or OTPs. Keep replies concise and plain text." },
+        { role: "system", content: "You are FansLeak's natural, warm, capable front-desk assistant. Respond directly to what the person actually said, like a helpful human support agent; do not use a canned greeting or repeat the same payment reminder in every reply. Ask one relevant follow-up question only when needed. Use the read-only context about this Telegram user's own contact requests and service orders to answer questions about their specific order; name the relevant FL code and explain the next step when useful. If they ask about a different matter, answer that matter rather than forcing the conversation back to payment. If they want to create another contact request, explain the three-unpaid-request limit only when their saved requests show they have reached it, and offer them a way to check an existing request. Mention 'I've paid — check again' only when payment checking is relevant. Never say an admin is reviewing a payment unless the saved state or attached sale reference supports that. Never promise an ETA. You cannot execute commands, SQL, payment verification, approval, consent changes, or delivery; deterministic handlers perform permitted actions. Never claim payment received, verified, approved, or fulfilled unless the saved status says so. Never invent profile, payment, or creator information. Never reveal or invent a creator's Telegram username, phone number, or private contact details. Never ask for passwords, card PINs, bank credentials, or OTPs. Keep replies concise, natural, and plain text." },
         { role: "user", content: `Customer message: ${userText.slice(0, 1500)}\\nRead-only request history: ${history.slice(0, 3500)}` }
       ]
     });
     const answer = String(result?.response || "").trim().slice(0, 3500);
-    return say(e, chat, answer ? esc(answer) + (reminder ? "\\n\\n" + reminder : "") : (reminder || "I couldn't answer that just now. Please try again shortly."));
+    return say(e, chat, answer ? esc(answer) : (reminder || "I couldn't answer that just now. Please try again shortly."));
   } catch (err) {
     console.error("AI support reply failed", String(err));
     return say(e, chat, reminder || "I can't answer that just now. Please try again shortly or contact the admin.");
@@ -604,6 +604,29 @@ async function message(e: Env, m: Msg) {
     } catch {
       return say(e, chat, "Could not load the creator list right now. Please browse directly on FansLeak: https://fansleak.pages.dev");
     }
+  }
+
+  if (user === e.ADMIN_TELEGRAM_ID && (t === "/admin" || t === "/menu")) {
+    return say(e, chat, "<b>FansLeak Admin Desk</b>\nChoose what you want to manage. Payment checks and contact release remain manual and consent-gated.", {
+      inline_keyboard: [
+        [{ text: "📥 Review contact requests", callback_data: "admin:pending" }],
+        [{ text: "🧾 Review service orders", callback_data: "admin:orders" }],
+        [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }],
+        [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]
+      ]
+    });
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/message ")) {
+    const match = t.match(/^\/message\s+([^\s]+)\s+([\s\S]{2,2500})$/i);
+    if (!match) return say(e, chat, "Format: /message FL-ABC123 Your message here");
+    const ref = match[1], body = match[2].trim();
+    let order = await e.DB.prepare("SELECT id,telegram_chat_id,checkout_code,profile_id AS target_id,'contact' AS kind FROM contact_requests WHERE id=? OR checkout_code=? ORDER BY created_at DESC LIMIT 1").bind(ref, ref.toUpperCase()).first<any>();
+    if (!order) order = await e.DB.prepare("SELECT id,telegram_chat_id,checkout_code,service_id AS target_id,'service' AS kind FROM service_orders WHERE id=? OR checkout_code=? ORDER BY created_at DESC LIMIT 1").bind(ref, ref.toUpperCase()).first<any>();
+    if (!order) return say(e, chat, "No contact request or service order matched that UUID or FL- order code. Nothing was sent.");
+    try { await say(e, order.telegram_chat_id, "💬 <b>Message from FansLeak support</b>\n\n" + esc(body)); }
+    catch { return say(e, chat, "Telegram could not deliver the message. Check whether the customer has started the bot; no success was recorded."); }
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,?,?,?,?)").bind(user, "admin_message_customer", order.id, order.kind === "contact" ? order.target_id : null, "Admin sent support message for " + order.kind + " order " + order.checkout_code).run();
+    return say(e, chat, "✅ Message sent for order <code>" + esc(order.checkout_code || ref) + "</code>.");
   }
 
   if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/deliver ")) {
@@ -707,6 +730,8 @@ async function message(e: Env, m: Msg) {
     return say(e, chat, "Payment manually verified for contact request <code>" + esc(oid) + "</code>. It still needs your final approval (and recorded creator consent) before any contact details are sent.", { inline_keyboard: [[{ text: "Approve & send contact", callback_data: "approve:" + oid }, { text: "Reject", callback_data: "reject:" + oid }]] });
   }
 
+  if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/")) return say(e, chat, "I don't recognise that admin command. Open /admin for the button menu or /help for the available commands.");
+
   if (isPaidClaimText(t)) {
     const order = await findCustomerOrderForPaidClaim(e, user);
     const claimedCode = codeInName(t);
@@ -793,7 +818,7 @@ async function message(e: Env, m: Msg) {
       return say(e, chat, "Thanks — your email has been saved as a fallback reconciliation clue. It is only used if the admin needs to match a payment manually, and it does not verify payment.");
     }
   }
-  return aiReply(e, chat, t, "👋 I'm here to help with your FansLeak requests, payment status, and next steps. You can ask me a question any time. If you've paid, say “I've paid — check again” and I'll re-check the available sale records. Payments still require admin verification and approval. 💬");
+  return aiReply(e, chat, t);
 }
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
@@ -845,6 +870,46 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined) {
     await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Not authorised." }); return;
   }
+  if (data.startsWith("admin:")) {
+    if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin access only." });
+    const action = data.slice("admin:".length);
+    if (action === "pending") {
+      const rows = await e.DB.prepare("SELECT id,profile_id,status,checkout_code,payment_reference FROM contact_requests WHERE status IN('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 12").all<any>();
+      const buttons = (rows.results || []).map(r => [{ text: (r.status === "payment_verified" ? "🟢 Paid — review approval" : "🟡 Check payment") + " · " + String(r.checkout_code || "request"), callback_data: "admin:request:" + r.id }]);
+      await say(e, chat, "<b>Contact requests needing attention</b>\nChoose a request to review its saved status. A sale notification is not payment verification.", { inline_keyboard: [...buttons, [{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Contact requests loaded." });
+    }
+    if (action === "orders") {
+      const rows = await e.DB.prepare("SELECT id,service_id,status,checkout_code,payment_reference FROM service_orders ORDER BY created_at DESC LIMIT 12").all<any>();
+      const lines = (rows.results || []).map(r => "• <code>" + esc(r.checkout_code || r.id) + "</code> — " + esc(r.service_id || "service") + " — " + esc(r.status) + " — " + (r.payment_reference ? "sale reference attached" : "no sale reference"));
+      await say(e, chat, "<b>Recent service orders</b>\n" + (lines.join("\n") || "No service orders found.") + "\n\nUse the customer-message option in Admin Desk to contact a customer.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Service orders loaded." });
+    }
+    if (action === "message_help") {
+      await say(e, chat, "<b>Message a customer</b>\nUse their FL- order code or full order UUID, then type your message.\n\nFormat: <code>/message FL-ABC123 Hi, I’m checking your request and will update you here.</code>\nThe bot sends the message privately to the Telegram account attached to that order. This does not change payment or approval status.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Customer-message instructions opened." });
+    }
+    if (action === "help") {
+      await say(e, chat, "<b>Admin guide</b>\n• Review the real sale in Selar before confirming payment.\n• Payment confirmation and contact approval are separate actions.\n• Contact delivery requires explicit creator consent.\n• Use /message ORDER_CODE your message to contact a customer.\n• Use /help for all supported commands.\n• AI replies cannot verify payments or approve contact delivery.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin guide opened." });
+    }
+    if (action === "home") {
+      await say(e, chat, "<b>FansLeak Admin Desk</b>\nChoose an action:", { inline_keyboard: [[{ text: "📥 Review contact requests", callback_data: "admin:pending" }], [{ text: "🧾 Review service orders", callback_data: "admin:orders" }], [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }], [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]] });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin menu." });
+    }
+    const requestMatch = action.match(/^request:([0-9a-f-]{36})$/i);
+    if (requestMatch) {
+      const r = await e.DB.prepare("SELECT id,profile_id,status,checkout_code,payment_reference FROM contact_requests WHERE id=?").bind(requestMatch[1]).first<any>();
+      if (!r) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request not found." });
+      const actions: Record<string, unknown>[][] = [];
+      if (r.status === "pending_payment" && r.payment_reference) actions.push([{ text: "✅ I checked Selar — confirm payment", callback_data: "selarverify:" + r.id }]);
+      if (r.status === "payment_verified") actions.push([{ text: "🔓 Approve & send authorised contact", callback_data: "approve:" + r.id }, { text: "❌ Reject request", callback_data: "reject:" + r.id }]);
+      actions.push([{ text: "💬 How to message this customer", callback_data: "admin:message_help" }], [{ text: "↩️ Back to requests", callback_data: "admin:pending" }], [{ text: "🏠 Admin Desk", callback_data: "admin:home" }]);
+      await say(e, chat, "<b>Contact request details</b>\nCode: <code>" + esc(r.checkout_code || "") + "</code>\nProfile: " + esc(r.profile_id || "unknown") + "\nStatus: <b>" + esc(r.status) + "</b>\nSale reference: " + (r.payment_reference ? "<code>" + esc(r.payment_reference) + "</code>" : "none attached") + "\n\nUse payment confirmation only after checking the real sale in Selar. Approval remains separate and requires creator consent.", { inline_keyboard: actions });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request details opened." });
+    }
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Unknown admin menu action." });
+  }
   const m = data.match(/^(approve|reject|selarverify|serviceverify):([0-9a-f-]{36})$/i);
   if (!m) { await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Unknown action." }); return; }
   const action = m[1].toLowerCase(), id = m[2];
@@ -868,7 +933,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     if (!updateRes.meta?.changes) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment was already verified." });
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,'selar_payment_admin_verified',?,?,?)").bind(actor, id, r.profile_id, `Admin reviewed webhook-backed Selar payment before approving; reference ${paid.payment_reference}`).run();
     await sayBestEffort(e, r.telegram_chat_id, "The admin reviewed your Selar payment notification. Your request is now waiting for final approval.");
-    await say(e, e.ADMIN_TELEGRAM_ID, "Selar payment verified by admin for <code>" + id + "</code>. Now decide whether to approve the contact request.", { inline_keyboard: [[{ text: "Approve & send contact", callback_data: "approve:" + id }, { text: "Reject", callback_data: "reject:" + id }]] });
+    await say(e, e.ADMIN_TELEGRAM_ID, "Selar payment verified by admin for <code>" + id + "</code>. Now decide whether to approve the contact request.", { inline_keyboard: [[{ text: "🔓 Approve & send authorised contact", callback_data: "approve:" + id }, { text: "Reject", callback_data: "reject:" + id }]] });
     return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment verified. Review the contact request next." });
   }
   if (action === "reject") {
@@ -1010,13 +1075,13 @@ async function selar(request: Request, e: Env) {
     if (kind === "contact") {
       const upd = await e.DB.prepare("UPDATE contact_requests SET payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment' AND payment_method='selar'").bind(s.reference, target.id).run();
       if (!upd.meta?.changes) throw new Error("order_state_changed_before_attach");
-      const markup = { inline_keyboard: [[{ text: "Confirm payment manually", callback_data: "selarverify:" + target.id }, { text: "Reject request", callback_data: "reject:" + target.id }]] };
+      const markup = { inline_keyboard: [[{ text: "✅ I checked Selar — confirm payment", callback_data: "selarverify:" + target.id }, { text: "Reject request", callback_data: "reject:" + target.id }]] };
       await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nRequest: <code>${target.id}</code>\nProfile: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nOrder code: <code>${esc(effectiveCode)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}${clueNote}`, markup);
       await sayBestEffort(e, target.telegram_chat_id, "A Selar payment notification was received. The admin must review and verify it before your request can be approved.");
     } else {
       const upd = await e.DB.prepare("UPDATE service_orders SET payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(s.reference, target.id).run();
       if (!upd.meta?.changes) throw new Error("order_state_changed_before_attach");
-      const markup = { inline_keyboard: [[{ text: "Confirm service payment manually", callback_data: "serviceverify:" + target.id }]] };
+      const markup = { inline_keyboard: [[{ text: "✅ I checked Selar — confirm service payment", callback_data: "serviceverify:" + target.id }]] };
       await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nOrder: <code>${target.id}</code>\nService: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nOrder code: <code>${esc(effectiveCode)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}${clueNote}`, markup);
     }
   } catch (err) {

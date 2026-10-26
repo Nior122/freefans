@@ -138,6 +138,10 @@ Telegram updates require the `x-telegram-bot-api-secret-token` header to match `
 
 ## Admin commands (only `ADMIN_TELEGRAM_ID`; everyone else is rejected)
 
+Open `/admin` in the private bot chat for the button-based Admin Desk. The dashboard buttons open contact-request review, service-order review, customer-message instructions, and the safety guide. Every admin callback requires the configured admin Telegram user ID. Use `/message FL-XXXXXX your message` to send a support message to the Telegram account linked to that order, or use the full order UUID. Messages do not alter payment, approval, or consent status. Unknown slash commands from the configured admin return an admin-specific help hint instead of being treated as customer chat.
+
+
+- `/admin` or `/menu` — open the button-based Admin Desk.
 - `/help` — list these commands.
 - `/pending` — contact requests awaiting payment verification/final approval (shows status, order code, and whether a sale reference is attached).
 - `/orders` — recent service orders (request text stays hidden until payment is verified).
@@ -146,6 +150,7 @@ Telegram updates require the `x-telegram-bot-api-secret-token` header to match `
 - Inline buttons on webhook alerts: **Confirm payment manually** (`selarverify:` / `serviceverify:`), then **Approve & send contact** / **Reject** for contact requests. All are idempotent; repeats are no-ops.
 - Receipt-review messages: when no backend sale is attached, the bot may send the admin a customer-submitted Selar receipt photo/document with order context and an exact `/verify …` / `/verifyservice …` command. Compare it with Selar first; the receipt alone changes nothing.
 - `/deliver ORDER_UUID fulfilment text` — send fulfilment for a `payment_verified` service order (exactly-once claim, retry-safe on Telegram failure).
+- `/message ORDER_CODE message` — send a support message to the customer attached to a contact request or service order; does not change status.
 - `/setcontact PROFILE_ID @handle` — store a creator's Telegram handle with sharing **disabled** and any previous consent cleared.
 - `/enablecontact PROFILE_ID` — record the admin's attestation that the creator *explicitly authorised* sharing this contact; sets `sharing_enabled = 1` and `consent_confirmed_at`.
 - `/disablecontact PROFILE_ID` — immediately revoke sharing (`sharing_enabled = 0`, `consent_confirmed_at = NULL`). Future approvals fail closed, including an approval already in flight (consent is re-checked just before sending).
