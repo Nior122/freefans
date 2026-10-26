@@ -15,7 +15,7 @@
     "prerender": "node scripts/prerender.mjs",
     "check-seo": "node scripts/check-seo.mjs",
     "add-profile": "node scripts/add-profile.mjs",
-    "test": "node --test tests/contact-catalogue.test.mjs && npx tsx --test tests/contact-bot.test.ts"
+    "test": "node --test tests/contact-catalogue.test.mjs tests/migration.test.mjs && npx tsx --test tests/contact-bot.test.ts"
   },
   "dependencies": {
     "@google/genai": "^1.52.0",

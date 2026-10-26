@@ -1,0 +1,183 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.resolve(__dirname, '..', '..');
+
+export const MIGRATIONS = [
+  {
+    version: '0001_baseline',
+    description: 'Baseline contact-requests and creator-contacts tables',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'schema.sql'), 'utf8');
+      db.exec(sql);
+    }
+  },
+  {
+    version: '0002_service_orders',
+    description: 'Separate service_orders table and indexes',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0002_service_orders.sql'), 'utf8');
+      db.exec(sql);
+    }
+  },
+  {
+    version: '0003_abandoned_carts',
+    description: 'Processed abandoned-carts tracking table and index',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0003_abandoned_carts.sql'), 'utf8');
+      db.exec(sql);
+    }
+  },
+  {
+    version: '0004_checkout_codes',
+    description: 'Idempotent checkout_code and checkout_name columns and prompt table',
+    apply(db) {
+      // 1. Check contact_requests columns
+      const contactCols = getTableColumns(db, 'contact_requests');
+      if (!contactCols.includes('checkout_code')) {
+        db.exec("ALTER TABLE contact_requests ADD COLUMN checkout_code TEXT;");
+      }
+      if (!contactCols.includes('checkout_name')) {
+        db.exec("ALTER TABLE contact_requests ADD COLUMN checkout_name TEXT;");
+      }
+
+      // 2. Check service_orders columns
+      const serviceCols = getTableColumns(db, 'service_orders');
+      if (!serviceCols.includes('checkout_code')) {
+        db.exec("ALTER TABLE service_orders ADD COLUMN checkout_code TEXT;");
+      }
+      if (!serviceCols.includes('checkout_name')) {
+        db.exec("ALTER TABLE service_orders ADD COLUMN checkout_name TEXT;");
+      }
+
+      // 3. Unique indexes and prompts table
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_requests_checkout_code ON contact_requests(checkout_code) WHERE checkout_code IS NOT NULL;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_service_orders_checkout_code ON service_orders(checkout_code) WHERE checkout_code IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS checkout_name_prompts (
+          telegram_user_id TEXT PRIMARY KEY,
+          order_id TEXT NOT NULL,
+          order_kind TEXT NOT NULL CHECK(order_kind IN ('contact','service')),
+          created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+        );
+      `);
+    }
+  }
+];
+
+export function getTableColumns(db, tableName) {
+  try {
+    const rows = db.prepare ? db.prepare(`PRAGMA table_info(${tableName})`).all() : [];
+    return rows.map(r => r.name);
+  } catch {
+    return [];
+  }
+}
+
+export function getTableNames(db) {
+  try {
+    const rows = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all();
+    return rows.map(r => r.name);
+  } catch {
+    return [];
+  }
+}
+
+export function ensureMigrationTracking(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    );
+  `);
+}
+
+export function getAppliedMigrations(db) {
+  ensureMigrationTracking(db);
+  const rows = db.prepare("SELECT version FROM schema_migrations ORDER BY version ASC").all();
+  return rows.map(r => r.version);
+}
+
+export function recordMigration(db, version) {
+  ensureMigrationTracking(db);
+  db.prepare("INSERT OR IGNORE INTO schema_migrations(version) VALUES(?)").run(version);
+}
+
+/**
+ * Applies all pending migrations safely and idempotently.
+ */
+export function applyAllMigrations(db) {
+  ensureMigrationTracking(db);
+  const applied = new Set(getAppliedMigrations(db));
+
+  for (const migration of MIGRATIONS) {
+    if (!applied.has(migration.version)) {
+      migration.apply(db);
+      recordMigration(db, migration.version);
+    }
+  }
+
+  return verifySchema(db);
+}
+
+export const EXPECTED_SCHEMA = {
+  contact_requests: [
+    'id', 'telegram_user_id', 'telegram_chat_id', 'telegram_username',
+    'profile_id', 'buyer_email', 'status', 'payment_method',
+    'manual_payment_reference', 'payment_reference', 'payment_amount_minor',
+    'payment_currency', 'created_at', 'updated_at', 'checkout_code', 'checkout_name'
+  ],
+  creator_contacts: [
+    'profile_id', 'contact_value', 'contact_type', 'sharing_enabled',
+    'consent_confirmed_at', 'updated_at'
+  ],
+  processed_sales: [
+    'provider_reference', 'buyer_email', 'amount_minor', 'currency',
+    'product_id', 'request_id', 'received_at'
+  ],
+  admin_audit: [
+    'id', 'admin_telegram_id', 'action', 'profile_id', 'request_id',
+    'details', 'created_at'
+  ],
+  service_orders: [
+    'id', 'service_id', 'telegram_user_id', 'telegram_chat_id',
+    'telegram_username', 'request_text', 'buyer_email', 'status',
+    'payment_method', 'payment_reference', 'payment_amount_minor',
+    'payment_currency', 'created_at', 'updated_at', 'checkout_code', 'checkout_name'
+  ],
+  processed_abandoned_carts: [
+    'event_key', 'product_code', 'request_id', 'abandoned_at', 'processed_at'
+  ],
+  checkout_name_prompts: [
+    'telegram_user_id', 'order_id', 'order_kind', 'created_at'
+  ]
+};
+
+/**
+ * Validates complete schema integrity: all tables and required columns exist.
+ */
+export function verifySchema(db) {
+  const tables = getTableNames(db);
+  const missingTables = Object.keys(EXPECTED_SCHEMA).filter(t => !tables.includes(t));
+  if (missingTables.length > 0) {
+    throw new Error(`Schema verification failed: missing table(s): ${missingTables.join(', ')}`);
+  }
+
+  const missingColumns = {};
+  for (const [table, expectedCols] of Object.entries(EXPECTED_SCHEMA)) {
+    const actualCols = getTableColumns(db, table);
+    const missing = expectedCols.filter(col => !actualCols.includes(col));
+    if (missing.length > 0) {
+      missingColumns[table] = missing;
+    }
+  }
+
+  if (Object.keys(missingColumns).length > 0) {
+    const details = Object.entries(missingColumns).map(([t, cols]) => `${t}: [${cols.join(', ')}]`).join('; ');
+    throw new Error(`Schema verification failed: missing column(s): ${details}`);
+  }
+
+  return { ok: true, verifiedTables: Object.keys(EXPECTED_SCHEMA) };
+}
