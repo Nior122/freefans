@@ -172,6 +172,14 @@ export function migrateRemote() {
     runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0006_receipt_review')");
   }
 
+  // Migration 7: allow up to three unpaid contact requests per Telegram user.
+  // Keep the separate service-order active-request index intact.
+  if (!applied.has('0007_front_desk_multi_requests')) {
+    console.log('[migrate-d1] Applying 0007_front_desk_multi_requests migration...');
+    runWranglerFile(path.join(ROOT, 'contact-bot', 'migrations', '0007_front_desk_multi_requests.sql'));
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0007_front_desk_multi_requests')");
+  }
+
   // Final complete schema verification. These expectations are shared with the
   // local migration verifier to prevent the two definitions drifting apart.
   console.log('[migrate-d1] Verifying complete schema...');
