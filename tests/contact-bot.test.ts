@@ -1003,6 +1003,22 @@ function messagesTo(sent: any[], chatId: string) {
   return sent.filter(m => m.method === 'sendMessage' && String(m.data.chat_id) === chatId);
 }
 
+test('Admin natural-language queries are allowlisted and command suffixes are normalized', async () => {
+  const db=createTestDb();
+  const {env,cleanup,sentTelegramMessages}=createTestEnv(db);
+  try {
+    const id=crypto.randomUUID();
+    db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,?,?,?,?,?)").run(id,'6000','6000','anaimiya','pending_payment','FL-AI0001');
+    await tgPost(env,adminMsg('show pending contact requests'));
+    assert.ok(sentTelegramMessages.some(m=>String(m.data.text||'').includes('FL-AI0001')),'allowlisted read-only query returns actual database data');
+    await tgPost(env,adminMsg('/setcontact@KasiQueenbot anaimiya @anaimiya_real'));
+    const contact=db.raw.prepare("SELECT contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts WHERE profile_id='anaimiya'").get() as any;
+    assert.equal(contact.contact_value,'@anaimiya_real');
+    assert.equal(contact.sharing_enabled,0,'saving a contact must not imply consent');
+    await tgPost(env,callbackFrom(9999,'admin:consent'));
+    assert.equal(db.raw.prepare("SELECT COUNT(*) AS n FROM admin_audit WHERE action='creator_consent_confirmed'").get() && (db.raw.prepare("SELECT COUNT(*) AS n FROM admin_audit WHERE action='creator_consent_confirmed'").get() as any).n,0,'non-admin cannot record consent');
+  } finally { cleanup(); }
+});
 test('Dotted profile IDs resolve via the Telegram-safe start parameter; malformed IDs fail closed', async () => {
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
