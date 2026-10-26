@@ -3,11 +3,17 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
+import { EXPECTED_SCHEMA, EXPECTED_UNIQUE_INDEXES, verifySchemaShape } from './lib/db-migrations.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const WRANGLER_CONFIG = path.join(ROOT, 'contact-bot', 'wrangler.toml');
 const DB_NAME = 'fansleak-contact-requests';
+
+/** Validate a remote schema snapshot using the same expectations as local migrations. */
+export function verifyRemoteSchema(snapshot) {
+  return verifySchemaShape(snapshot);
+}
 
 // Wrangler is invoked with an argument array, never a shell string. The previous
 // implementation interpolated JSON.stringify(sql) into a shell command, which
@@ -158,17 +164,19 @@ export function migrateRemote() {
     runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0005_one_active_request_per_user')");
   }
 
-  // Final complete schema verification
+  // Final complete schema verification. These expectations are shared with the
+  // local migration verifier to prevent the two definitions drifting apart.
   console.log('[migrate-d1] Verifying complete schema...');
   const tables = runWranglerCommand("SELECT name FROM sqlite_master WHERE type='table'").map(r => r.name);
-  const requiredTables = [
-    'contact_requests', 'creator_contacts', 'processed_sales', 'admin_audit',
-    'service_orders', 'processed_abandoned_carts', 'checkout_name_prompts'
-  ];
-  const missingTables = requiredTables.filter(t => !tables.includes(t));
-  if (missingTables.length > 0) {
-    throw new Error(`[migrate-d1] Verification failed: missing table(s): ${missingTables.join(', ')}`);
+  const columnsByTable = {};
+  const uniqueIndexes = [];
+  for (const table of Object.keys(EXPECTED_SCHEMA)) {
+    columnsByTable[table] = runWranglerCommand(`PRAGMA table_info(${table})`).map(row => row.name);
+    for (const index of runWranglerCommand(`PRAGMA index_list(${table})`)) {
+      uniqueIndexes.push({ table, name: index.name, unique: index.unique });
+    }
   }
+  verifyRemoteSchema({ tables, columnsByTable, uniqueIndexes });
 
   console.log('[migrate-d1] All migrations safely applied and verified successfully.');
 }
