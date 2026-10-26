@@ -554,8 +554,8 @@ test('Service order delivery safeguards and fulfilment flow', async () => {
   try {
     const serviceOrderId = crypto.randomUUID();
     db.raw.prepare(`
-      INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status, checkout_code)
-      VALUES (?, 'custom_service', '7001', '7001', 'awaiting_request', 'FL-SRV100')
+      INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status, checkout_code, checkout_name)
+      VALUES (?, 'custom_service', '7001', '7001', 'awaiting_request', 'FL-SRV100', 'Customer One')
     `).run(serviceOrderId);
 
     // 1. Customer typing PAY moves to pending_payment and sends checkout instructions
