@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
@@ -9,29 +9,73 @@ const ROOT = path.resolve(__dirname, '..');
 const WRANGLER_CONFIG = path.join(ROOT, 'contact-bot', 'wrangler.toml');
 const DB_NAME = 'fansleak-contact-requests';
 
-function runWranglerCommand(command) {
-  const cmd = `npx --yes wrangler@4 d1 execute ${DB_NAME} --remote --json --command=${JSON.stringify(command)} --config=${JSON.stringify(WRANGLER_CONFIG)}`;
-  const output = execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-  const parsed = JSON.parse(output);
-  if (Array.isArray(parsed) && parsed[0]?.results) {
-    return parsed[0].results;
+// Wrangler is invoked with an argument array, never a shell string. The previous
+// implementation interpolated JSON.stringify(sql) into a shell command, which
+// delivered multiline SQL to D1 with literal "\n" escape sequences instead of
+// newlines and failed the 2026-10-26 production deploy (run 40278428624) on the
+// first statement. Argument arrays pass SQL through byte-for-byte.
+function execNpx(args, stdio) {
+  try {
+    return execFileSync('npx', ['--yes', 'wrangler@4', ...args], {
+      encoding: 'utf8',
+      stdio,
+      // cmd.exe cannot launch npx.cmd without a shell; POSIX (CI) runs shell-free.
+      shell: process.platform === 'win32',
+      maxBuffer: 10 * 1024 * 1024
+    });
+  } catch (err) {
+    const detail = [err.stdout, err.stderr]
+      .filter(v => typeof v === 'string' && v.trim())
+      .join('\n')
+      .trim()
+      .slice(0, 2000);
+    throw new Error(
+      `[migrate-d1] wrangler ${args.slice(0, 3).join(' ')} failed (exit ${err.status ?? 'unknown'})` +
+      (detail ? `:\n${detail}` : `: ${err.message}`)
+    );
   }
-  return [];
+}
+
+export function parseWranglerJsonOutput(output) {
+  const start = output.indexOf('[');
+  const end = output.lastIndexOf(']');
+  if (start === -1 || end < start) {
+    throw new Error(`[migrate-d1] Wrangler did not return JSON output: ${output.slice(0, 500) || '(empty output)'}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(output.slice(start, end + 1));
+  } catch {
+    throw new Error(`[migrate-d1] Could not parse Wrangler JSON output: ${output.slice(0, 500)}`);
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error('[migrate-d1] Wrangler returned an unexpected empty result set.');
+  }
+  const first = parsed[0];
+  if (first && first.success === false) {
+    throw new Error(`[migrate-d1] D1 query failed: ${JSON.stringify(first.error ?? first).slice(0, 1000)}`);
+  }
+  return Array.isArray(first?.results) ? first.results : [];
+}
+
+function runWranglerCommand(command) {
+  const output = execNpx(
+    ['d1', 'execute', DB_NAME, '--remote', '--json', `--command=${command}`, `--config=${WRANGLER_CONFIG}`],
+    ['ignore', 'pipe', 'pipe']
+  );
+  return parseWranglerJsonOutput(String(output ?? ''));
 }
 
 function runWranglerFile(filePath) {
-  const cmd = `npx --yes wrangler@4 d1 execute ${DB_NAME} --remote --file=${JSON.stringify(filePath)} --config=${JSON.stringify(WRANGLER_CONFIG)}`;
-  execSync(cmd, { encoding: 'utf8', stdio: 'inherit' });
+  execNpx(
+    ['d1', 'execute', DB_NAME, '--remote', `--file=${filePath}`, `--config=${WRANGLER_CONFIG}`],
+    'inherit'
+  );
 }
 
 export function migrateRemote() {
   console.log(`[migrate-d1] Ensuring migration tracking table exists on ${DB_NAME}...`);
-  runWranglerCommand(`
-    CREATE TABLE IF NOT EXISTS schema_migrations (
-      version TEXT PRIMARY KEY,
-      applied_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-    );
-  `);
+  runWranglerCommand("CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')))");
 
   const appliedRows = runWranglerCommand("SELECT version FROM schema_migrations");
   const applied = new Set(appliedRows.map(r => r.version));
@@ -81,16 +125,11 @@ export function migrateRemote() {
       runWranglerCommand("ALTER TABLE service_orders ADD COLUMN checkout_name TEXT;");
     }
 
-    runWranglerCommand(`
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_requests_checkout_code ON contact_requests(checkout_code) WHERE checkout_code IS NOT NULL;
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_service_orders_checkout_code ON service_orders(checkout_code) WHERE checkout_code IS NOT NULL;
-      CREATE TABLE IF NOT EXISTS checkout_name_prompts (
-        telegram_user_id TEXT PRIMARY KEY,
-        order_id TEXT NOT NULL,
-        order_kind TEXT NOT NULL CHECK(order_kind IN ('contact','service')),
-        created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-      );
-    `);
+    // One statement per D1 call: a single --command must never bundle several
+    // statements, and each statement's success is then individually verified.
+    runWranglerCommand("CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_requests_checkout_code ON contact_requests(checkout_code) WHERE checkout_code IS NOT NULL");
+    runWranglerCommand("CREATE UNIQUE INDEX IF NOT EXISTS idx_service_orders_checkout_code ON service_orders(checkout_code) WHERE checkout_code IS NOT NULL");
+    runWranglerCommand("CREATE TABLE IF NOT EXISTS checkout_name_prompts (telegram_user_id TEXT PRIMARY KEY, order_id TEXT NOT NULL, order_kind TEXT NOT NULL CHECK(order_kind IN ('contact','service')), created_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now')))");
 
     runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0004_checkout_codes')");
     console.log('[migrate-d1] 0004_checkout_codes migration complete.');
@@ -138,7 +177,7 @@ if (process.argv.includes('--remote')) {
   try {
     migrateRemote();
   } catch (err) {
-    console.error('[migrate-d1] Remote migration error:', err);
+    console.error('[migrate-d1] Remote migration error:', err instanceof Error ? err.message : err);
     process.exit(1);
   }
 }

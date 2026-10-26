@@ -11,6 +11,7 @@ import {
   getTableColumns,
   getTableNames
 } from '../scripts/lib/db-migrations.mjs';
+import { parseWranglerJsonOutput } from '../scripts/migrate-d1.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -162,4 +163,27 @@ test('Migration: partially migrated database with pre-existing columns does not 
 
   const verified = verifySchema(db);
   assert.equal(verified.ok, true);
+});
+
+test('Remote migration runner: parses wrangler JSON output and surfaces D1 failures', () => {
+  assert.deepEqual(
+    parseWranglerJsonOutput(JSON.stringify([{ results: [{ version: '0001_baseline' }], success: true, meta: {} }])),
+    [{ version: '0001_baseline' }]
+  );
+  assert.deepEqual(parseWranglerJsonOutput(JSON.stringify([{ results: [], success: true, meta: {} }])), []);
+  assert.throws(
+    () => parseWranglerJsonOutput(JSON.stringify([{ results: [], success: false, error: { text: 'near "x": syntax error' } }])),
+    /D1 query failed/
+  );
+  assert.throws(() => parseWranglerJsonOutput('not json at all'), /did not return JSON/);
+});
+
+test('Remote migration runner: never builds shell strings from SQL (production regression, run 40278428624)', () => {
+  // The 2026-10-26 production deploy failed because SQL was interpolated into a
+  // shell command via JSON.stringify(), which delivered literal "\n" escapes to
+  // D1 instead of newlines. Pin the argv-array implementation against regression.
+  const source = fs.readFileSync(path.join(ROOT, 'scripts', 'migrate-d1.mjs'), 'utf8');
+  assert.ok(source.includes('execFileSync('), 'migrate-d1 must execute wrangler via an argument array');
+  assert.ok(!source.includes('execSync(cmd'), 'migrate-d1 must not execute a constructed shell string');
+  assert.ok(!source.includes('--command=${JSON.stringify'), 'SQL must never be JSON-stringified into a shell command');
 });
