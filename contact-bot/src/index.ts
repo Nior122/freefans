@@ -562,6 +562,15 @@ async function message(e: Env, m: Msg) {
   let t = (m.text || "").trim();
   const caption = (m.caption || "").trim(), chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
   const hasReceiptCandidateMedia = Boolean((Array.isArray(m.photo) && m.photo.length > 0) || m.document);
+  if (hasReceiptCandidateMedia && user === e.ADMIN_TELEGRAM_ID) {
+    const draft = await e.DB.prepare("SELECT id,checkout_code FROM delivery_drafts WHERE admin_telegram_id=? AND status='draft' ORDER BY updated_at DESC LIMIT 1").bind(user).first<any>();
+    if (draft) {
+      const media = extractReceiptMedia(m);
+      if (!media.media) return say(e,chat,media.unsupported || "Send one photo or document.");
+      await e.DB.prepare("UPDATE delivery_drafts SET media_kind=?,media_file_id=?,media_mime_type=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(media.media.kind,media.media.fileId,media.media.mimeType,draft.id,user).run();
+      return say(e,chat,"📎 Media attached to draft <code>"+esc(draft.checkout_code || "request")+"</code>.",{inline_keyboard:[[ {text:"👀 Preview",callback_data:"draft:preview:"+draft.id} ],[ {text:"✅ Send to customer",callback_data:"draft:send:"+draft.id},{text:"✖️ Cancel",callback_data:"draft:cancel:"+draft.id} ]]});
+    }
+  }
   if (hasReceiptCandidateMedia) {
     const receiptPrompt = await e.DB.prepare("SELECT order_id,order_kind FROM receipt_review_prompts WHERE telegram_user_id=?").bind(user).first<any>();
     let order = receiptPrompt ? await loadCustomerOrderById(e, String(receiptPrompt.order_id)) : null;
@@ -582,6 +591,15 @@ async function message(e: Env, m: Msg) {
     t = caption;
   }
   if (!t) return;
+  // If the administrator has an active delivery draft, ordinary text becomes draft content.
+  if (user === e.ADMIN_TELEGRAM_ID && !t.startsWith("/")) {
+    const draft = await e.DB.prepare("SELECT id,checkout_code FROM delivery_drafts WHERE admin_telegram_id=? AND status='draft' ORDER BY updated_at DESC LIMIT 1").bind(user).first<any>();
+    if (draft) {
+      if (t.length > 700) return say(e,chat,"Please keep delivery text under 700 characters.");
+      await e.DB.prepare("UPDATE delivery_drafts SET message_text=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(t,draft.id,user).run();
+      return say(e,chat,"📝 Draft updated for <code>"+esc(draft.checkout_code || "request")+"</code>. Optionally attach one photo or document, then preview before sending.",{inline_keyboard:[[ {text:"👀 Preview",callback_data:"draft:preview:"+draft.id} ],[ {text:"✅ Send to customer",callback_data:"draft:send:"+draft.id},{text:"✖️ Cancel",callback_data:"draft:cancel:"+draft.id} ]]});
+    }
+  }
   // Telegram may append @BotName to slash commands. Normalize only the command token.
   t = t.replace(/^(\\/[A-Za-z0-9_]+)@[A-Za-z0-9_]+(?=\\s|$)/, "$1");
   if (t.startsWith("/start")) {
@@ -948,7 +966,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       if (!r) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request not found." });
       const actions: Record<string, unknown>[][] = [];
       if (r.status === "pending_payment" && r.payment_reference) actions.push([{ text: "✅ I checked Selar — confirm payment", callback_data: "selarverify:" + r.id }]);
-      if (r.status === "payment_verified") actions.push([{ text: "🔓 Approve & send authorised contact", callback_data: "approve:" + r.id }, { text: "❌ Reject request", callback_data: "reject:" + r.id }]);
+      if (r.status === "payment_verified") actions.push([{ text: "🔓 Prepare delivery", callback_data: "approve:" + r.id }, { text: "❌ Reject request", callback_data: "reject:" + r.id }]);
       actions.push([{ text: "💬 How to message this customer", callback_data: "admin:message_help" }], [{ text: "↩️ Back to requests", callback_data: "admin:pending" }], [{ text: "🏠 Admin Desk", callback_data: "admin:home" }]);
       await say(e, chat, "<b>Contact request details</b>\nCode: <code>" + esc(r.checkout_code || "") + "</code>\nProfile: " + esc(r.profile_id || "unknown") + "\nStatus: <b>" + esc(r.status) + "</b>\nSale reference: " + (r.payment_reference ? "<code>" + esc(r.payment_reference) + "</code>" : "none attached") + "\n\nUse payment confirmation only after checking the real sale in Selar. Approval remains separate and requires creator consent.", { inline_keyboard: actions });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request details opened." });
@@ -978,7 +996,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     if (!updateRes.meta?.changes) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment was already verified." });
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,'selar_payment_admin_verified',?,?,?)").bind(actor, id, r.profile_id, `Admin reviewed webhook-backed Selar payment before approving; reference ${paid.payment_reference}`).run();
     await sayBestEffort(e, r.telegram_chat_id, "The admin reviewed your Selar payment notification. Your request is now waiting for final approval.");
-    await say(e, e.ADMIN_TELEGRAM_ID, "Selar payment verified by admin for <code>" + id + "</code>. Now decide whether to approve the contact request.", { inline_keyboard: [[{ text: "🔓 Approve & send authorised contact", callback_data: "approve:" + id }, { text: "Reject", callback_data: "reject:" + id }]] });
+    await say(e, e.ADMIN_TELEGRAM_ID, "Selar payment verified by admin for <code>" + id + "</code>. Next, prepare delivery for this exact customer. Contact release still requires confirmed creator consent.", { inline_keyboard: [[{ text: "🔓 Prepare delivery", callback_data: "approve:" + id }, { text: "Reject", callback_data: "reject:" + id }]] });
     return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment verified. Review the contact request next." });
   }
   if (action === "reject") {
