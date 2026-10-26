@@ -471,7 +471,7 @@ export const ProfilePage = () => {
             <span className="text-[11px] font-semibold text-red-200 tracking-wide">Request contact</span>
           </a>
           <button
-            className="animate-wobble flex-1 bg-red-700 hover:bg-red-600 text-white py-2 rounded-full font-bold text-base transition-colors shadow-lg shadow-red-900/40 flex flex-col items-center justify-center"
+            className="animate-wobble flex-1 bg-red-700 hover:bg-red-600 text-white py-2 rounded-full font-bold text-base transition-colors shadow-lg shadow-red-900/40 flex flex-col items-center justify-center gap-0"
           >
             <div className="flex items-center gap-2">
               <MessageSquare size={18} />
@@ -479,6 +479,7 @@ export const ProfilePage = () => {
             </div>
             <span className="text-[11px] font-semibold text-red-200 tracking-wide">{subCount} subscribers</span>
           </button>
+
           <button
             onClick={handleFavorite}
             className={`p-3 rounded-full border transition-all ${isFav
