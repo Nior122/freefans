@@ -1,0 +1,18 @@
+name = "fansleak-contact-bot"
+account_id = "5f7678c82c50be845dba6bd8280bfae5"
+main = "src/index.ts"
+compatibility_date = "2026-10-24"
+
+[ai]
+binding = "AI"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "fansleak-contact-requests"
+database_id = "f22e4f55-9db6-4bb8-a328-8547ff79523f"
+
+[vars]
+SITE_URL = "https://fansleak.pages.dev"
+PAYMENT_PROVIDER = "selar"
+PAYMENT_METHODS = "selar"
+AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"

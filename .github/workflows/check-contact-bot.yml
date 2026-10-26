@@ -1,0 +1,48 @@
+name: Check FansLeak contact bot
+
+on:
+  pull_request:
+    paths:
+      - "contact-bot/**"
+      - "scripts/**"
+      - "tests/**"
+      - "components/ProfilePage.tsx"
+      - "services/mockData.tsx"
+      - "public/contact-catalogue.json"
+      - ".github/workflows/check-contact-bot.yml"
+      - "package.json"
+      - "package-lock.json"
+  push:
+    branches:
+      - "fan"
+      - "feature/selar-bank-contact-bot"
+    paths:
+      - "contact-bot/**"
+      - "scripts/**"
+      - "tests/**"
+      - "components/ProfilePage.tsx"
+      - "services/mockData.tsx"
+      - "public/contact-catalogue.json"
+      - ".github/workflows/check-contact-bot.yml"
+      - "package.json"
+      - "package-lock.json"
+
+permissions:
+  contents: read
+
+jobs:
+  worker-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        run: npm ci
+      - name: Run automated test suite
+        run: npm test
+      - name: Type-check the website and contact bot
+        run: npx tsc --noEmit
+      - name: Compile Worker and validate Wrangler configuration without deploying
+        run: npx --yes wrangler@4 deploy --dry-run --outdir /tmp/fansleak-contact-bot-build --config contact-bot/wrangler.toml

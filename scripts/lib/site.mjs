@@ -76,7 +76,7 @@ export function resolveSiteUrl() {
 
 /** Reads the PROFILES array out of services/mockData.tsx. */
 export function readProfiles() {
-  const source = fs.readFileSync(MOCK_DATA_FILE, 'utf8');
+  const source = fs.readFileSync(MOCK_DATA_FILE, 'utf8').replace(/\r\n/g, '\n');
   const start = source.indexOf('const PROFILES: Profile[] = [');
   if (start === -1) throw new Error(`Could not find the PROFILES array in ${MOCK_DATA_FILE}`);
   const end = source.indexOf('\n];', start);

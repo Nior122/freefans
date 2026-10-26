@@ -31,10 +31,11 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out deployment code from the feature branch
+      # Deploy exactly the ref this workflow was dispatched from. Run it from the
+      # `fan` branch after the contact-bot PR has merged; there is deliberately no
+      # pinned feature-branch ref here.
+      - name: Check out deployment code
         uses: actions/checkout@v4
-        with:
-          ref: feature/selar-bank-contact-bot
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -67,41 +68,13 @@ jobs:
             test -n "$value" || { echo "Missing required GitHub Actions secret: $name"; exit 1; }
           done
 
-      - name: Apply the baseline D1 schema before ordered migrations
+      - name: Apply schema and migrations safely with complete verification
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
           test -n "$CLOUDFLARE_API_TOKEN" || { echo "Missing GitHub secret CLOUDFLARE_API_TOKEN"; exit 1; }
-          npx --yes wrangler@4 d1 execute fansleak-contact-requests --remote --file contact-bot/schema.sql --config contact-bot/wrangler.toml
-
-      - name: Apply the idempotent service-orders migration
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          test -n "$CLOUDFLARE_API_TOKEN" || { echo "Missing GitHub secret CLOUDFLARE_API_TOKEN"; exit 1; }
-          npx --yes wrangler@4 d1 execute fansleak-contact-requests --remote --file contact-bot/migrations/0002_service_orders.sql --config contact-bot/wrangler.toml
-
-      - name: Apply the abandoned-cart idempotency migration
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          test -n "$CLOUDFLARE_API_TOKEN" || { echo "Missing GitHub secret CLOUDFLARE_API_TOKEN"; exit 1; }
-          npx --yes wrangler@4 d1 execute fansleak-contact-requests --remote --file contact-bot/migrations/0003_abandoned_carts.sql --config contact-bot/wrangler.toml
-
-      - name: Apply the checkout-code and name-prompt migration once
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          set -euo pipefail
-          test -n "$CLOUDFLARE_API_TOKEN" || { echo "Missing GitHub secret CLOUDFLARE_API_TOKEN"; exit 1; }
-          if npx --yes wrangler@4 d1 execute fansleak-contact-requests --remote --command "SELECT name FROM sqlite_master WHERE type='table' AND name='checkout_name_prompts'" --config contact-bot/wrangler.toml | grep -q checkout_name_prompts; then
-            echo "Checkout-code migration already applied; skipping."
-          else
-            npx --yes wrangler@4 d1 execute fansleak-contact-requests --remote --file contact-bot/migrations/0004_checkout_codes.sql --config contact-bot/wrangler.toml
-          fi
+          node scripts/migrate-d1.mjs --remote
 
       - name: Deploy Worker
         env:
