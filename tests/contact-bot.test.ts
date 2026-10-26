@@ -18,6 +18,7 @@ function createTestDb() {
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0004_checkout_codes.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0005_one_active_request_per_user.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0006_receipt_review.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0007_front_desk_multi_requests.sql'), 'utf8'));
 
   return {
     raw: db,
@@ -1037,17 +1038,25 @@ test('Dotted profile IDs resolve via the Telegram-safe start parameter; malforme
   }
 });
 
-test('Repeated /start commands do not create duplicate active requests', async () => {
+test('Customer can have up to three unpaid contact requests and still gets payment-check buttons', async () => {
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
     await tgPost(env, userMsg(5110, '/start contact_anaimiya'));
     await tgPost(env, userMsg(5110, '/start contact_rosebeck'));
-    const count = db.raw.prepare("SELECT count(*) AS cnt FROM contact_requests WHERE telegram_user_id='5110'").get() as any;
-    assert.equal(count.cnt, 1, 'Second /start must not create another active request');
-    const row = db.raw.prepare("SELECT profile_id FROM contact_requests WHERE telegram_user_id='5110'").get() as any;
-    assert.equal(row.profile_id, 'anaimiya', 'Active request must stay bound to the original creator');
-    assert.ok(messagesTo(sentTelegramMessages, '5110').some(m => String(m.data.text).includes('already have a request in progress')));
+    await tgPost(env, userMsg(5110, '/start contact_sweet_creator'));
+    const count = db.raw.prepare("SELECT count(*) AS cnt FROM contact_requests WHERE telegram_user_id='5110' AND status IN ('awaiting_email','pending_payment')").get() as any;
+    assert.equal(count.cnt, 3, 'Customer may have three unpaid contact requests');
+    await tgPost(env, userMsg(5110, '/start contact_emanuela_dot_ebony'));
+    const afterLimit = db.raw.prepare("SELECT count(*) AS cnt FROM contact_requests WHERE telegram_user_id='5110' AND status IN ('awaiting_email','pending_payment')").get() as any;
+    assert.equal(afterLimit.cnt, 3, 'Fourth unpaid request must be blocked');
+    const limitMessage = messagesTo(sentTelegramMessages, '5110').at(-1);
+    assert.ok(String(limitMessage?.data.text).includes('3 contact requests'));
+    const markup = limitMessage?.data.reply_markup as any;
+    assert.ok(markup?.inline_keyboard?.flat().some((button: any) => String(button.text).includes('Check')));
+    // The customer can still chat while all three requests are pending.
+    await tgPost(env, userMsg(5110, 'Can you explain what happens next?'));
+    assert.ok(messagesTo(sentTelegramMessages, '5110').some(m => String(m.data.text).includes('front-desk assistant') || String(m.data.text).includes('help with FansLeak')));
   } finally {
     cleanup();
   }
