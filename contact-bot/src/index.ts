@@ -839,6 +839,44 @@ async function message(e: Env, m: Msg) {
       return say(e, chat, "Thanks — your email has been saved as a fallback reconciliation clue. It is only used if the admin needs to match a payment manually, and it does not verify payment.");
     }
   }
+  if (user === e.ADMIN_TELEGRAM_ID) {
+    const intent = t.toLowerCase().replace(/[!?.,]/g," ").replace(/\s+/g," ").trim();
+    if (/^(show|list|view)? ?(pending )?(contact )?requests?$/.test(intent) || intent.includes("pending contact requests")) {
+      const rows=await e.DB.prepare("SELECT id,profile_id,status,checkout_code,payment_reference FROM contact_requests WHERE status IN ('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 15").all<any>();
+      const lines=(rows.results||[]).map((r:any)=>"• <code>"+esc(r.checkout_code||r.id)+"</code> · "+esc(r.profile_id)+" · "+esc(r.status)+" · "+(r.payment_reference?"sale attached":"no sale attached"));
+      return say(e,chat,"<b>📥 Pending contact requests</b>\n"+(lines.join("\n")||"No pending contact requests."));
+    }
+    if (intent.includes("awaiting verification") || intent.includes("payments awaiting") || intent.includes("awaiting payment verification")) {
+      const row=await e.DB.prepare("SELECT COUNT(*) AS total FROM contact_requests WHERE status='pending_payment' AND payment_reference IS NOT NULL").first<any>();
+      return say(e,chat,"🧾 Payments awaiting manual Selar verification: <b>"+String(row?.total||0)+"</b>. A webhook match is not payment verification.");
+    }
+    if (intent.includes("latest matched sales") || intent.includes("matched sales")) {
+      const rows=await e.DB.prepare("SELECT provider_reference,request_id,received_at FROM processed_sales WHERE request_id IS NOT NULL ORDER BY received_at DESC LIMIT 10").all<any>();
+      const lines=(rows.results||[]).map((r:any)=>"• <code>"+esc(r.request_id)+"</code> · "+esc(r.received_at)+" · reference attached");
+      return say(e,chat,"<b>Latest matched sales</b>\n"+(lines.join("\n")||"No matched sales recorded."));
+    }
+    if (intent.includes("service orders") || intent.includes("service orders waiting")) {
+      const rows=await e.DB.prepare("SELECT id,service_id,status,checkout_code,payment_reference FROM service_orders WHERE status IN ('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 15").all<any>();
+      const lines=(rows.results||[]).map((r:any)=>"• <code>"+esc(r.checkout_code||r.id)+"</code> · "+esc(r.service_id)+" · "+esc(r.status));
+      return say(e,chat,"<b>🧾 Service orders needing attention</b>\n"+(lines.join("\n")||"No service orders awaiting review."));
+    }
+    if (intent.includes("today") && (intent.includes("summary") || intent.includes("requests") || intent.includes("statistics"))) {
+      const row=await e.DB.prepare("SELECT COUNT(*) AS total,SUM(CASE WHEN status='pending_payment' THEN 1 ELSE 0 END) AS pending,SUM(CASE WHEN status='payment_verified' THEN 1 ELSE 0 END) AS verified,SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END) AS approved FROM contact_requests WHERE date(created_at)=date('now')").first<any>();
+      return say(e,chat,"<b>📊 Today’s contact request summary</b>\nCreated: "+String(row?.total||0)+"\nAwaiting payment/manual verification: "+String(row?.pending||0)+"\nPayment verified, awaiting approval: "+String(row?.verified||0)+"\nApproved: "+String(row?.approved||0));
+    }
+    if (intent.includes("sharing permission") || intent.includes("consent not confirmed") || intent.includes("without consent")) {
+      const cat=await catalogue(e), rows=await e.DB.prepare("SELECT profile_id,contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts").all<any>();
+      const saved=new Map((rows.results||[]).map((r:any)=>[String(r.profile_id),r]));
+      const missing=cat.filter((p:any)=>{const c:any=saved.get(p.id);return !(c && c.sharing_enabled===1 && c.consent_confirmed_at && c.contact_value);}).slice(0,25);
+      return say(e,chat,"<b>🛡️ Profiles without confirmed sharing permission</b>\n"+(missing.map((p:any)=>"• "+esc(p.name)+" (<code>"+esc(p.id)+"</code>)").join("\n")||"All listed profiles have a saved contact and recorded sharing authorization."));
+    }
+    const codeMatch=t.match(/\bFL-[A-Z0-9]{6}\b/i);
+    if (codeMatch && (intent.includes("find") || intent.includes("request") || intent.includes("status"))) {
+      const row=await e.DB.prepare("SELECT id,profile_id,status,checkout_code,payment_reference FROM contact_requests WHERE checkout_code=?").bind(codeMatch[0].toUpperCase()).first<any>();
+      if (!row) return say(e,chat,"No contact request found for <code>"+esc(codeMatch[0].toUpperCase())+"</code>.");
+      return say(e,chat,"<b>Contact request</b>\nID: <code>"+esc(row.id)+"</code>\nCode: <code>"+esc(row.checkout_code)+"</code>\nProfile: "+esc(row.profile_id)+"\nStatus: "+esc(row.status)+"\nSale reference: "+(row.payment_reference?"attached":"not attached"));
+    }
+  }
   return aiReply(e, chat, t);
 }
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
