@@ -582,6 +582,8 @@ async function message(e: Env, m: Msg) {
     t = caption;
   }
   if (!t) return;
+  // Telegram may append @BotName to slash commands. Normalize only the command token.
+  t = t.replace(/^(\\/[A-Za-z0-9_]+)@[A-Za-z0-9_]+(?=\\s|$)/, "$1");
   if (t.startsWith("/start")) {
     const arg = t.split(/\s+/, 2)[1] || "";
     if (arg.startsWith("contact_")) return start(e, m, arg);
