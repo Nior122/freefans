@@ -164,6 +164,14 @@ export function migrateRemote() {
     runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0005_one_active_request_per_user')");
   }
 
+  // Migration 6: manual receipt-review prompt and submission tracking. The SQL
+  // is entirely CREATE ... IF NOT EXISTS and contains no customer-data changes.
+  if (!applied.has('0006_receipt_review')) {
+    console.log('[migrate-d1] Applying 0006_receipt_review migration...');
+    runWranglerFile(path.join(ROOT, 'contact-bot', 'migrations', '0006_receipt_review.sql'));
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0006_receipt_review')");
+  }
+
   // Final complete schema verification. These expectations are shared with the
   // local migration verifier to prevent the two definitions drifting apart.
   console.log('[migrate-d1] Verifying complete schema...');

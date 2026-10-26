@@ -23,7 +23,7 @@ test('Migration: fresh database migrates to fully verified schema', () => {
   const result = applyAllMigrations(db);
 
   assert.equal(result.ok, true);
-  assert.equal(result.verifiedTables.length, 7);
+  assert.equal(result.verifiedTables.length, 9);
 
   const applied = getAppliedMigrations(db);
   assert.deepEqual(applied, [
@@ -31,7 +31,8 @@ test('Migration: fresh database migrates to fully verified schema', () => {
     '0002_service_orders',
     '0003_abandoned_carts',
     '0004_checkout_codes',
-    '0005_one_active_request_per_user'
+    '0005_one_active_request_per_user',
+    '0006_receipt_review'
   ]);
 
   const verified = verifySchema(db);
@@ -149,6 +150,33 @@ test('Migration 0005: pre-existing duplicate active rows block migration without
   assert.equal(result.ok, true);
 });
 
+test('Migration 0006: receipt submission indexes reject duplicate Telegram updates and duplicate files', () => {
+  const db = new DatabaseSync(':memory:');
+  applyAllMigrations(db);
+
+  const insertSubmission = (id, orderId, userId, messageId, fileUniqueId) => db.prepare(`
+    INSERT INTO payment_receipt_submissions
+      (id,order_id,order_kind,telegram_user_id,telegram_chat_id,telegram_message_id,media_kind,telegram_file_id,telegram_file_unique_id,status)
+    VALUES (?,?,?,?,?,?,?,?,?,'forwarding')
+  `).run(id, orderId, 'contact', userId, userId, messageId, 'photo', `file-${id}`, fileUniqueId);
+
+  insertSubmission('receipt-1', 'order-1', '7201', 9001, 'unique-file-1');
+
+  assert.throws(
+    () => insertSubmission('receipt-duplicate-update', 'order-2', '7201', 9001, 'different-file'),
+    /UNIQUE constraint failed/i,
+    'A redelivered Telegram message must not create a second receipt submission'
+  );
+  assert.throws(
+    () => insertSubmission('receipt-duplicate-file', 'order-1', '7202', 9002, 'unique-file-1'),
+    /UNIQUE constraint failed/i,
+    'The same Telegram file must not be recorded twice for one order'
+  );
+
+  // Different customers, messages, orders, and files remain valid.
+  insertSubmission('receipt-2', 'order-2', '7202', 9003, 'unique-file-2');
+});
+
 test('Migration: partially migrated database with pre-existing columns does not fail on ALTER TABLE', () => {
   const db = new DatabaseSync(':memory:');
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'schema.sql'), 'utf8'));
@@ -203,7 +231,7 @@ function completeRemoteSchemaSnapshot() {
 test('Remote migration verifier: accepts all required tables, columns, and unique indexes', () => {
   const result = verifyRemoteSchema(completeRemoteSchemaSnapshot());
   assert.equal(result.ok, true);
-  assert.equal(result.verifiedTables.length, 7);
+  assert.equal(result.verifiedTables.length, 9);
 });
 
 test('Remote migration verifier: fails when a required column is missing', () => {

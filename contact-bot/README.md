@@ -2,7 +2,7 @@
 
 One Telegram bot supports two separate Selar products on a unified Cloudflare Worker with D1 storage. The incoming deep link chooses the customer flow; customers are never shown an ambiguous product menu.
 
-**Core safety rule, enforced in code and tests:** a webhook, an email, an order code, or a customer tap can *never* verify a payment. Only the configured Telegram administrator can verify payment, and creator contact details are only sent when *all* of these are true for the same request and creator:
+**Core safety rule, enforced in code and tests:** a webhook, an email, an order code, a customer tap, a customer saying they paid, or a submitted receipt can *never* verify a payment. Only the configured Telegram administrator can verify payment, and creator contact details are only sent when *all* of these are true for the same request and creator:
 
 1. Payment was manually verified by the administrator (`status = 'payment_verified'`).
 2. The administrator approves the specific request (`approve` callback).
@@ -18,17 +18,32 @@ Missing rows, failed queries, revoked consent, unknown statuses, and identity mi
 2. The bot loads the public catalogue (see below), rejects unknown/malformed profile IDs, and refuses to create a second active request for the same Telegram user.
 3. A unique `FL-XXXXXX` checkout code is generated, checked against both order tables, and stored on a `pending_payment` request. **No email is required to start checkout.**
 4. The customer taps **Pay with Selar**, opens the configured checkout, and enters their full name followed by the exact code in Selar's **customer name field** (e.g. `Joseph Unaogu FL-7K4P9A`).
-5. After checkout, the customer taps **Done** and sends the exact name + code they used. This only records `checkout_name`; it never confirms payment.
+5. After checkout, the customer taps **Done** or **I've paid — check for my sale** (or sends `/paid` / “I have paid”). The bot first checks the existing backend records. If no sale is attached and the checkout name has not been recorded, it asks for the exact name + code; that only records `checkout_name` and never confirms payment.
 6. **Optional fallback email:** at any point the customer may send an email address. It is stored on their pending request, the admin is alerted, and it is only ever a *reconciliation clue*. Customers are told never to send passwords, PINs, or OTPs.
-7. When the sale webhook arrives, the bot reconciles (code first, then a unique fallback email) and asks the admin to verify manually. If the webhook never arrives, the admin can verify with `/verify` after checking Selar directly (see Admin commands).
+7. When the sale webhook arrives, the bot reconciles (code first, then a unique fallback email) and asks the admin to verify manually. If a paid claim still has no attached sale record, the receipt-review fallback below applies; the admin still verifies with `/verify` only after checking Selar directly.
 8. After payment verification, the admin separately approves or rejects. Approval sends the creator's contact only if creator consent is recorded (see the rule above).
 
 ### 2. Service order flow (fully separate)
 
 1. The customer opens `https://t.me/<BOT_USERNAME>?start=service_SERVICE_ID`.
 2. The bot creates a `service_orders` row (with its own `FL-XXXXXX` code) and the assistant chats to understand the request. The code is shown when the customer types `PAY` and receives the service checkout link.
-3. Checkout, **Done**, fallback email, webhook reconciliation, and manual verification (`serviceverify:` callback or `/verifyservice`) mirror the contact flow but only ever touch `service_orders`.
+3. Checkout, **Done**, **I've paid**, fallback email, webhook reconciliation, receipt review, and manual verification (`serviceverify:` callback or `/verifyservice`) mirror the contact flow but only ever touch `service_orders`.
 4. After manual payment verification, the admin delivers with `/deliver ORDER_ID fulfilment text`. Delivery is a single status-claimed send; if Telegram delivery fails the order reverts to `payment_verified` so the admin can retry. Service orders never release creator contacts, and contact callbacks never mutate service orders (covered by tests).
+
+### Paid-claim and Selar receipt-review fallback
+
+This fallback is used only after the customer claims payment through **Done**, **I've paid — check for my sale**, `/paid`, or an equivalent short “I have paid” message:
+
+1. The bot loads only that Telegram user's current contact request or service order and checks both its attached `payment_reference` and `processed_sales.request_id`.
+2. If a backend sale is already attached, the customer is told that it is in the existing manual-verification queue. **No receipt is requested** and no duplicate admin prompt is created.
+3. If the order is already `payment_verified`, the customer is told that manual verification has already happened and which existing next step applies. Receipts are not accepted for closed/completed orders.
+4. If no backend sale is attached and `checkout_name` is missing, the bot first collects the exact Selar checkout name + `FL-XXXXXX` code. After that, it checks the backend records again.
+5. Only if there is still no attached sale does it create a `receipt_review_prompts` row and ask the customer, in their private bot chat, to forward the Selar receipt as a Telegram photo or a PDF/JPG/PNG/WebP document (20 MB maximum based on Telegram's reported size).
+6. The Worker re-checks for a sale immediately before accepting and again immediately before forwarding, so a late Selar/Zapier sale supersedes the receipt path. It sends the Telegram `file_id` directly to `ADMIN_TELEGRAM_ID` with the order UUID, flow, public profile/service ID, checkout code/name, saved email clue, Telegram user context, submission ID, and the exact `/verify …` or `/verifyservice …` command for use *only after* checking Selar.
+7. `payment_receipt_submissions` records delivery state (`forwarding`, `forwarded`, `delivery_failed`, or `superseded`) and Telegram file identifiers only — not receipt contents, filenames, captions, or OCR text. Unique indexes on `(telegram_user_id, telegram_message_id)` and `(order_id, telegram_file_unique_id)`, plus a status-claimed forward, make duplicate updates and retries idempotent. A Telegram delivery failure leaves the prompt open and the submission retryable.
+8. A forwarded receipt is evidence only. It never sets `payment_reference`, `payment_verified`, `approved`, or `fulfilled`, and it never bypasses creator consent or admin approval.
+
+Receipts are accepted only in a private chat (`chat_id` matching the sender). Unsupported files are rejected without creating a submission. Logs contain only sanitized Telegram delivery errors; bot tokens, captions, filenames, and file contents are not logged.
 
 ---
 
@@ -94,14 +109,18 @@ Processing: route by exact product code → extract code with `/\bFL-[A-Z0-9]{6}
 
 Required: customer name (aliases above) containing the code, exact product code (aliases above), and a parseable `abandoned_at` timestamp. Events are deduplicated by a SHA-256 key in `processed_abandoned_carts`; a reminder is sent only for a uniquely matched still-pending order, and it never contains creator contact details or claims a payment was received.
 
-### Zapier operational notice (action required outside this repo)
+### Zapier operational notice (preserve the existing production Zaps)
 
-The live Zap is ON but appends rows to Zapier Tables; it does **not** POST to this Worker yet. Add Webhooks-by-Zapier POST steps to:
+The owner confirmed on 2026-10-26 that the existing Selar **New Sale → Worker** Zap is ON and already posts to this Worker. Preserve both existing production Selar Zaps and their current configuration: do not recreate, turn off, re-map, or replace them as part of the receipt-review fallback. That fallback is implemented entirely in Telegram, the Worker, and D1 and requires **no Zapier change**.
+
+The New Sale Zap remains the primary reconciliation path: when it attaches a backend sale record, the paid-claim flow uses the existing manual-verification queue and does not request a receipt. The receipt path is only for a customer whose pending order still has no attached sale record. Do not change any Abandoned Cart automation under the receipt-fallback task.
+
+For a *fresh* environment only, configure Webhooks by Zapier POST steps to:
 
 - `https://fansleak-contact-bot.<subdomain>.workers.dev/webhooks/selar`
 - `https://fansleak-contact-bot.<subdomain>.workers.dev/webhooks/selar-abandoned-cart`
 
-…each with header `x-selar-webhook-secret` and the field mapping above. Until then, use `/verify` / `/verifyservice` (below) — payments checked in the Selar dashboard never need to wait for Zapier.
+…each with header `x-selar-webhook-secret` and the field mapping above. This fresh-environment note is not an instruction to modify the existing production Zaps.
 
 ### `POST /telegram/webhook` and `GET /health`
 
@@ -117,6 +136,7 @@ Telegram updates require the `x-telegram-bot-api-secret-token` header to match `
 - `/verify REQUEST_UUID SELAR_REFERENCE` — manually verify a **contact** payment after checking it in Selar. Sets `payment_verified`, records the reference in `processed_sales` (so one reference can never verify two orders and a late webhook becomes a duplicate), audits the action, and offers Approve/Reject. It does **not** approve or send contact details.
 - `/verifyservice ORDER_UUID SELAR_REFERENCE` — same for a **service** order.
 - Inline buttons on webhook alerts: **Confirm payment manually** (`selarverify:` / `serviceverify:`), then **Approve & send contact** / **Reject** for contact requests. All are idempotent; repeats are no-ops.
+- Receipt-review messages: when no backend sale is attached, the bot may send the admin a customer-submitted Selar receipt photo/document with order context and an exact `/verify …` / `/verifyservice …` command. Compare it with Selar first; the receipt alone changes nothing.
 - `/deliver ORDER_UUID fulfilment text` — send fulfilment for a `payment_verified` service order (exactly-once claim, retry-safe on Telegram failure).
 - `/setcontact PROFILE_ID @handle` — store a creator's Telegram handle with sharing **disabled** and any previous consent cleared.
 - `/enablecontact PROFILE_ID` — record the admin's attestation that the creator *explicitly authorised* sharing this contact; sets `sharing_enabled = 1` and `consent_confirmed_at`.
@@ -138,8 +158,9 @@ Baseline `contact-bot/schema.sql` (`0001_baseline`) plus ordered migrations:
 | `0003_abandoned_carts` | `contact-bot/migrations/0003_abandoned_carts.sql` | `processed_abandoned_carts` dedup table |
 | `0004_checkout_codes` | `contact-bot/migrations/0004_checkout_codes.sql` | `checkout_code`/`checkout_name` columns, per-table unique code indexes, `checkout_name_prompts`. **Non-idempotent as a raw file** (bare `ALTER TABLE`s) — always apply through `scripts/migrate-d1.mjs`, which checks `PRAGMA table_info` first. Tests apply it directly only to fresh databases. |
 | `0005_one_active_request_per_user` | `contact-bot/migrations/0005_one_active_request_per_user.sql` | Partial unique indexes: one active contact request / service order per Telegram user. Blocks with a clear error if duplicate active rows already exist; reconcile manually (keep the newest legitimate request, reject/cancel the rest), then re-run. |
+| `0006_receipt_review` | `contact-bot/migrations/0006_receipt_review.sql` | `receipt_review_prompts` and `payment_receipt_submissions` for the manual receipt fallback, including unique Telegram-message/file indexes for idempotent retries. It stores file identifiers and delivery state only, never receipt contents/captions. |
 
-Apply/inspect with `node scripts/migrate-d1.mjs --remote` (requires Wrangler auth; used by the deploy workflow *before* the Worker deploy, so a failed migration leaves the old Worker running). It tracks applied versions in `schema_migrations` and verifies all 7 tables, expected columns, and the unique indexes afterwards. Applied versions can be inspected read-only:
+Apply/inspect with `node scripts/migrate-d1.mjs --remote` (requires Wrangler auth; used by the deploy workflow *before* the Worker deploy, so a failed migration leaves the old Worker running). It tracks applied versions in `schema_migrations` and verifies all 9 tables, expected columns, and the unique indexes afterwards. Applied versions can be inspected read-only:
 
 ```bash
 npx wrangler@4 d1 execute fansleak-contact-requests --remote \
@@ -176,8 +197,9 @@ CI (`.github/workflows/check-contact-bot.yml`) runs the test suite, `tsc`, and t
 ## Production rollout (performed separately by the owner — NOT done by code changes alone)
 
 1. Merge the reviewed PR into `fan`.
-2. Run **Actions → Deploy FansLeak contact bot → Run workflow** *from `fan`*, entering both Selar checkout URLs and exact product codes. It preflights secrets, applies migrations (including `0005`) with verification, deploys the Worker, writes Worker secrets, and reconnects the Telegram webhook. If the `0005` pre-check reports duplicate active rows, reconcile them as described above and re-run.
-3. In Zapier, add the two POST steps described in the webhook section (sale + abandoned cart) with the shared secret header; send test events and confirm the admin receives reconciliation prompts (and that nothing auto-verifies).
+2. Run **Actions → Deploy FansLeak contact bot → Run workflow** *from `fan`*, entering both Selar checkout URLs and exact product codes. It preflights secrets, applies migrations (including `0005` and `0006`) with verification, deploys the Worker, writes Worker secrets, and reconnects the Telegram webhook. If the `0005` pre-check reports duplicate active rows, reconcile them as described above and re-run.
+3. Preserve the existing production Zapier configuration. The receipt fallback requires no Zapier change; only use the fresh-environment POST notes above when provisioning a genuinely new environment.
 4. Confirm Cloudflare Pages serves the rebuilt site (fresh `contact-catalogue.json`, Message buttons) and that `VITE_TELEGRAM_BOT_USERNAME` matches the live bot if it ever changes.
 5. Smoke-test with the owner's own Telegram account: start a contact request from a profile (including a dotted-ID profile), confirm the code/instructions, and verify no creator handle appears anywhere before admin approval. Only store/enable a creator contact (`/setcontact`, then `/enablecontact`) after that creator has explicitly authorised sharing.
 6. Make a real low-value Selar purchase using the name + code format; confirm webhook reconciliation → manual verification → approval → single contact delivery, and that duplicate webhook deliveries are ignored.
+7. Separately smoke-test a paid claim with no attached sale using an owner-controlled test order and a non-sensitive test receipt image: confirm the bot requests the receipt only after the backend check, forwards it once to the admin with order context, leaves the order `pending_payment`, and does not verify until the admin checks Selar and uses `/verify` or `/verifyservice`. Never use a real creator's private contact as a test fixture.
