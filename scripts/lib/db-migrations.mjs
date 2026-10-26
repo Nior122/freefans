@@ -197,46 +197,64 @@ export const EXPECTED_SCHEMA = {
   ]
 };
 
+export const EXPECTED_UNIQUE_INDEXES = [
+  { table: 'contact_requests', name: 'idx_contact_requests_checkout_code' },
+  { table: 'service_orders', name: 'idx_service_orders_checkout_code' },
+  { table: 'contact_requests', name: 'idx_contact_requests_one_active_per_user' },
+  { table: 'service_orders', name: 'idx_service_orders_one_active_per_user' }
+];
+
 /**
- * Validates complete schema integrity: all tables and required columns exist.
+ * Shared structural verifier used by both local migration tests and the remote D1 runner.
+ * uniqueIndexes entries must include the table, name, and SQLite unique flag.
  */
-export function verifySchema(db) {
-  const tables = getTableNames(db);
-  const missingTables = Object.keys(EXPECTED_SCHEMA).filter(t => !tables.includes(t));
+export function verifySchemaShape({ tables, columnsByTable, uniqueIndexes }) {
+  const missingTables = Object.keys(EXPECTED_SCHEMA).filter(table => !tables.includes(table));
   if (missingTables.length > 0) {
     throw new Error(`Schema verification failed: missing table(s): ${missingTables.join(', ')}`);
   }
 
   const missingColumns = {};
-  for (const [table, expectedCols] of Object.entries(EXPECTED_SCHEMA)) {
-    const actualCols = getTableColumns(db, table);
-    const missing = expectedCols.filter(col => !actualCols.includes(col));
-    if (missing.length > 0) {
-      missingColumns[table] = missing;
-    }
+  for (const [table, expectedColumns] of Object.entries(EXPECTED_SCHEMA)) {
+    const actualColumns = columnsByTable[table] ?? [];
+    const missing = expectedColumns.filter(column => !actualColumns.includes(column));
+    if (missing.length > 0) missingColumns[table] = missing;
   }
-
   if (Object.keys(missingColumns).length > 0) {
-    const details = Object.entries(missingColumns).map(([t, cols]) => `${t}: [${cols.join(', ')}]`).join('; ');
+    const details = Object.entries(missingColumns).map(([table, columns]) => `${table}: [${columns.join(', ')}]`).join('; ');
     throw new Error(`Schema verification failed: missing column(s): ${details}`);
   }
 
-  const expectedIndexes = [
-    'idx_contact_requests_checkout_code',
-    'idx_service_orders_checkout_code',
-    'idx_contact_requests_one_active_per_user',
-    'idx_service_orders_one_active_per_user'
-  ];
-  let indexNames = [];
-  try {
-    indexNames = db.prepare("SELECT name FROM sqlite_master WHERE type='index'").all().map(r => r.name);
-  } catch {
-    indexNames = [];
-  }
-  const missingIndexes = expectedIndexes.filter(name => !indexNames.includes(name));
+  const missingIndexes = EXPECTED_UNIQUE_INDEXES.filter(expected =>
+    !uniqueIndexes.some(actual =>
+      actual.table === expected.table && actual.name === expected.name &&
+      (actual.unique === true || actual.unique === 1)
+    )
+  );
   if (missingIndexes.length > 0) {
-    throw new Error(`Schema verification failed: missing index(es): ${missingIndexes.join(', ')}`);
+    throw new Error(`Schema verification failed: missing unique index(es): ${missingIndexes.map(index => index.name).join(', ')}`);
   }
 
   return { ok: true, verifiedTables: Object.keys(EXPECTED_SCHEMA) };
+}
+
+/**
+ * Validates complete schema integrity: all tables, required columns, and required unique indexes exist.
+ */
+export function verifySchema(db) {
+  const tables = getTableNames(db);
+  const columnsByTable = Object.fromEntries(
+    Object.keys(EXPECTED_SCHEMA).map(table => [table, getTableColumns(db, table)])
+  );
+  const uniqueIndexes = [];
+  for (const table of Object.keys(EXPECTED_SCHEMA)) {
+    try {
+      for (const index of db.prepare(`PRAGMA index_list(${table})`).all()) {
+        uniqueIndexes.push({ table, name: index.name, unique: index.unique });
+      }
+    } catch {
+      // The shared verifier will report missing required indexes.
+    }
+  }
+  return verifySchemaShape({ tables, columnsByTable, uniqueIndexes });
 }
