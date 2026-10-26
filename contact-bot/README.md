@@ -6,12 +6,12 @@ One Telegram bot supports two separate Selar products. The incoming link chooses
 
 ### FansLeak contact/assessment
 
-1. The customer opens a profile's Message link.
-2. The bot collects the customer's email in Telegram.
-3. The bot creates a unique checkout code such as `FL-7K4P9A` and sends the Selar checkout instructions.
+1. The customer opens a profile's **Message / Request contact** link (or `/start contact_PROFILE_ID` in Telegram).
+2. The bot creates a unique checkout code such as `FL-7K4P9A` and sends the Selar checkout instructions with direct link and **Done** buttons.
+3. The customer can optionally send their email in Telegram at any time as a fallback reconciliation clue if matching later needs help.
 4. The customer must enter their full name followed by the exact code in Selar's **name field**, for example `Joseph Unaogu FL-7K4P9A`.
-5. After checkout, the customer taps **Done**. If the name and code have not been submitted to the bot yet, it asks the customer to send the exact name used at checkout, including the code.
-6. A matching Selar New Sale event notifies the admin. The bot does not verify payment. The admin checks Selar manually and uses the confirmation button only after confirming the payment. Contact approval and creator-authorised contact sharing remain separate steps.
+5. After checkout, the customer returns to the bot and taps **Done**. If the name and code have not been submitted to the bot yet, it prompts for the name used at checkout.
+6. A matching Selar New Sale event notifies the admin to review manually. The bot does not verify payment automatically. The admin checks Selar manually and confirms payment via the button. Contact approval and creator-authorised contact sharing remain separate steps.
 
 ### Second product/service
 
@@ -20,6 +20,12 @@ One Telegram bot supports two separate Selar products. The incoming link chooses
 3. The bot sends checkout instructions with a unique code, to be entered after the customer's full name in Selar's **name field**.
 4. The customer taps **Done** and, if asked, sends the exact full name including the code.
 5. A matching Selar New Sale event notifies the admin. The bot does not mark the order paid. The admin checks Selar manually and confirms payment using the button. Fulfilment is sent with `/deliver ORDER_ID service details` only after manual confirmation.
+
+## Profile Catalogue and Privacy
+
+- The public catalogue endpoint `https://fansleak.pages.dev/contact-catalogue.json` is generated dynamically from the profile source.
+- Entries strictly contain only `id` and `name`. Private Telegram handles and contact values are **never** published in the public catalogue.
+- Creator contact handles are stored privately in server-side Cloudflare D1 storage (`creator_contacts` table) with sharing disabled by default.
 
 ## Selar event mapping
 
@@ -35,7 +41,7 @@ The existing Abandoned Cart workflow should POST to `/webhooks/selar-abandoned-c
 - `product_code`: the exact Selar product code
 - `abandoned_at`: the event timestamp
 
-Both endpoints route to the correct order by the configured product code plus the unique code in the customer's name. Abandoned-cart events send a customer reminder only when the name/code matches one pending order. Duplicate abandoned-cart events are deduplicated. An event with missing or ambiguous fields fails closed.
+Both endpoints route to the correct order by the configured product code plus the unique code in the customer's name (with fallback email matching if the code was omitted). Abandoned-cart events send a customer reminder only when the name/code matches one pending order. Duplicate abandoned-cart events are deduplicated. An event with missing or ambiguous fields fails closed.
 
 **Important:** the current Zapier trigger samples showed a product-code mismatch during inspection. Confirm the real field mappings and product codes before any live launch. Do not send a test purchase or test message to production for this check.
 
@@ -61,4 +67,6 @@ Both endpoints route to the correct order by the configured product code plus th
 - `/pending` — contact requests awaiting payment verification or approval.
 - `/orders` — service orders awaiting payment or fulfilment.
 - `/deliver ORDER_ID service details` — send fulfilment to a service customer after manual payment confirmation.
-- `/setcontact PROFILE_ID @handle` and `/enablecontact PROFILE_ID` — manage creator contact sharing consent.
+- `/setcontact PROFILE_ID @handle` — saves private contact with sharing disabled.
+- `/enablecontact PROFILE_ID` — enables sharing and records explicit creator consent.
+- `/disablecontact PROFILE_ID` — disables sharing and revokes creator consent immediately.

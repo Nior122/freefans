@@ -4,13 +4,19 @@ on:
   pull_request:
     paths:
       - "contact-bot/**"
+      - "scripts/generate-contact-catalogue.mjs"
+      - "tests/**"
       - ".github/workflows/check-contact-bot.yml"
+      - "package.json"
   push:
     branches:
       - "feature/selar-bank-contact-bot"
     paths:
       - "contact-bot/**"
+      - "scripts/generate-contact-catalogue.mjs"
+      - "tests/**"
       - ".github/workflows/check-contact-bot.yml"
+      - "package.json"
 
 permissions:
   contents: read
@@ -23,5 +29,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Install dependencies
+        run: npm ci
+      - name: Run automated test suite
+        run: npm test
       - name: Compile Worker and validate Wrangler configuration without deploying
         run: npx --yes wrangler@4 deploy --dry-run --outdir /tmp/fansleak-contact-bot-build --config contact-bot/wrangler.toml
