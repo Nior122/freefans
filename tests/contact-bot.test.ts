@@ -498,42 +498,29 @@ test('Admin authorization, payment verification, explicit consent, and fulfilmen
     assert.equal(contact.sharing_enabled, 1);
     assert.ok(contact.consent_confirmed_at !== null);
 
-    // 7. Now all 3 conditions are satisfied: Payment verified + Creator consent confirmed + Admin approved!
-    sentTelegramMessages.length = 0; // clear message logs
-    const adminApprove = {
-      callback_query: {
-        id: 'cb-4',
-        from: { id: 10001 },
-        message: { chat: { id: 10001 } },
-        data: `approve:${reqId}`
-      }
-    };
-    await worker.fetch(new Request('https://worker.local/telegram/webhook', {
-      method: 'POST',
-      headers: { 'x-telegram-bot-api-secret-token': env.TELEGRAM_WEBHOOK_SECRET },
-      body: JSON.stringify(adminApprove)
-    }), env);
-
-    order = await db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(reqId) as any;
-    assert.equal(order.status, 'approved', 'Request status transitions to approved');
-
-    // Contact release message must be sent to customer chat 5007
-    const releaseMsg = sentTelegramMessages.find(m => m.method === 'sendMessage' && m.data.chat_id === '5007');
-    assert.ok(releaseMsg, 'Customer must receive contact release message');
-    assert.ok(String(releaseMsg.data.text).includes('@anaimiya_real'), 'Release message must contain creator handle');
-
-    // 8. Test idempotency: repeated approve callback does NOT send contact again
+    // 7. Payment and consent are ready, but approval waits for the draft confirmation.
     sentTelegramMessages.length = 0;
-    await worker.fetch(new Request('https://worker.local/telegram/webhook', {
-      method: 'POST',
-      headers: { 'x-telegram-bot-api-secret-token': env.TELEGRAM_WEBHOOK_SECRET },
-      body: JSON.stringify(adminApprove)
-    }), env);
-    const repeatOrder = await db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(reqId) as any;
-    assert.equal(repeatOrder.status, 'approved', 'Repeated approve must not change the final status');
-    const repeatRelease = sentTelegramMessages.find(m => m.method === 'sendMessage' && m.data.chat_id === '5007' && String(m.data.text).includes('@anaimiya_real'));
-    assert.equal(repeatRelease, undefined, 'Repeated approve must not re-send creator contact details');
-
+    const adminApprove = { callback_query: { id: "cb-4", from: { id: 10001 }, message: { chat: { id: 10001 } }, data: "approve:" + reqId } };
+    await worker.fetch(new Request("https://worker.local/telegram/webhook", { method: "POST", headers: { "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET }, body: JSON.stringify(adminApprove) }), env);
+    order = await db.raw.prepare("SELECT status FROM contact_requests WHERE id=?").get(reqId) as any;
+    assert.equal(order.status, "payment_verified", "Opening a draft must not approve or deliver");
+    const draft = db.raw.prepare("SELECT id,status FROM delivery_drafts WHERE request_id=?").get(reqId) as any;
+    assert.ok(draft);
+    assert.equal(draft.status, "draft");
+    await worker.fetch(new Request("https://worker.local/telegram/webhook", { method: "POST", headers: { "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET }, body: JSON.stringify({ message: { chat: { id: 10001 }, from: { id: 10001 }, text: "Your approved creator contact is ready." } }) }), env);
+    await worker.fetch(new Request("https://worker.local/telegram/webhook", { method: "POST", headers: { "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET }, body: JSON.stringify({ callback_query: { id: "cb-preview", from: { id: 10001 }, message: { chat: { id: 10001 } }, data: "draft:preview:" + draft.id } }) }), env);
+    assert.ok(sentTelegramMessages.some(m => String(m.data.text || "").includes("Preview only")));
+    await worker.fetch(new Request("https://worker.local/telegram/webhook", { method: "POST", headers: { "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET }, body: JSON.stringify({ callback_query: { id: "cb-send", from: { id: 10001 }, message: { chat: { id: 10001 } }, data: "draft:send:" + draft.id } }) }), env);
+    order = await db.raw.prepare("SELECT status FROM contact_requests WHERE id=?").get(reqId) as any;
+    assert.equal(order.status, "approved", "Confirmed draft transitions request to approved");
+    const releaseMsg = sentTelegramMessages.find(m => m.method === "sendMessage" && String(m.data.chat_id) === "5007");
+    assert.ok(releaseMsg, "Customer receives the confirmed delivery");
+    assert.ok(String(releaseMsg.data.text).includes("@anaimiya_real"));
+    sentTelegramMessages.length = 0;
+    await worker.fetch(new Request("https://worker.local/telegram/webhook", { method: "POST", headers: { "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET }, body: JSON.stringify(adminApprove) }), env);
+    const repeatOrder = await db.raw.prepare("SELECT status FROM contact_requests WHERE id=?").get(reqId) as any;
+    assert.equal(repeatOrder.status, "approved");
+    assert.equal(sentTelegramMessages.some(m => String(m.data.chat_id) === "5007" && String(m.data.text || "").includes("@anaimiya_real")), false, "Repeated approval cannot re-send contact details");
     // 9. Test consent revocation via /disablecontact
     await worker.fetch(new Request('https://worker.local/telegram/webhook', {
       method: 'POST',
