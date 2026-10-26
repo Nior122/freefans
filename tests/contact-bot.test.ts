@@ -337,6 +337,32 @@ test('Selar webhook authentication, product routing, and idempotent reconciliati
   }
 });
 
+test('Unknown code can reconcile only by exact full checkout name, never partial name', async () => {
+  const db = createTestDb();
+  const { env, cleanup, sentTelegramMessages } = createTestEnv(db);
+  try {
+    db.raw.prepare(`
+      INSERT INTO contact_requests (id, telegram_user_id, telegram_chat_id, profile_id, status, payment_method, checkout_code, checkout_name)
+      VALUES ('full-name-match', '5101', '5101', 'anaimiya', 'pending_payment', 'selar', 'FL-NAME01', 'Joseph Simon Unaogu')
+    `).run();
+
+    const partial = await selarPost(env, { reference: 'ref-partial-name', product_code: env.SELAR_PRODUCT_ID, customer_full_name: 'Joseph FL-UNKNOWN' });
+    assert.deepEqual(await partial.json(), { ok: true, matched: false, reason: 'no_unique_code_or_full_name_match' });
+    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).length, 0, 'partial name must not notify admin');
+
+    const exact = await selarPost(env, { reference: 'ref-full-name', product_code: env.SELAR_PRODUCT_ID, customer_full_name: 'Joseph Simon Unaogu FL-UNKNOWN' });
+    const exactJson = await exact.json() as any;
+    assert.equal(exactJson.matched, true);
+    assert.equal(exactJson.reconciled_by, 'exact_full_name');
+    const order = db.raw.prepare('SELECT status, payment_reference FROM contact_requests WHERE id=?').get('full-name-match') as any;
+    assert.equal(order.status, 'pending_payment', 'full-name reconciliation must still require manual verification');
+    assert.equal(order.payment_reference, 'ref-full-name');
+    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).filter(m => String(m.data.text).includes('Selar sale received')).length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
 test('A sale without a unique code is not attached by email and does not notify admin', async () => {
   const db = createTestDb();
   const { env, cleanup, sentTelegramMessages } = createTestEnv(db);
@@ -1089,9 +1115,11 @@ test('Selar webhook negative cases never mutate payment state', async () => {
     assert.equal(noCode.status, 200);
     assert.deepEqual(await noCode.json(), { ok: true, matched: false, reason: 'missing_order_code' });
 
-    const nameMismatch = await selarPost(env, { ...validSale, reference: 'ref-neg-5', customer_full_name: 'Other Person FL-NEG001' });
-    assert.equal((await nameMismatch.json()).reason, 'name_mismatch');
-    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).length, 0, 'name mismatch must not send an unsolicited admin notification');
+    const codeMatchNameMismatch = await selarPost(env, { ...validSale, reference: 'ref-neg-5', customer_full_name: 'Other Person FL-NEG001' });
+    const codeMatchJson = await codeMatchNameMismatch.json() as any;
+    assert.equal(codeMatchJson.matched, true, 'a unique code is sufficient even when the full name differs');
+    assert.equal(codeMatchJson.reconciled_by, 'unique_code');
+    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).filter(m => String(m.data.text).includes('Selar sale received')).length, 1, 'a unique code match must notify admin');
 
     assert.equal((await selarPost(env, { ...validSale, reference: 'ref-neg-6', status: 'failed' })).status, 422, 'explicitly non-paid events are rejected');
     assert.equal((await selarPost(env, { ...validSale, reference: 'ref-neg-7', padding: 'A'.repeat(70000) })).status, 413, 'oversized payload');
