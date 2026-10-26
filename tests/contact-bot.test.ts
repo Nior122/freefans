@@ -693,7 +693,7 @@ test('Selar abandoned-cart webhook authentication and deduplication', async () =
   }
 });
 
-test('Service order email fallback collection and reconciliation', async () => {
+test('Service order email is saved as a clue but never attaches a sale without code and name', async () => {
   const db = createTestDb();
   const { env, cleanup, sentTelegramMessages } = createTestEnv(db);
   try {
@@ -706,46 +706,29 @@ test('Service order email fallback collection and reconciliation', async () => {
       VALUES (?, 'custom-ai', ?, ?, 'pending_payment', ?, 'I need custom design work')
     `).run(serviceOrderId, userId, userId, code);
 
-    // 1. Customer sends fallback email
     await worker.fetch(new Request('https://worker.local/telegram/webhook', {
       method: 'POST',
       headers: { 'x-telegram-bot-api-secret-token': env.TELEGRAM_WEBHOOK_SECRET },
-      body: JSON.stringify({
-        message: { chat: { id: 9100 }, from: { id: 9100 }, text: 'client@example.com' }
-      })
+      body: JSON.stringify({ message: { chat: { id: 9100 }, from: { id: 9100 }, text: 'client@example.com' } })
     }), env);
 
     const savedOrder = db.raw.prepare('SELECT buyer_email FROM service_orders WHERE id=?').get(serviceOrderId) as any;
     assert.equal(savedOrder.buyer_email, 'client@example.com');
-
     const customerAck = sentTelegramMessages.find(m => m.data.chat_id === '9100' && String(m.data.text).includes('saved as a fallback reconciliation clue'));
     assert.ok(customerAck, 'Customer should receive fallback clue confirmation');
 
-    const adminAlert = sentTelegramMessages.find(m => m.data.chat_id === env.ADMIN_TELEGRAM_ID && String(m.data.text).includes('reconciliation clue for service order'));
-    assert.ok(adminAlert, 'Admin should be alerted about customer-provided clue');
-
-    // 2. Selar webhook arrives without code in name, matches by saved email
     const saleRes = await worker.fetch(new Request('https://worker.local/webhooks/selar', {
       method: 'POST',
       headers: { 'x-selar-webhook-secret': 'selar-secret-123' },
-      body: JSON.stringify({
-        reference: 'selar-srv-email-ref-1',
-        buyer_email: 'client@example.com',
-        customer_full_name: 'Client Without Code',
-        product_code: env.SERVICE_PRODUCT_ID
-      })
+      body: JSON.stringify({ reference: 'selar-srv-email-ref-1', buyer_email: 'client@example.com', customer_full_name: 'Client Without Code', product_code: env.SERVICE_PRODUCT_ID })
     }), { ...env, SELAR_WEBHOOK_SECRET: 'selar-secret-123' });
 
     assert.equal(saleRes.status, 200);
-    const saleJson = await saleRes.json() as any;
-    assert.equal(saleJson.ok, true);
-    assert.equal(saleJson.matched, true);
-    assert.equal(saleJson.reconciled_by, 'fallback_email');
-
+    assert.deepEqual(await saleRes.json(), { ok: true, matched: false, reason: 'missing_order_code' });
     const updatedOrder = db.raw.prepare('SELECT status, payment_method, payment_reference FROM service_orders WHERE id=?').get(serviceOrderId) as any;
-    assert.equal(updatedOrder.status, 'pending_payment', 'Payment must still require admin manual verification');
-    assert.equal(updatedOrder.payment_method, 'selar');
-    assert.equal(updatedOrder.payment_reference, 'selar-srv-email-ref-1');
+    assert.equal(updatedOrder.status, 'pending_payment');
+    assert.equal(updatedOrder.payment_reference, null);
+    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).filter(m => String(m.data.text).includes('Selar sale received')).length, 0);
   } finally {
     cleanup();
   }
