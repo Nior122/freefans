@@ -1127,8 +1127,8 @@ test('Duplicate Selar webhook delivery records one sale and one admin notificati
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
     const reqId = crypto.randomUUID();
-    db.raw.prepare(`INSERT INTO contact_requests (id, telegram_user_id, telegram_chat_id, profile_id, status, payment_method, checkout_code)
-      VALUES (?, '5140', '5140', 'anaimiya', 'pending_payment', 'selar', 'FL-DUP001')`).run(reqId);
+    db.raw.prepare(`INSERT INTO contact_requests (id, telegram_user_id, telegram_chat_id, profile_id, status, payment_method, checkout_code, checkout_name)
+      VALUES (?, '5140', '5140', 'anaimiya', 'pending_payment', 'selar', 'FL-DUP001', 'Buyer Person')`).run(reqId);
     const sale = { reference: 'ref-dup-1', product_code: env.SELAR_PRODUCT_ID, customer_full_name: 'Buyer Person FL-DUP001', email: 'dup@example.com' };
 
     assert.equal((await (await selarPost(env, sale)).json()).matched, true);
