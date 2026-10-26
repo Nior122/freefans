@@ -9,9 +9,11 @@ import {
   verifySchema,
   getAppliedMigrations,
   getTableColumns,
-  getTableNames
+  getTableNames,
+  EXPECTED_SCHEMA,
+  EXPECTED_UNIQUE_INDEXES
 } from '../scripts/lib/db-migrations.mjs';
-import { parseWranglerJsonOutput } from '../scripts/migrate-d1.mjs';
+import { parseWranglerJsonOutput, verifyRemoteSchema } from '../scripts/migrate-d1.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -186,4 +188,52 @@ test('Remote migration runner: never builds shell strings from SQL (production r
   assert.ok(source.includes('execFileSync('), 'migrate-d1 must execute wrangler via an argument array');
   assert.ok(!source.includes('execSync(cmd'), 'migrate-d1 must not execute a constructed shell string');
   assert.ok(!source.includes('--command=${JSON.stringify'), 'SQL must never be JSON-stringified into a shell command');
+});
+
+function completeRemoteSchemaSnapshot() {
+  return {
+    tables: Object.keys(EXPECTED_SCHEMA),
+    columnsByTable: Object.fromEntries(
+      Object.entries(EXPECTED_SCHEMA).map(([table, columns]) => [table, [...columns]])
+    ),
+    uniqueIndexes: EXPECTED_UNIQUE_INDEXES.map(index => ({ ...index, unique: 1 }))
+  };
+}
+
+test('Remote migration verifier: accepts all required tables, columns, and unique indexes', () => {
+  const result = verifyRemoteSchema(completeRemoteSchemaSnapshot());
+  assert.equal(result.ok, true);
+  assert.equal(result.verifiedTables.length, 7);
+});
+
+test('Remote migration verifier: fails when a required column is missing', () => {
+  const snapshot = completeRemoteSchemaSnapshot();
+  snapshot.columnsByTable.contact_requests = snapshot.columnsByTable.contact_requests.filter(column => column !== 'checkout_name');
+
+  assert.throws(
+    () => verifyRemoteSchema(snapshot),
+    /missing column\(s\): contact_requests: \[checkout_name\]/
+  );
+});
+
+test('Remote migration verifier: fails when a required unique index is missing', () => {
+  const snapshot = completeRemoteSchemaSnapshot();
+  snapshot.uniqueIndexes = snapshot.uniqueIndexes.filter(index => index.name !== 'idx_service_orders_one_active_per_user');
+
+  assert.throws(
+    () => verifyRemoteSchema(snapshot),
+    /missing unique index\(es\): idx_service_orders_one_active_per_user/
+  );
+});
+
+test('Remote migration verifier: fails if a required index exists but is not unique', () => {
+  const snapshot = completeRemoteSchemaSnapshot();
+  snapshot.uniqueIndexes = snapshot.uniqueIndexes.map(index =>
+    index.name === 'idx_contact_requests_checkout_code' ? { ...index, unique: 0 } : index
+  );
+
+  assert.throws(
+    () => verifyRemoteSchema(snapshot),
+    /missing unique index\(es\): idx_contact_requests_checkout_code/
+  );
 });
