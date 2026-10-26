@@ -1,6 +1,11 @@
 name: Deploy FansLeak contact bot
 
 on:
+  # Temporary one-time deployment trigger for the migration-runner fix.
+  # This path filter is removed after the release is verified.
+  push:
+    branches: [fan]
+    paths: [scripts/migrate-d1.mjs]
   workflow_dispatch:
     inputs:
       contact_selar_checkout_url:
@@ -44,10 +49,10 @@ jobs:
 
       - name: Validate both Selar product settings before any changes
         env:
-          SELAR_CHECKOUT_URL: ${{ inputs.contact_selar_checkout_url }}
-          SELAR_PRODUCT_ID: ${{ inputs.contact_selar_product_id }}
-          SERVICE_CHECKOUT_URL: ${{ inputs.service_selar_checkout_url }}
-          SERVICE_PRODUCT_ID: ${{ inputs.service_selar_product_id }}
+          SELAR_CHECKOUT_URL: ${{ inputs.contact_selar_checkout_url || 'https://selar.com/j977zh71q8' }}
+          SELAR_PRODUCT_ID: ${{ inputs.contact_selar_product_id || 'j977zh71q8' }}
+          SERVICE_CHECKOUT_URL: ${{ inputs.service_selar_checkout_url || 'https://selar.com/x19128f988' }}
+          SERVICE_PRODUCT_ID: ${{ inputs.service_selar_product_id || 'x19128f988' }}
         run: |
           set -euo pipefail
           [[ "$SELAR_CHECKOUT_URL" == https://* ]] || { echo "Contact checkout URL must use HTTPS"; exit 1; }
