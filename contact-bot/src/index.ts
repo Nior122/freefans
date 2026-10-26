@@ -901,7 +901,11 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     if (requestMatch) {
       const r = await e.DB.prepare("SELECT id,profile_id,status,checkout_code,payment_reference FROM contact_requests WHERE id=?").bind(requestMatch[1]).first<any>();
       if (!r) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request not found." });
-      await say(e, chat, "<b>Contact request details</b>\nCode: <code>" + esc(r.checkout_code || "") + "</code>\nProfile: " + esc(r.profile_id || "unknown") + "\nStatus: <b>" + esc(r.status) + "</b>\nSale reference: " + (r.payment_reference ? "<code>" + esc(r.payment_reference) + "</code>" : "none attached") + "\n\nIf a sale reference is attached, check it in Selar before using the payment-confirmation button.", { inline_keyboard: [[{ text: "💬 How to message this customer", callback_data: "admin:message_help" }], [{ text: "↩️ Back to requests", callback_data: "admin:pending" }], [{ text: "🏠 Admin Desk", callback_data: "admin:home" }]] });
+      const actions: Record<string, unknown>[][] = [];
+      if (r.status === "pending_payment" && r.payment_reference) actions.push([{ text: "✅ I checked Selar — confirm payment", callback_data: "selarverify:" + r.id }]);
+      if (r.status === "payment_verified") actions.push([{ text: "🔓 Approve & send authorised contact", callback_data: "approve:" + r.id }, { text: "❌ Reject request", callback_data: "reject:" + r.id }]);
+      actions.push([{ text: "💬 How to message this customer", callback_data: "admin:message_help" }], [{ text: "↩️ Back to requests", callback_data: "admin:pending" }], [{ text: "🏠 Admin Desk", callback_data: "admin:home" }]);
+      await say(e, chat, "<b>Contact request details</b>\nCode: <code>" + esc(r.checkout_code || "") + "</code>\nProfile: " + esc(r.profile_id || "unknown") + "\nStatus: <b>" + esc(r.status) + "</b>\nSale reference: " + (r.payment_reference ? "<code>" + esc(r.payment_reference) + "</code>" : "none attached") + "\n\nUse payment confirmation only after checking the real sale in Selar. Approval remains separate and requires creator consent.", { inline_keyboard: actions });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request details opened." });
     }
     return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Unknown admin menu action." });
