@@ -337,17 +337,15 @@ test('Selar webhook authentication, product routing, and idempotent reconciliati
   }
 });
 
-test('Fallback email reconciliation when customer omitted order code in name', async () => {
+test('A sale without a unique code is not attached by email and does not notify admin', async () => {
   const db = createTestDb();
-  const { env, cleanup } = createTestEnv(db);
+  const { env, cleanup, sentTelegramMessages } = createTestEnv(db);
   try {
-    // Pending request with saved email clue
     db.raw.prepare(`
-      INSERT INTO contact_requests (id, telegram_user_id, telegram_chat_id, profile_id, status, payment_method, checkout_code, buyer_email)
-      VALUES ('req-uuid-2', '5006', '5006', 'anaimiya', 'pending_payment', 'selar', 'FL-999999', 'clue@example.com')
+      INSERT INTO contact_requests (id, telegram_user_id, telegram_chat_id, profile_id, status, payment_method, checkout_code, checkout_name, buyer_email)
+      VALUES ('req-uuid-2', '5006', '5006', 'anaimiya', 'pending_payment', 'selar', 'FL-999999', 'Joseph Solo Name', 'clue@example.com')
     `).run();
 
-    // Selar sale where customer forgot order code in name, but used the same email
     const res = await worker.fetch(new Request('https://worker.local/webhooks/selar', {
       method: 'POST',
       headers: { 'x-selar-webhook-secret': 'selar-secret-123' },
@@ -360,14 +358,11 @@ test('Fallback email reconciliation when customer omitted order code in name', a
     }), { ...env, SELAR_WEBHOOK_SECRET: 'selar-secret-123' });
 
     assert.equal(res.status, 200);
-    const json = await res.json() as any;
-    assert.equal(json.ok, true);
-    assert.equal(json.matched, true);
-    assert.equal(json.reconciled_by, 'fallback_email');
-
-    const order = await db.raw.prepare('SELECT * FROM contact_requests WHERE id = ?').get('req-uuid-2') as any;
-    assert.equal(order.status, 'pending_payment', 'Status remains pending_payment for manual admin check');
-    assert.equal(order.payment_reference, 'selar_ref_email_clue');
+    assert.deepEqual(await res.json(), { ok: true, matched: false, reason: 'missing_order_code' });
+    const order = db.raw.prepare('SELECT status, payment_reference FROM contact_requests WHERE id = ?').get('req-uuid-2') as any;
+    assert.equal(order.status, 'pending_payment');
+    assert.equal(order.payment_reference, null);
+    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).length, 0, 'unmatched sales must not generate unsolicited admin alerts');
   } finally {
     cleanup();
   }
@@ -756,11 +751,10 @@ test('Service order email fallback collection and reconciliation', async () => {
   }
 });
 
-test('Ambiguous fallback email matching rejects candidate matches and alerts admin', async () => {
+test('A sale with no unique code match is not reconciled by shared email or alerted', async () => {
   const db = createTestDb();
   const { env, cleanup, sentTelegramMessages } = createTestEnv(db);
   try {
-    // Two service orders with the same email in pending_payment
     db.raw.prepare(`
       INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status, checkout_code, buyer_email)
       VALUES ('srv-amb-1', 'srv-1', '9201', '9201', 'pending_payment', 'FL-AMB001', 'shared@example.com'),
@@ -779,12 +773,9 @@ test('Ambiguous fallback email matching rejects candidate matches and alerts adm
     }), { ...env, SELAR_WEBHOOK_SECRET: 'selar-secret-123' });
 
     assert.equal(saleRes.status, 200);
-    const saleJson = await saleRes.json() as any;
-    assert.equal(saleJson.matched, false);
-    assert.equal(saleJson.reason, 'ambiguous_email_match');
-
-    const adminMsg = sentTelegramMessages.find(m => m.data.chat_id === env.ADMIN_TELEGRAM_ID && String(m.data.text).includes('ambiguous email match'));
-    assert.ok(adminMsg, 'Admin must be notified of ambiguous email match');
+    assert.deepEqual(await saleRes.json(), { ok: true, matched: false, reason: 'missing_order_code' });
+    assert.equal((db.raw.prepare('SELECT count(*) AS cnt FROM processed_sales').get() as any).cnt, 0);
+    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).length, 0);
   } finally {
     cleanup();
   }
