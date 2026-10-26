@@ -1020,37 +1020,44 @@ async function selar(request: Request, e: Env) {
 
   const code = codeInName(s.customerName);
   let target: any = null;
+  let matchedBy: "unique_code" | "exact_full_name" | null = null;
 
-  // Only a unique checkout code AND the saved checkout name may create an
-  // admin review notification. Email is deliberately not used to auto-attach
-  // a sale: it can be shared, mistyped, or unrelated to this specific request.
-  if (!code) {
-    return json({ ok: true, matched: false, reason: "missing_order_code" });
+  // A unique checkout code is sufficient, even if Selar's name differs.
+  // If the code is absent/unknown/ambiguous, require an exact full-name match
+  // against the saved checkout name. Never match on a first name or partial name.
+  if (code) {
+    const codeRows = kind === "contact"
+      ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE checkout_code=? AND status='pending_payment' AND payment_method='selar' LIMIT 2").bind(code).all<any>()
+      : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name FROM service_orders WHERE checkout_code=? AND status='pending_payment' LIMIT 2").bind(code).all<any>();
+    if (codeRows.results.length === 1) {
+      target = codeRows.results[0];
+      matchedBy = "unique_code";
+    }
   }
 
-  const rows = kind === "contact"
-    ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE checkout_code=? AND status='pending_payment' AND payment_method='selar' LIMIT 2").bind(code).all<any>()
-    : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name FROM service_orders WHERE checkout_code=? AND status='pending_payment' LIMIT 2").bind(code).all<any>();
+  if (!target) {
+    const saleName = s.customerName.replace(new RegExp("\\s*" + (code || "") + "\\s*$", "i"), "").trim();
+    const fullName = normName(saleName);
+    if (fullName.length < 5 || !fullName.includes(" ")) {
+      return json({ ok: true, matched: false, reason: code ? "no_unique_code_or_full_name_match" : "missing_code_and_full_name" });
+    }
 
-  if (rows.results.length !== 1) {
-    // No unsolicited admin alerts for unmatched/ambiguous sales. The customer
-    // can tap "I've paid" in the bot and submit a receipt for manual review.
-    return json({ ok: true, matched: false, reason: rows.results.length > 1 ? "ambiguous_match" : "no_matching_pending_order" });
-  }
-
-  target = rows.results[0];
-  const saleName = s.customerName.replace(new RegExp("\\s*" + code + "\\s*$", "i"), "").trim();
-  if (!target.checkout_name || normName(target.checkout_name) !== normName(saleName)) {
-    // A code alone is not enough. Do not notify the admin for an identity
-    // mismatch; the customer-initiated receipt path is the manual fallback.
-    return json({ ok: true, matched: false, reason: "name_mismatch" });
+    const nameRows = kind === "contact"
+      ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE status='pending_payment' AND payment_method='selar' AND lower(trim(checkout_name))=? LIMIT 2").bind(fullName).all<any>()
+      : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name FROM service_orders WHERE status='pending_payment' AND lower(trim(checkout_name))=? LIMIT 2").bind(fullName).all<any>();
+    const exactNameRows = nameRows.results.filter((row: any) => row.checkout_name && normName(row.checkout_name) === fullName);
+    if (exactNameRows.length !== 1) {
+      return json({ ok: true, matched: false, reason: exactNameRows.length > 1 ? "ambiguous_full_name_match" : "no_unique_code_or_full_name_match" });
+    }
+    target = exactNameRows[0];
+    matchedBy = "exact_full_name";
   }
 
   const saleInserted = await e.DB.prepare("INSERT OR IGNORE INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id) VALUES(?,?,?,?,?,?)").bind(s.reference, s.email || target.buyer_email || "", 0, "UNK", s.productId, target.id).run();
   if (saleInserted.meta?.changes === 0) return json({ ok: true, duplicate: true });
 
   const effectiveCode = target.checkout_code || code || "unknown";
-  const clueNote = "\n\n<i>Unique checkout code and saved checkout name matched. This is still only a reconciliation match; an administrator must verify the payment directly in Selar.</i>";
+  const clueNote = "\n\n<i>Matched by " + (matchedBy === "unique_code" ? "unique checkout code" : "exact full checkout name") + ". This is only a reconciliation match; an administrator must verify the payment directly in Selar.</i>";
 
   try {
     if (kind === "contact") {
@@ -1072,7 +1079,7 @@ async function selar(request: Request, e: Env) {
     try { await notifyAdminIfConfigured(e, `<b>Selar sale processing failed; event was not consumed</b>\nReference: <code>${esc(s.reference)}</code>\nThe sender may retry delivery. No payment was verified.`); } catch { /* preserve the original error */ }
     throw err;
   }
-  return json({ ok: true, matched: true, reconciled_by: "unique_code_and_name" });
+  return json({ ok: true, matched: true, reconciled_by: matchedBy });
 }
 
 async function abandonedCart(request: Request, e: Env) {
