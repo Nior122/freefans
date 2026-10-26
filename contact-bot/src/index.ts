@@ -914,7 +914,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       return say(e,chat,preview,{inline_keyboard:[[ {text:"✅ Send to customer",callback_data:"draft:send:"+draftId},{text:"✖️ Cancel",callback_data:"draft:cancel:"+draftId} ]]});
     }
     if(!body && !d.media_file_id) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Add a message or media before sending."});
-    const claimed=await e.DB.prepare("UPDATE delivery_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(draftId,actor).run();
+    const claimed=await e.DB.prepare("UPDATE delivery_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=? AND EXISTS (SELECT 1 FROM contact_requests r JOIN creator_contacts c ON c.profile_id=r.profile_id WHERE r.id=delivery_drafts.request_id AND r.status='payment_verified' AND c.sharing_enabled=1 AND c.consent_confirmed_at IS NOT NULL AND c.contact_value=?)").bind(draftId,actor,d.contact_value).run();
     if(!claimed.meta?.changes) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft is already sending or inactive."});
     const deliveryText="🎉 <b>Congratulations!</b> Your payment has been verified and your request approved.\n\n"+(body?esc(body)+"\n\n":"")+"Creator contact: <b>"+esc(d.contact_value)+"</b>\n\nPlease respect the creator boundaries.";
     try {
