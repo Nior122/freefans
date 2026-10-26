@@ -180,6 +180,7 @@ export function migrateRemote() {
     runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0007_front_desk_multi_requests')");
   }
 
+  // Release note: migration 0007 is part of the current front-desk release.
   // Final complete schema verification. These expectations are shared with the
   // local migration verifier to prevent the two definitions drifting apart.
   console.log('[migrate-d1] Verifying complete schema...');
