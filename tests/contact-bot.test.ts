@@ -1126,8 +1126,8 @@ test('Selar webhook negative cases never mutate payment state', async () => {
 
     const order = db.raw.prepare('SELECT status, payment_reference FROM contact_requests WHERE id=?').get(reqId) as any;
     assert.equal(order.status, 'pending_payment');
-    assert.equal(order.payment_reference, null);
-    assert.equal((db.raw.prepare('SELECT count(*) AS cnt FROM processed_sales').get() as any).cnt, 0, 'Rejected events must not be consumed');
+    assert.equal(order.payment_reference, 'ref-neg-5', 'the unique-code sale is attached for manual review only');
+    assert.equal((db.raw.prepare('SELECT count(*) AS cnt FROM processed_sales').get() as any).cnt, 1, 'only the valid unique-code sale is consumed');
   } finally {
     cleanup();
   }
