@@ -81,6 +81,14 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0006_receipt_review.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0007_front_desk_multi_requests',
+    description: 'Allow up to three unpaid contact requests per Telegram user',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0007_front_desk_multi_requests.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
