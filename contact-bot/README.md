@@ -23,7 +23,15 @@ Missing rows, failed queries, revoked consent, unknown statuses, and identity mi
 7. When the sale webhook arrives, the bot reconciles (code first, then a unique fallback email) and asks the admin to verify manually. If a paid claim still has no attached sale record, the receipt-review fallback below applies; the admin still verifies with `/verify` only after checking Selar directly.
 8. After payment verification, the admin separately approves or rejects. Approval sends the creator's contact only if creator consent is recorded (see the rule above).
 
-### 2. Service order flow (fully separate)
+### Front-desk conversation and request limits
+
+- Customers can continue chatting while any contact request is pending. The assistant receives a small read-only summary of that Telegram user's own recent requests and service orders, so it can explain saved statuses without exposing other customers' data or creator contact details.
+- Up to **three unpaid contact requests** may be open per Telegram account. A request in `awaiting_email` or `pending_payment` counts toward the limit. Once an admin manually verifies payment, that request no longer counts toward the three unpaid slots; verification, approval, and creator-consent gates remain unchanged.
+- At the limit, the bot offers inline **🔎 Check** buttons for the customer's own pending requests instead of a cold block. Each request's checkout instructions also include a **🔎 I've paid — check again** button.
+- Messages such as “I've paid, please check again” invoke the deterministic paid-claim handler, which re-reads the customer's saved order and attached sale reference. The AI cannot verify payment or run arbitrary commands. If no sale is attached, the existing name/receipt/admin reconciliation path is used; repeated claims do not themselves mark payment verified.
+- Contact requests are independent records with separate codes and statuses. Service-order creation and its one-active-order constraint remain separate.
+
+## 2. Service order flow (fully separate)
 
 1. The customer opens `https://t.me/<BOT_USERNAME>?start=service_SERVICE_ID`.
 2. The bot creates a `service_orders` row (with its own `FL-XXXXXX` code) and the assistant chats to understand the request. The code is shown when the customer types `PAY` and receives the service checkout link.
@@ -159,6 +167,7 @@ Baseline `contact-bot/schema.sql` (`0001_baseline`) plus ordered migrations:
 | `0004_checkout_codes` | `contact-bot/migrations/0004_checkout_codes.sql` | `checkout_code`/`checkout_name` columns, per-table unique code indexes, `checkout_name_prompts`. **Non-idempotent as a raw file** (bare `ALTER TABLE`s) — always apply through `scripts/migrate-d1.mjs`, which checks `PRAGMA table_info` first. Tests apply it directly only to fresh databases. |
 | `0005_one_active_request_per_user` | `contact-bot/migrations/0005_one_active_request_per_user.sql` | Partial unique indexes: one active contact request / service order per Telegram user. Blocks with a clear error if duplicate active rows already exist; reconcile manually (keep the newest legitimate request, reject/cancel the rest), then re-run. |
 | `0006_receipt_review` | `contact-bot/migrations/0006_receipt_review.sql` | `receipt_review_prompts` and `payment_receipt_submissions` for the manual receipt fallback, including unique Telegram-message/file indexes for idempotent retries. It stores file identifiers and delivery state only, never receipt contents/captions. |
+| `0007_front_desk_multi_requests` | `contact-bot/migrations/0007_front_desk_multi_requests.sql` | Removes the one-active-contact-request unique index. The Worker allows up to three unpaid contact requests per Telegram account; service orders retain their separate one-active-order guard. |
 
 Apply/inspect with `node scripts/migrate-d1.mjs --remote` (requires Wrangler auth; used by the deploy workflow *before* the Worker deploy, so a failed migration leaves the old Worker running). It tracks applied versions in `schema_migrations` and verifies all 9 tables, expected columns, and the unique indexes afterwards. Applied versions can be inspected read-only:
 
