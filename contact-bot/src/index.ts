@@ -606,6 +606,29 @@ async function message(e: Env, m: Msg) {
     }
   }
 
+  if (user === e.ADMIN_TELEGRAM_ID && (t === "/admin" || t === "/menu")) {
+    return say(e, chat, "<b>FansLeak Admin Desk</b>\nChoose what you want to manage. Payment checks and contact release remain manual and consent-gated.", {
+      inline_keyboard: [
+        [{ text: "📥 Review contact requests", callback_data: "admin:pending" }],
+        [{ text: "🧾 Review service orders", callback_data: "admin:orders" }],
+        [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }],
+        [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]
+      ]
+    });
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/message ")) {
+    const match = t.match(/^\/message\s+([^\s]+)\s+([\s\S]{2,2500})$/i);
+    if (!match) return say(e, chat, "Format: /message FL-ABC123 Your message here");
+    const ref = match[1], body = match[2].trim();
+    let order = await e.DB.prepare("SELECT id,telegram_chat_id,checkout_code,profile_id AS target_id,'contact' AS kind FROM contact_requests WHERE id=? OR checkout_code=? ORDER BY created_at DESC LIMIT 1").bind(ref, ref.toUpperCase()).first<any>();
+    if (!order) order = await e.DB.prepare("SELECT id,telegram_chat_id,checkout_code,service_id AS target_id,'service' AS kind FROM service_orders WHERE id=? OR checkout_code=? ORDER BY created_at DESC LIMIT 1").bind(ref, ref.toUpperCase()).first<any>();
+    if (!order) return say(e, chat, "No contact request or service order matched that UUID or FL- order code. Nothing was sent.");
+    try { await say(e, order.telegram_chat_id, "💬 <b>Message from FansLeak support</b>\n\n" + esc(body)); }
+    catch { return say(e, chat, "Telegram could not deliver the message. Check whether the customer has started the bot; no success was recorded."); }
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,?,?,?,?)").bind(user, "admin_message_customer", order.id, order.kind === "contact" ? order.target_id : null, "Admin sent support message for " + order.kind + " order " + order.checkout_code).run();
+    return say(e, chat, "✅ Message sent for order <code>" + esc(order.checkout_code || ref) + "</code>.");
+  }
+
   if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/deliver ")) {
     const match = t.match(/^\/deliver\s+([0-9a-f-]{36})\s+([\s\S]{1,3500})$/i);
     if (!match) return say(e, chat, "Usage: /deliver ORDER_ID service details or fulfilment text");
