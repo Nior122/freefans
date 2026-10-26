@@ -1020,56 +1020,47 @@ async function selar(request: Request, e: Env) {
 
   const code = codeInName(s.customerName);
   let target: any = null;
-  let matchedByEmail = false;
+  let matchedBy: "unique_code" | "exact_full_name" | null = null;
 
+  // A unique checkout code is sufficient, even if Selar's name differs.
+  // If the code is absent/unknown/ambiguous, require an exact full-name match
+  // against the saved checkout name. Never match on a first name or partial name.
   if (code) {
-    const rows = kind === "contact"
+    const codeRows = kind === "contact"
       ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE checkout_code=? AND status='pending_payment' AND payment_method='selar' LIMIT 2").bind(code).all<any>()
       : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name FROM service_orders WHERE checkout_code=? AND status='pending_payment' LIMIT 2").bind(code).all<any>();
-    if (rows.results.length === 1) {
-      target = rows.results[0];
-      const saleName = s.customerName.replace(new RegExp("\\s*" + code + "\\s*$", "i"), "").trim();
-      if (target.checkout_name && normName(target.checkout_name) !== normName(saleName)) {
-        const email = String(target.buyer_email || s.email || "").trim();
-        const adminEmail = email ? `\nEmail: ${esc(email)}` : "\nEmail: not supplied";
-        await notifyAdminIfConfigured(e, `<b>Selar sale name mismatch</b>\nReference: <code>${esc(s.reference)}</code>\nOrder code: <code>${esc(code)}</code>\nCustomer name: ${esc(s.customerName)}\nSubmitted name: ${esc(target.checkout_name)}${adminEmail}\nThis email is a reconciliation clue only and does not verify payment.`);
-        return json({ ok: true, matched: false, reason: "name_mismatch" });
-      }
-    } else if (rows.results.length > 1) {
-      await notifyAdminIfConfigured(e, `<b>Selar sale ambiguous order match</b>\nReference: <code>${esc(s.reference)}</code>\nOrder code: <code>${esc(code)}</code>\nCustomer name: ${esc(s.customerName)}\nFound multiple pending orders with this code.`);
-      return json({ ok: true, matched: false, reason: "ambiguous_match" });
-    }
-  }
-
-  // Fallback: match by payment email if code was absent or did not match an active order
-  if (!target && s.email) {
-    const emailRows = kind === "contact"
-      ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE buyer_email=? AND status='pending_payment' AND payment_method='selar' LIMIT 2").bind(s.email).all<any>()
-      : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name,buyer_email FROM service_orders WHERE buyer_email=? AND status='pending_payment' LIMIT 2").bind(s.email).all<any>();
-    if (emailRows.results.length === 1) {
-      target = emailRows.results[0];
-      matchedByEmail = true;
-    } else if (emailRows.results.length > 1) {
-      await notifyAdminIfConfigured(e, `<b>Selar sale ambiguous email match</b>\nReference: <code>${esc(s.reference)}</code>\nCustomer name: ${esc(s.customerName)}\nEmail: <code>${esc(s.email)}</code>\nFound multiple pending ${kind} orders with this email.`);
-      return json({ ok: true, matched: false, reason: "ambiguous_email_match" });
+    if (codeRows.results.length === 1) {
+      target = codeRows.results[0];
+      matchedBy = "unique_code";
     }
   }
 
   if (!target) {
-    const adminEmail = s.email ? `\nSelar email: ${esc(s.email)}` : "";
-    const codeInfo = code ? `\nOrder code: <code>${esc(code)}</code>` : "\nOrder code: missing from name";
-    await notifyAdminIfConfigured(e, `<b>Selar sale requires manual reconciliation</b>\nReference: <code>${esc(s.reference)}</code>\nCustomer name: ${esc(s.customerName)}${codeInfo}${adminEmail}\nNo unique matching pending order found. This does not verify payment.`);
-    return json({ ok: true, matched: false, reason: code ? "no_matching_pending_order" : "missing_order_code" });
+    const saleName = s.customerName.replace(new RegExp("\\s*" + (code || "") + "\\s*$", "i"), "").trim();
+    const fullName = normName(saleName);
+    if (fullName.length < 5 || !fullName.includes(" ")) {
+      return json({ ok: true, matched: false, reason: code ? "no_unique_code_or_full_name_match" : "missing_code_and_full_name" });
+    }
+
+    // Normalize in application code so repeated whitespace and case are handled
+    // consistently. Fetch all eligible pending candidates so a LIMIT cannot hide
+    // a second exact-name match and accidentally make an ambiguous name look unique.
+    const nameRows = kind === "contact"
+      ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE status='pending_payment' AND payment_method='selar' AND checkout_name IS NOT NULL").all<any>()
+      : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name FROM service_orders WHERE status='pending_payment' AND checkout_name IS NOT NULL").all<any>();
+    const exactNameRows = nameRows.results.filter((row: any) => row.checkout_name && normName(row.checkout_name) === fullName);
+    if (exactNameRows.length !== 1) {
+      return json({ ok: true, matched: false, reason: exactNameRows.length > 1 ? "ambiguous_full_name_match" : "no_unique_code_or_full_name_match" });
+    }
+    target = exactNameRows[0];
+    matchedBy = "exact_full_name";
   }
 
   const saleInserted = await e.DB.prepare("INSERT OR IGNORE INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id) VALUES(?,?,?,?,?,?)").bind(s.reference, s.email || target.buyer_email || "", 0, "UNK", s.productId, target.id).run();
   if (saleInserted.meta?.changes === 0) return json({ ok: true, duplicate: true });
 
   const effectiveCode = target.checkout_code || code || "unknown";
-  const clueNote = (matchedByEmail
-    ? "\n\n<i>Order code was missing/mismatched in Selar name, but matched customer's saved email clue. Please verify manually before confirming.</i>"
-    : "\n\n<i>This email is a reconciliation clue only and does not verify payment.</i>")
-    + (matchedByEmail && code && code !== target.checkout_code ? `\n<i>Submitted name contained a different code: <code>${esc(code)}</code></i>` : "");
+  const clueNote = "\n\n<i>Matched by " + (matchedBy === "unique_code" ? "unique checkout code" : "exact full checkout name") + ". This is only a reconciliation match; an administrator must verify the payment directly in Selar.</i>";
 
   try {
     if (kind === "contact") {
@@ -1091,7 +1082,7 @@ async function selar(request: Request, e: Env) {
     try { await notifyAdminIfConfigured(e, `<b>Selar sale processing failed; event was not consumed</b>\nReference: <code>${esc(s.reference)}</code>\nThe sender may retry delivery. No payment was verified.`); } catch { /* preserve the original error */ }
     throw err;
   }
-  return json({ ok: true, matched: true, ...(matchedByEmail ? { reconciled_by: "fallback_email" } : {}) });
+  return json({ ok: true, matched: true, reconciled_by: matchedBy });
 }
 
 async function abandonedCart(request: Request, e: Env) {
