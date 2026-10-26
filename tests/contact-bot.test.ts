@@ -1212,8 +1212,14 @@ test('Approval fails closed for unverified payment, another creator consent, and
     assert.equal(messagesTo(sentTelegramMessages, '5162').filter(m => String(m.data.text).includes('@anaimiya_real')).length, 0);
 
     await tgPost(env, callbackFrom(10001, `approve:${okId}`));
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(okId) as any).status, 'payment_verified', 'Preparing a draft does not approve the request');
+    assert.equal(messagesTo(sentTelegramMessages, '5162').filter(m => String(m.data.text).includes('@anaimiya_real')).length, 0, 'No contact is disclosed before send confirmation');
+    const draft = db.raw.prepare('SELECT id FROM delivery_drafts WHERE request_id=?').get(okId) as any;
+    assert.ok(draft);
+    await tgPost(env, adminMsg('Here is your authorized creator contact.'));
+    await tgPost(env, callbackFrom(10001, `draft:send:${draft.id}`));
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(okId) as any).status, 'approved');
-    assert.equal(messagesTo(sentTelegramMessages, '5162').filter(m => String(m.data.text).includes('@anaimiya_real')).length, 1, 'Handle is sent exactly once, after all gates pass');
+    assert.equal(messagesTo(sentTelegramMessages, '5162').filter(m => String(m.data.text).includes('@anaimiya_real')).length, 1, 'Handle is sent exactly once after explicit confirmation');
   } finally {
     cleanup();
   }
