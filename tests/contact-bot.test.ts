@@ -17,6 +17,7 @@ function createTestDb() {
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0003_abandoned_carts.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0004_checkout_codes.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0005_one_active_request_per_user.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0006_receipt_review.sql'), 'utf8'));
 
   return {
     raw: db,
@@ -53,8 +54,9 @@ function createTestDb() {
 }
 
 // Create a test environment with mock fetch to intercept Telegram API calls and catalogue fetch
-function createTestEnv(db: any) {
+function createTestEnv(db: any, options: { failTelegramMethods?: Set<string> } = {}) {
   const sentTelegramMessages: Array<{ method: string; data: Record<string, unknown> }> = [];
+  const failTelegramMethods = options.failTelegramMethods || new Set<string>();
 
   const mockFetch = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const urlStr = String(url);
@@ -65,6 +67,12 @@ function createTestEnv(db: any) {
       const method = parts[parts.length - 1];
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       sentTelegramMessages.push({ method, data: body });
+      if (failTelegramMethods.has(method)) {
+        return new Response(JSON.stringify({ ok: false, description: 'synthetic Telegram delivery failure' }), {
+          status: 502,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
       return new Response(JSON.stringify({ ok: true, result: { message_id: 12345 } }), {
         status: 200,
         headers: { 'content-type': 'application/json' }
@@ -113,7 +121,7 @@ function createTestEnv(db: any) {
     globalThis.fetch = originalFetch;
   };
 
-  return { env, sentTelegramMessages, cleanup };
+  return { env, sentTelegramMessages, cleanup, failTelegramMethods };
 }
 
 test('Worker health check endpoint returns 200 with service information', async () => {
@@ -1343,6 +1351,213 @@ test('AI support output is HTML-escaped before it is sent to customers', async (
     assert.ok(reply, 'AI reply must be sent');
     assert.ok(!String(reply.data.text).includes('<a href='), 'Raw AI HTML must not reach Telegram');
     assert.ok(String(reply.data.text).includes('&lt;a href=&quot;'));
+  } finally {
+    cleanup();
+  }
+});
+
+function photoMsg(userId: number, messageId: number, fileUniqueId = 'photo-unique-1') {
+  return {
+    message: {
+      message_id: messageId,
+      chat: { id: userId, type: 'private' },
+      from: { id: userId, username: `customer_${userId}` },
+      caption: 'private caption must not be copied to admin',
+      photo: [
+        { file_id: 'photo-file-small', file_unique_id: `${fileUniqueId}-small`, file_size: 1000, width: 90, height: 90 },
+        { file_id: 'photo-file-large', file_unique_id: fileUniqueId, file_size: 9000, width: 900, height: 900 }
+      ]
+    }
+  };
+}
+
+function documentMsg(userId: number, messageId: number, mimeType: string, fileName: string, fileUniqueId = 'document-unique-1') {
+  return {
+    message: {
+      message_id: messageId,
+      chat: { id: userId, type: 'private' },
+      from: { id: userId, username: `customer_${userId}` },
+      document: {
+        file_id: `document-file-${messageId}`,
+        file_unique_id: fileUniqueId,
+        file_name: fileName,
+        mime_type: mimeType,
+        file_size: 12000
+      }
+    }
+  };
+}
+
+test('Paid claim with an attached Selar sale uses manual verification and does not request a receipt', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    await tgPost(env, userMsg(5210, '/start contact_anaimiya'));
+    const order = db.raw.prepare("SELECT * FROM contact_requests WHERE telegram_user_id='5210'").get() as any;
+    const saleResponse = await selarPost(env, {
+      reference: 'ref-paid-claim-found',
+      product_code: env.SELAR_PRODUCT_ID,
+      customer_full_name: `Buyer Person ${order.checkout_code}`,
+      email: 'buyer5210@example.com'
+    });
+    assert.equal((await saleResponse.json()).matched, true);
+
+    await tgPost(env, userMsg(5210, 'I have paid'));
+
+    const customerMessages = messagesTo(sentTelegramMessages, '5210');
+    assert.ok(customerMessages.some(m => String(m.data.text).includes('found a Selar sale record already attached')));
+    assert.ok(customerMessages.some(m => String(m.data.text).includes('not</b> need to send a receipt')));
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM receipt_review_prompts WHERE telegram_user_id='5210'").get().cnt, 0);
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM payment_receipt_submissions').get().cnt, 0);
+    assert.equal(sentTelegramMessages.filter(m => m.method === 'sendPhoto' || m.method === 'sendDocument').length, 0);
+    const saved = db.raw.prepare('SELECT status,payment_reference FROM contact_requests WHERE id=?').get(order.id) as any;
+    assert.equal(saved.status, 'pending_payment', 'The paid claim must not verify the payment');
+    assert.equal(saved.payment_reference, 'ref-paid-claim-found');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Missing sale prompts for a Selar receipt photo, forwards it once, and never verifies the order', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    await tgPost(env, userMsg(5211, '/start contact_anaimiya'));
+    const order = db.raw.prepare("SELECT * FROM contact_requests WHERE telegram_user_id='5211'").get() as any;
+
+    await tgPost(env, photoMsg(5211, 8099, 'too-early-photo'));
+    assert.equal(sentTelegramMessages.filter(m => m.method === 'sendPhoto').length, 0, 'A photo sent before the checkout-name step must not be forwarded yet');
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM payment_receipt_submissions').get().cnt, 0);
+    assert.ok(db.raw.prepare("SELECT order_id FROM checkout_name_prompts WHERE telegram_user_id='5211'").get());
+
+    await tgPost(env, callbackFrom(5211, `done:${order.id}`));
+    await tgPost(env, userMsg(5211, `Buyer Receipt ${order.checkout_code}`));
+
+    const prompt = db.raw.prepare("SELECT * FROM receipt_review_prompts WHERE telegram_user_id='5211'").get() as any;
+    assert.ok(prompt, 'A missing backend sale after checkout-name entry must create a receipt prompt');
+    assert.equal(prompt.order_id, order.id);
+    assert.ok(messagesTo(sentTelegramMessages, '5211').some(m => String(m.data.text).includes('forward your <b>Selar receipt</b>')));
+
+    const receipt = photoMsg(5211, 8101);
+    await tgPost(env, receipt);
+
+    const forwards = sentTelegramMessages.filter(m => m.method === 'sendPhoto');
+    assert.equal(forwards.length, 1);
+    assert.equal(String(forwards[0].data.chat_id), env.ADMIN_TELEGRAM_ID);
+    assert.equal(forwards[0].data.photo, 'photo-file-large', 'The largest Telegram photo size should be forwarded');
+    const caption = String(forwards[0].data.caption || '');
+    assert.ok(caption.includes(order.id));
+    assert.ok(caption.includes(order.checkout_code));
+    assert.ok(caption.includes('Buyer Receipt'));
+    assert.ok(caption.includes(`/verify ${order.id} EXACT_SELAR_REFERENCE`));
+    assert.ok(caption.includes('has NOT changed the order status'));
+    assert.ok(!caption.includes('private caption must not be copied'), 'Customer captions must not be copied into the admin receipt context');
+
+    const submission = db.raw.prepare('SELECT * FROM payment_receipt_submissions WHERE order_id=?').get(order.id) as any;
+    assert.equal(submission.status, 'forwarded');
+    assert.equal(submission.telegram_file_unique_id, 'photo-unique-1');
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM receipt_review_prompts WHERE telegram_user_id='5211'").get().cnt, 0);
+
+    await tgPost(env, receipt);
+    assert.equal(sentTelegramMessages.filter(m => m.method === 'sendPhoto').length, 1, 'Duplicate Telegram receipt update must not forward twice');
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM payment_receipt_submissions WHERE order_id=?').get(order.id).cnt, 1);
+
+    const saved = db.raw.prepare('SELECT status,payment_reference FROM contact_requests WHERE id=?').get(order.id) as any;
+    assert.equal(saved.status, 'pending_payment', 'A receipt must never verify, approve, or fulfil an order');
+    assert.equal(saved.payment_reference, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test('Service receipt fallback rejects unsupported documents and forwards a PDF with service verification context', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO service_orders
+      (id,service_id,telegram_user_id,telegram_chat_id,telegram_username,status,payment_method,checkout_code,checkout_name)
+      VALUES (?, 'public-service', '5212', '5212', 'service_buyer', 'pending_payment', 'selar', 'FL-SVC001', 'Service Buyer')`).run(orderId);
+
+    await tgPost(env, userMsg(5212, '/paid'));
+    assert.ok(db.raw.prepare("SELECT order_id FROM receipt_review_prompts WHERE telegram_user_id='5212'").get());
+
+    await tgPost(env, documentMsg(5212, 8201, 'application/zip', 'receipt.zip', 'zip-unique'));
+    assert.equal(sentTelegramMessages.filter(m => m.method === 'sendDocument').length, 0);
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM payment_receipt_submissions').get().cnt, 0);
+    assert.ok(db.raw.prepare("SELECT order_id FROM receipt_review_prompts WHERE telegram_user_id='5212'").get(), 'Unsupported media must leave the receipt prompt open');
+
+    await tgPost(env, documentMsg(5212, 8202, 'application/pdf', 'selar-receipt.pdf', 'pdf-unique'));
+    const forwards = sentTelegramMessages.filter(m => m.method === 'sendDocument');
+    assert.equal(forwards.length, 1);
+    assert.equal(String(forwards[0].data.chat_id), env.ADMIN_TELEGRAM_ID);
+    assert.equal(forwards[0].data.document, 'document-file-8202');
+    assert.ok(String(forwards[0].data.caption || '').includes(`/verifyservice ${orderId} EXACT_SELAR_REFERENCE`));
+
+    const saved = db.raw.prepare('SELECT status,payment_reference FROM service_orders WHERE id=?').get(orderId) as any;
+    assert.equal(saved.status, 'pending_payment');
+    assert.equal(saved.payment_reference, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test('Receipt delivery failure is recorded and the same submission can be retried without duplication', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup, failTelegramMethods } = createTestEnv(db);
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests
+      (id,telegram_user_id,telegram_chat_id,profile_id,status,payment_method,checkout_code,checkout_name)
+      VALUES (?, '5213', '5213', 'anaimiya', 'pending_payment', 'selar', 'FL-RTY001', 'Retry Buyer')`).run(orderId);
+
+    await tgPost(env, userMsg(5213, 'I have paid'));
+    failTelegramMethods.add('sendPhoto');
+    const receipt = photoMsg(5213, 8301, 'retry-photo-unique');
+    await tgPost(env, receipt);
+
+    const submission = db.raw.prepare('SELECT * FROM payment_receipt_submissions WHERE order_id=?').get(orderId) as any;
+    assert.equal(submission.status, 'delivery_failed');
+    assert.ok(db.raw.prepare("SELECT order_id FROM receipt_review_prompts WHERE telegram_user_id='5213'").get(), 'A failed forward must leave a retryable prompt');
+    assert.ok(messagesTo(sentTelegramMessages, '5213').some(m => String(m.data.text).includes("couldn't forward that receipt")));
+
+    failTelegramMethods.delete('sendPhoto');
+    await tgPost(env, receipt);
+
+    const rows = db.raw.prepare('SELECT * FROM payment_receipt_submissions WHERE order_id=?').all(orderId) as any[];
+    assert.equal(rows.length, 1, 'Retrying the same Telegram receipt must reuse one submission record');
+    assert.equal(rows[0].id, submission.id);
+    assert.equal(rows[0].status, 'forwarded');
+    assert.equal(sentTelegramMessages.filter(m => m.method === 'sendPhoto').length, 2, 'One failed attempt and one successful retry are expected');
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM receipt_review_prompts WHERE telegram_user_id='5213'").get().cnt, 0);
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(orderId) as any).status, 'pending_payment');
+  } finally {
+    cleanup();
+  }
+});
+
+test('A backend sale arriving after the receipt prompt supersedes receipt forwarding', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests
+      (id,telegram_user_id,telegram_chat_id,profile_id,status,payment_method,checkout_code,checkout_name)
+      VALUES (?, '5214', '5214', 'anaimiya', 'pending_payment', 'selar', 'FL-LATE01', 'Late Buyer')`).run(orderId);
+
+    await tgPost(env, userMsg(5214, 'I have paid'));
+    assert.ok(db.raw.prepare("SELECT order_id FROM receipt_review_prompts WHERE telegram_user_id='5214'").get());
+
+    db.raw.prepare(`INSERT INTO processed_sales
+      (provider_reference,buyer_email,amount_minor,currency,product_id,request_id)
+      VALUES ('ref-arrived-after-prompt', 'late@example.com', 0, 'UNK', ?, ?)`).run(env.SELAR_PRODUCT_ID, orderId);
+
+    await tgPost(env, photoMsg(5214, 8401, 'late-sale-photo'));
+    assert.equal(sentTelegramMessages.filter(m => m.method === 'sendPhoto').length, 0, 'Receipt must not be forwarded once backend evidence exists');
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM payment_receipt_submissions').get().cnt, 0);
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM receipt_review_prompts WHERE telegram_user_id='5214'").get().cnt, 0);
+    assert.ok(messagesTo(sentTelegramMessages, '5214').some(m => String(m.data.text).includes('found a Selar sale record already attached')));
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(orderId) as any).status, 'pending_payment');
   } finally {
     cleanup();
   }

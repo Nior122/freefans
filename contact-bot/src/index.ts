@@ -22,9 +22,47 @@ export interface Env {
   AI?: { run(model: string, input: { messages: Array<{ role: string; content: string }> }): Promise<{ response?: string }> };
   AI_MODEL?: string;
 }
-type Msg = { chat: { id: number }; from?: { id: number; username?: string; first_name?: string }; text?: string };
+type TelegramPhotoSize = { file_id?: string; file_unique_id?: string; file_size?: number; width?: number; height?: number };
+type TelegramDocument = { file_id?: string; file_unique_id?: string; file_name?: string; mime_type?: string; file_size?: number };
+type Msg = {
+  message_id?: number;
+  chat: { id: number; type?: string };
+  from?: { id: number; username?: string; first_name?: string };
+  text?: string;
+  caption?: string;
+  photo?: TelegramPhotoSize[];
+  document?: TelegramDocument;
+};
 type Update = { message?: Msg; callback_query?: { id: string; from: { id: number }; message?: Msg; data?: string } };
 type Profile = { id: string; name: string };
+type OrderKind = "contact" | "service";
+type CustomerOrder = {
+  kind: OrderKind;
+  id: string;
+  target_id?: string;
+  telegram_user_id: string;
+  telegram_chat_id: string;
+  telegram_username?: string;
+  buyer_email?: string;
+  status: string;
+  payment_method?: string;
+  payment_reference?: string;
+  checkout_code?: string;
+  checkout_name?: string;
+  created_at?: string;
+};
+type ReceiptMedia = {
+  kind: "photo" | "document";
+  fileId: string;
+  fileUniqueId: string | null;
+  mimeType: string | null;
+  fileSize: number | null;
+};
+type ReceiptSubmission = {
+  id: string;
+  order_id: string;
+  status: string;
+};
 type RequestRow = { id: string; telegram_chat_id: string; profile_id: string; status: string; buyer_email?: string; manual_payment_reference?: string; checkout_code?: string; checkout_name?: string };
 const CODE_CHARS = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 function checkoutCode(): string {
@@ -116,6 +154,286 @@ function paymentKeyboard(e: Env, id: string) {
   if (enabledMethods(e).includes("selar")) buttons.push({ text: "Pay with Selar", callback_data: `pay_selar:${id}` });
   return { inline_keyboard: buttons.map(b => [b]) };
 }
+
+async function loadCustomerOrderById(e: Env, id: string): Promise<CustomerOrder | null> {
+  const contact = await e.DB.prepare("SELECT id,telegram_user_id,telegram_chat_id,telegram_username,profile_id AS target_id,buyer_email,status,payment_method,payment_reference,checkout_code,checkout_name,created_at FROM contact_requests WHERE id=?").bind(id).first<any>();
+  if (contact) return { kind: "contact", ...contact };
+  const service = await e.DB.prepare("SELECT id,telegram_user_id,telegram_chat_id,telegram_username,service_id AS target_id,buyer_email,status,payment_method,payment_reference,checkout_code,checkout_name,created_at FROM service_orders WHERE id=?").bind(id).first<any>();
+  return service ? { kind: "service", ...service } : null;
+}
+
+async function findCustomerOrderForPaidClaim(e: Env, user: string): Promise<CustomerOrder | null> {
+  const contact = await e.DB.prepare("SELECT id,telegram_user_id,telegram_chat_id,telegram_username,profile_id AS target_id,buyer_email,status,payment_method,payment_reference,checkout_code,checkout_name,created_at FROM contact_requests WHERE telegram_user_id=? AND status IN('pending_payment','payment_verified','approved') ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
+  const service = await e.DB.prepare("SELECT id,telegram_user_id,telegram_chat_id,telegram_username,service_id AS target_id,buyer_email,status,payment_method,payment_reference,checkout_code,checkout_name,created_at FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','pending_payment','payment_verified','fulfilled') ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
+  const candidates: CustomerOrder[] = [];
+  if (contact) candidates.push({ kind: "contact", ...contact });
+  if (service) candidates.push({ kind: "service", ...service });
+  const rank = (order: CustomerOrder) => order.status === "pending_payment" ? 0 : order.status === "payment_verified" ? 1 : order.status === "awaiting_request" ? 2 : 3;
+  candidates.sort((a, b) => rank(a) - rank(b) || String(b.created_at || "").localeCompare(String(a.created_at || "")));
+  return candidates[0] || null;
+}
+
+async function attachedSaleReference(e: Env, order: CustomerOrder): Promise<string> {
+  if (order.payment_reference) return String(order.payment_reference);
+  const sale = await e.DB.prepare("SELECT provider_reference FROM processed_sales WHERE request_id=? ORDER BY received_at DESC LIMIT 1").bind(order.id).first<any>();
+  return sale?.provider_reference ? String(sale.provider_reference) : "";
+}
+
+async function clearPaymentPrompts(e: Env, user: string, orderId: string) {
+  await e.DB.prepare("DELETE FROM checkout_name_prompts WHERE telegram_user_id=? AND order_id=?").bind(user, orderId).run();
+  await e.DB.prepare("DELETE FROM receipt_review_prompts WHERE telegram_user_id=? AND order_id=?").bind(user, orderId).run();
+}
+
+async function forwardedReceiptForOrder(e: Env, orderId: string): Promise<ReceiptSubmission | null> {
+  return e.DB.prepare("SELECT id,order_id,status FROM payment_receipt_submissions WHERE order_id=? AND status='forwarded' ORDER BY created_at ASC LIMIT 1").bind(orderId).first<ReceiptSubmission>();
+}
+
+function isPaidClaimText(text: string): boolean {
+  const withoutCode = text.replace(/\bFL-[A-Z0-9]{6}\b/i, "").trim().replace(/\s+/g, " ");
+  return /^\/?(paid|i(?:\s+have|\s+already)?\s+paid|i['’]ve\s+paid|already\s+paid|payment\s+(?:is\s+)?(?:done|made|completed|complete|successful|sent)|checkout\s+(?:is\s+)?(?:done|completed|complete)|done\s+paying)[.!]*$/i.test(withoutCode);
+}
+
+async function promptForReceiptReview(e: Env, chat: string, user: string, order: CustomerOrder, prefix = ""): Promise<string> {
+  if (!e.ADMIN_TELEGRAM_ID) {
+    await say(e, chat, `${prefix}I still can't find a matching Selar sale record for this order, and receipt review is not configured yet. Your order remains pending; please contact support rather than sending credentials or bank details here.`);
+    return "admin_unavailable";
+  }
+  const forwarded = await forwardedReceiptForOrder(e, order.id);
+  if (forwarded) {
+    await e.DB.prepare("DELETE FROM receipt_review_prompts WHERE telegram_user_id=? AND order_id=?").bind(user, order.id).run();
+    await say(e, chat, `${prefix}Your Selar receipt has already been forwarded to the administrator for manual review. You do not need to send it again. Your ${order.kind === "contact" ? "request" : "order"} remains pending until the administrator checks Selar and verifies the payment manually.`);
+    return "receipt_already_forwarded";
+  }
+  await e.DB.prepare("INSERT OR REPLACE INTO receipt_review_prompts(telegram_user_id,order_id,order_kind) VALUES(?,?,?)").bind(user, order.id, order.kind).run();
+  await say(e, chat, `${prefix}I checked the existing payment records and still can't find a matching Selar sale attached to order code <code>${esc(order.checkout_code || "")}</code>.\n\nPlease forward your <b>Selar receipt</b> here as a Telegram photo or as a PDF/JPG/PNG/WebP document. I will send it to the administrator with this order's details for manual review.\n\nThe receipt is evidence only: it will <b>not</b> mark your order paid, verified, approved, or fulfilled. Never send bank logins, card PINs, passwords, or one-time codes.`);
+  return "receipt_needed";
+}
+
+async function handlePaidClaim(e: Env, chat: string, user: string, order: CustomerOrder | null, options: { nameJustRecorded?: boolean } = {}): Promise<string> {
+  const prefix = options.nameJustRecorded ? "Thanks — your checkout name has been recorded. " : "";
+  if (!order || String(order.telegram_user_id) !== user) {
+    await say(e, chat, "I can't find a current FansLeak contact request or service order for this Telegram account. Start from the profile or service page first; a payment receipt cannot be attached to an order that the bot cannot identify.");
+    return "no_order";
+  }
+  if (order.status === "payment_verified") {
+    await clearPaymentPrompts(e, user, order.id);
+    await say(e, chat, `${prefix}Your payment has already been checked and manually verified by the administrator. ${order.kind === "contact" ? "Your request is now waiting for final approval and recorded creator consent; no receipt is needed." : "Your service order is now awaiting fulfilment; no receipt is needed."}`);
+    return "verified";
+  }
+  if (order.status === "approved" || order.status === "fulfilled") {
+    await clearPaymentPrompts(e, user, order.id);
+    await say(e, chat, `${prefix}This ${order.kind === "contact" ? "request" : "order"} has already been ${order.status}. No receipt is needed.`);
+    return "completed";
+  }
+  if (order.status === "awaiting_request") {
+    await say(e, chat, "This service order has not reached the payment step yet. Finish describing what you need, then type PAY and complete the Selar checkout before sending a receipt.");
+    return "awaiting_request";
+  }
+  if (order.status !== "pending_payment") {
+    await e.DB.prepare("DELETE FROM receipt_review_prompts WHERE telegram_user_id=? AND order_id=?").bind(user, order.id).run();
+    await say(e, chat, `This ${order.kind === "contact" ? "request" : "order"} is no longer waiting for payment, so I can't accept a receipt for it. Please contact support if you believe this is a mistake.`);
+    return "closed";
+  }
+
+  // Always check the existing backend evidence before asking for a receipt.
+  // A webhook/manual sale already has an admin verification path, so a receipt
+  // would only duplicate that process.
+  const saleReference = await attachedSaleReference(e, order);
+  if (saleReference) {
+    await clearPaymentPrompts(e, user, order.id);
+    await say(e, chat, `${prefix}I found a Selar sale record already attached to this ${order.kind === "contact" ? "request" : "order"}. It is in the existing manual-verification queue, so you do <b>not</b> need to send a receipt. The administrator still has to check Selar and verify the payment manually; nothing has been approved or fulfilled automatically.`);
+    return "sale_found";
+  }
+
+  if (!String(order.checkout_name || "").trim()) {
+    await e.DB.prepare("INSERT OR REPLACE INTO checkout_name_prompts(telegram_user_id,order_id,order_kind) VALUES(?,?,?)").bind(user, order.id, order.kind).run();
+    await say(e, chat, `I checked the existing payment records and can't find a matching Selar sale yet. First, please send the exact full name you used in Selar's name field, including the code. Example: <code>Joseph Unaogu ${esc(order.checkout_code || "FL-7K4P9A")}</code>. This does not confirm payment; it only helps the administrator match the sale to the correct ${order.kind === "contact" ? "request" : "order"}.`);
+    return "name_needed";
+  }
+  return promptForReceiptReview(e, chat, user, order, prefix);
+}
+
+function receiptFileSize(value: unknown): number | null {
+  const size = Number(value);
+  return Number.isFinite(size) && size >= 0 ? Math.trunc(size) : null;
+}
+
+function extractReceiptMedia(m: Msg): { media?: ReceiptMedia; unsupported?: string } {
+  const maxBytes = 20_000_000;
+  if (Array.isArray(m.photo) && m.photo.length > 0) {
+    const candidates = m.photo.filter(p => typeof p?.file_id === "string" && p.file_id.length > 0 && p.file_id.length <= 512);
+    if (candidates.length === 0) return { unsupported: "That photo did not include a usable Telegram file reference. Please send the receipt again as a photo or PDF/image document." };
+    const photo = candidates.reduce((best, current) => {
+      const bestScore = Number(best.file_size || 0) || Number(best.width || 0) * Number(best.height || 0);
+      const currentScore = Number(current.file_size || 0) || Number(current.width || 0) * Number(current.height || 0);
+      return currentScore > bestScore ? current : best;
+    });
+    const fileSize = receiptFileSize(photo.file_size);
+    if (fileSize !== null && fileSize > maxBytes) return { unsupported: "That receipt photo is too large for the bot to forward safely. Please send a smaller photo or PDF/image document." };
+    return { media: { kind: "photo", fileId: String(photo.file_id), fileUniqueId: typeof photo.file_unique_id === "string" ? photo.file_unique_id.slice(0, 512) : null, mimeType: "image/jpeg", fileSize } };
+  }
+
+  if (m.document) {
+    const doc = m.document;
+    if (typeof doc.file_id !== "string" || !doc.file_id || doc.file_id.length > 512) return { unsupported: "That document did not include a usable Telegram file reference. Please send the Selar receipt again as a photo or PDF/image document." };
+    const fileSize = receiptFileSize(doc.file_size);
+    if (fileSize !== null && fileSize > maxBytes) return { unsupported: "That receipt document is too large for the bot to forward safely. Please send a smaller PDF/image document or a photo." };
+    const mimeType = typeof doc.mime_type === "string" ? doc.mime_type.toLowerCase().split(";", 1)[0].trim().slice(0, 100) : "";
+    const extension = (typeof doc.file_name === "string" ? doc.file_name.toLowerCase().match(/\.([a-z0-9]{1,10})$/)?.[1] : "") || "";
+    const allowedMime = new Set(["application/pdf", "image/jpeg", "image/png", "image/webp"]);
+    const allowedExtension = new Set(["pdf", "jpg", "jpeg", "png", "webp"]);
+    const genericMime = !mimeType || mimeType === "application/octet-stream";
+    if (!allowedMime.has(mimeType) && !(genericMime && allowedExtension.has(extension))) {
+      return { unsupported: "I can forward a Selar receipt only as a Telegram photo or a PDF, JPG, PNG, or WebP document. Please send one of those formats; do not send archives or other files." };
+    }
+    const inferredMime = mimeType || (extension === "pdf" ? "application/pdf" : extension === "png" ? "image/png" : extension === "webp" ? "image/webp" : "image/jpeg");
+    return { media: { kind: "document", fileId: doc.file_id, fileUniqueId: typeof doc.file_unique_id === "string" ? doc.file_unique_id.slice(0, 512) : null, mimeType: inferredMime, fileSize } };
+  }
+  return {};
+}
+
+function receiptContextValue(value: unknown, fallback: string, maxLength: number): string {
+  const clean = String(value || "").trim().replace(/\s+/g, " ").slice(0, maxLength);
+  return clean || fallback;
+}
+
+function receiptAdminCaption(order: CustomerOrder, submissionId: string): string {
+  const verifyCommand = order.kind === "contact"
+    ? `/verify ${order.id} EXACT_SELAR_REFERENCE`
+    : `/verifyservice ${order.id} EXACT_SELAR_REFERENCE`;
+  const username = receiptContextValue(order.telegram_username, "", 64).replace(/^@+/, "");
+  const caption = [
+    "<b>Selar receipt submitted for manual review</b>",
+    `Submission: <code>${esc(submissionId)}</code>`,
+    `Type: ${order.kind === "contact" ? "Contact request" : "Service order"}`,
+    `Order: <code>${esc(order.id)}</code>`,
+    `${order.kind === "contact" ? "Profile" : "Service"}: <code>${esc(receiptContextValue(order.target_id, "unknown", 100))}</code>`,
+    `Checkout code: <code>${esc(receiptContextValue(order.checkout_code, "not recorded", 32))}</code>`,
+    `Checkout name: ${esc(receiptContextValue(order.checkout_name, "not recorded", 120))}`,
+    `Saved buyer email clue: ${esc(receiptContextValue(order.buyer_email, "not recorded", 160))}`,
+    `Telegram user: <code>${esc(order.telegram_user_id)}</code>${username ? ` (@${esc(username)})` : ""}`,
+    "",
+    "No matching backend sale was attached when this fallback was used. The receipt is customer-supplied evidence only and has NOT changed the order status.",
+    "Check the payment in Selar. Only if it is genuinely paid, use:",
+    `<code>${esc(verifyCommand)}</code>`
+  ].join("\n");
+  if (caption.length <= 1024) return caption;
+
+  // HTML escaping can expand customer-provided clues. Telegram media captions
+  // are limited to 1024 characters, so retain the identifiers and command the
+  // administrator needs and omit the longer reconciliation clues.
+  return [
+    "<b>Selar receipt submitted for manual review</b>",
+    `Submission: <code>${esc(submissionId)}</code>`,
+    `Order: <code>${esc(order.id)}</code>`,
+    `Checkout code: <code>${esc(receiptContextValue(order.checkout_code, "not recorded", 32))}</code>`,
+    `Telegram user: <code>${esc(order.telegram_user_id)}</code>`,
+    "Receipt evidence only; order status unchanged. Check Selar, then only if genuinely paid use:",
+    `<code>${esc(verifyCommand)}</code>`
+  ].join("\n");
+}
+
+async function findDuplicateReceiptSubmission(e: Env, user: string, order: CustomerOrder, messageId: number | null, media: ReceiptMedia): Promise<ReceiptSubmission | null> {
+  if (messageId !== null) {
+    const byMessage = await e.DB.prepare("SELECT id,order_id,status FROM payment_receipt_submissions WHERE telegram_user_id=? AND telegram_message_id=? LIMIT 1").bind(user, messageId).first<ReceiptSubmission>();
+    if (byMessage) return byMessage;
+  }
+  if (media.fileUniqueId) {
+    return e.DB.prepare("SELECT id,order_id,status FROM payment_receipt_submissions WHERE order_id=? AND telegram_file_unique_id=? LIMIT 1").bind(order.id, media.fileUniqueId).first<ReceiptSubmission>();
+  }
+  return null;
+}
+
+async function handleReceiptMedia(e: Env, m: Msg, preliminaryOrder: CustomerOrder) {
+  const chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
+  if (chat !== user) return say(e, chat, "For privacy, please send payment receipts only in your private chat with this bot.");
+  const order = await loadCustomerOrderById(e, preliminaryOrder.id) || preliminaryOrder;
+  if (String(order.telegram_user_id) !== user) return say(e, chat, "I can't attach that receipt to an order belonging to another Telegram account.");
+  if (order.status !== "pending_payment") return handlePaidClaim(e, chat, user, order);
+  if (!String(order.checkout_name || "").trim()) return handlePaidClaim(e, chat, user, order);
+
+  // Re-check immediately before accepting the receipt: the existing Selar Zap
+  // may have attached a sale after the customer was prompted.
+  if (await attachedSaleReference(e, order)) return handlePaidClaim(e, chat, user, order);
+  if (!e.ADMIN_TELEGRAM_ID) {
+    return say(e, chat, "Receipt review is not configured yet, so I can't forward that receipt. Your order remains pending; please contact support rather than sending credentials or bank details here.");
+  }
+
+  const extracted = extractReceiptMedia(m);
+  if (!extracted.media) {
+    await e.DB.prepare("INSERT OR REPLACE INTO receipt_review_prompts(telegram_user_id,order_id,order_kind) VALUES(?,?,?)").bind(user, order.id, order.kind).run();
+    return say(e, chat, extracted.unsupported || "Please send your Selar receipt as a Telegram photo or as a PDF/JPG/PNG/WebP document.");
+  }
+  const media = extracted.media;
+  const forwarded = await forwardedReceiptForOrder(e, order.id);
+  if (forwarded) {
+    await clearPaymentPrompts(e, user, order.id);
+    return say(e, chat, "Your receipt has already been forwarded to the administrator for manual review. You do not need to send it again. Your order remains pending until the administrator checks Selar and verifies the payment manually.");
+  }
+
+  // A forwarding row left behind by a process interruption can be retried after
+  // a short interval; a fresh one means a duplicate update is already in flight.
+  await e.DB.prepare("UPDATE payment_receipt_submissions SET status='superseded',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE order_id=? AND status='forwarding' AND updated_at<strftime('%Y-%m-%dT%H:%M:%fZ','now','-2 minutes')").bind(order.id).run();
+  const messageId = Number.isSafeInteger(m.message_id) && Number(m.message_id) > 0 ? Number(m.message_id) : null;
+  let submission = await findDuplicateReceiptSubmission(e, user, order, messageId, media);
+  let submissionId = "";
+  if (!submission) {
+    const inFlight = await e.DB.prepare("SELECT id,order_id,status FROM payment_receipt_submissions WHERE order_id=? AND status='forwarding' LIMIT 1").bind(order.id).first<ReceiptSubmission>();
+    if (inFlight) return say(e, chat, "Your receipt is already being forwarded. Please wait a moment rather than sending it again.");
+    submissionId = crypto.randomUUID();
+    try {
+      await e.DB.prepare("INSERT INTO payment_receipt_submissions(id,order_id,order_kind,telegram_user_id,telegram_chat_id,telegram_message_id,media_kind,telegram_file_id,telegram_file_unique_id,mime_type,file_size,status,admin_telegram_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,'forwarding',?)")
+        .bind(submissionId, order.id, order.kind, user, chat, messageId, media.kind, media.fileId, media.fileUniqueId, media.mimeType, media.fileSize, e.ADMIN_TELEGRAM_ID).run();
+    } catch (err) {
+      if (!/unique|constraint/i.test(err instanceof Error ? err.message : String(err))) throw err;
+      submission = await findDuplicateReceiptSubmission(e, user, order, messageId, media);
+      if (!submission) throw err;
+    }
+  }
+  if (submission) {
+    if (submission.status === "forwarded") {
+      await clearPaymentPrompts(e, user, order.id);
+      return say(e, chat, "That receipt has already been forwarded to the administrator for manual review. You do not need to send it again.");
+    }
+    if (submission.status === "forwarding") return say(e, chat, "That receipt is already being forwarded. Please wait a moment rather than sending it again.");
+    const claimed = await e.DB.prepare("UPDATE payment_receipt_submissions SET status='forwarding',admin_telegram_id=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status IN('delivery_failed','superseded')").bind(e.ADMIN_TELEGRAM_ID, submission.id).run();
+    if (!claimed.meta?.changes) {
+      const latestSubmission = await e.DB.prepare("SELECT id,order_id,status FROM payment_receipt_submissions WHERE id=?").bind(submission.id).first<ReceiptSubmission>();
+      if (latestSubmission?.status === "forwarded") {
+        await clearPaymentPrompts(e, user, order.id);
+        return say(e, chat, "That receipt has already been forwarded to the administrator for manual review. You do not need to send it again.");
+      }
+      return say(e, chat, "That receipt is already being processed. Please wait a moment before trying again.");
+    }
+    submissionId = submission.id;
+  }
+
+  const latestOrder = await loadCustomerOrderById(e, order.id) || order;
+  if (latestOrder.status !== "pending_payment" || await attachedSaleReference(e, latestOrder)) {
+    await e.DB.prepare("UPDATE payment_receipt_submissions SET status='superseded',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='forwarding'").bind(submissionId).run();
+    return handlePaidClaim(e, chat, user, latestOrder);
+  }
+
+  try {
+    const payload: Record<string, unknown> = {
+      chat_id: e.ADMIN_TELEGRAM_ID,
+      caption: receiptAdminCaption(latestOrder, submissionId),
+      parse_mode: "HTML"
+    };
+    payload[media.kind] = media.fileId;
+    await tg(e, media.kind === "photo" ? "sendPhoto" : "sendDocument", payload);
+  } catch {
+    await e.DB.prepare("UPDATE payment_receipt_submissions SET status='delivery_failed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='forwarding'").bind(submissionId).run();
+    await e.DB.prepare("INSERT OR REPLACE INTO receipt_review_prompts(telegram_user_id,order_id,order_kind) VALUES(?,?,?)").bind(user, latestOrder.id, latestOrder.kind).run();
+    console.error("Receipt forwarding failed");
+    return say(e, chat, "I couldn't forward that receipt to the administrator just now. Your order remains pending and nothing was marked paid. Please send the same Selar receipt again in a moment.");
+  }
+
+  await e.DB.prepare("UPDATE payment_receipt_submissions SET status='forwarded',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='forwarding'").bind(submissionId).run();
+  await clearPaymentPrompts(e, user, latestOrder.id);
+  return say(e, chat, "Thanks — your Selar receipt has been forwarded to the administrator with your order details for manual review. This does <b>not</b> mark your order paid or verified. The administrator must check Selar first, and contact details or fulfilment are only released through the existing manual process.");
+}
+
 async function start(e: Env, m: Msg, payload: string) {
   const chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id), rawId = payload.replace(/^contact_/, "");
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(rawId)) return say(e, chat, "Invalid profile link. Open the Message button directly from FansLeak.");
@@ -219,7 +537,28 @@ async function startService(e: Env, m: Msg, serviceId: string) {
 }
 
 async function message(e: Env, m: Msg) {
-  const t = (m.text || "").trim(), chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
+  let t = (m.text || "").trim();
+  const caption = (m.caption || "").trim(), chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
+  const hasReceiptCandidateMedia = Boolean((Array.isArray(m.photo) && m.photo.length > 0) || m.document);
+  if (hasReceiptCandidateMedia) {
+    const receiptPrompt = await e.DB.prepare("SELECT order_id,order_kind FROM receipt_review_prompts WHERE telegram_user_id=?").bind(user).first<any>();
+    let order = receiptPrompt ? await loadCustomerOrderById(e, String(receiptPrompt.order_id)) : null;
+    if (receiptPrompt && (!order || String(order.telegram_user_id) !== user)) {
+      await e.DB.prepare("DELETE FROM receipt_review_prompts WHERE telegram_user_id=?").bind(user).run();
+      return say(e, chat, "That receipt prompt no longer matches a current order for this Telegram account, so I did not forward the file. Start from the profile or service page if you need to begin again.");
+    }
+    if (!order && user !== e.ADMIN_TELEGRAM_ID) {
+      // The admin may also own a test/customer order, but unsolicited admin
+      // media is not treated as a receipt without an explicit prompt.
+      const candidate = await findCustomerOrderForPaidClaim(e, user);
+      if (candidate?.status === "pending_payment") order = candidate;
+    }
+    if (order) return handleReceiptMedia(e, m, order);
+    if (!caption) return;
+    // A captioned image for a service still being described can continue through
+    // the existing text flow; it is not treated as a payment receipt.
+    t = caption;
+  }
   if (!t) return;
   if (t.startsWith("/start")) {
     const arg = t.split(/\s+/, 2)[1] || "";
@@ -305,6 +644,7 @@ async function message(e: Env, m: Msg) {
       "/enablecontact PROFILE_ID — record that the creator explicitly authorised sharing",
       "/disablecontact PROFILE_ID — revoke sharing consent immediately",
       "",
+      "If a customer says they paid and no backend sale is attached, the bot may forward their Selar receipt here with the order context and exact /verify command. A receipt is evidence only and never changes payment status by itself.",
       "Payments are never verified automatically. Contact details are only sent after manual payment verification, your approval, and recorded creator consent."
     ].join("\n"));
   }
@@ -345,6 +685,15 @@ async function message(e: Env, m: Msg) {
     return say(e, chat, "Payment manually verified for contact request <code>" + esc(oid) + "</code>. It still needs your final approval (and recorded creator consent) before any contact details are sent.", { inline_keyboard: [[{ text: "Approve & send contact", callback_data: "approve:" + oid }, { text: "Reject", callback_data: "reject:" + oid }]] });
   }
 
+  if (isPaidClaimText(t)) {
+    const order = await findCustomerOrderForPaidClaim(e, user);
+    const claimedCode = codeInName(t);
+    if (claimedCode && order?.checkout_code && order.checkout_code !== claimedCode) {
+      return say(e, chat, "That order code doesn't match the current request or order for this Telegram account. I did not check or change any other customer's order. Please use the code shown by the bot for your own checkout.");
+    }
+    return handlePaidClaim(e, chat, user, order);
+  }
+
   const serviceOrder = await e.DB.prepare("SELECT id,status,request_text,checkout_code FROM service_orders WHERE telegram_user_id=? AND status='awaiting_request' ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
   if (serviceOrder) {
     if (/^\/?(pay|checkout|ready to pay)$/i.test(t)) {
@@ -357,10 +706,11 @@ async function message(e: Env, m: Msg) {
       const markup = {
         inline_keyboard: [
           [{ text: "Open Service Checkout ↗️", url: checkout.toString() }],
-          [{ text: "Done — I have completed checkout", callback_data: `done:${serviceOrder.id}` }]
+          [{ text: "Done — I have completed checkout", callback_data: `done:${serviceOrder.id}` }],
+          [{ text: "I've paid — check for my sale", callback_data: `paid:${serviceOrder.id}` }]
         ]
       };
-      return say(e, chat, "Open the Selar checkout below. In the name field, enter your full name followed by this code exactly: <code>" + esc(serviceOrder.checkout_code) + "</code>. Example: <code>Joseph Unaogu " + esc(serviceOrder.checkout_code) + "</code>\n\nAfter completing checkout on Selar, return here and tap Done below to confirm. If matching later needs help, you can send your email as a fallback clue.", markup);
+      return say(e, chat, "Open the Selar checkout below. In the name field, enter your full name followed by this code exactly: <code>" + esc(serviceOrder.checkout_code) + "</code>. Example: <code>Joseph Unaogu " + esc(serviceOrder.checkout_code) + "</code>\n\nAfter completing checkout on Selar, return here and tap Done or “I've paid” below. The bot first checks for an existing backend sale record; only if none is attached will it ask you to forward your Selar receipt for manual review. If matching later needs help, you can send your email as a fallback clue.", markup);
     }
     if (t.length < 2 || t.length > 2000) return say(e, chat, "Please send a message between 2 and 2,000 characters.");
     const previous = String(serviceOrder.request_text || "");
@@ -392,11 +742,13 @@ async function message(e: Env, m: Msg) {
     const fullName = t.replace(new RegExp("\\s*" + code + "\\s*$", "i"), "").trim();
     if (fullName.length < 2) return say(e, chat, "Please include your full name before the code, for example: Joseph Unaogu " + code + ".");
     const table = prompt.order_kind === "contact" ? "contact_requests" : "service_orders";
-    const order = await e.DB.prepare(`SELECT id,checkout_code,status FROM ${table} WHERE id=? AND telegram_user_id=?`).bind(prompt.order_id, user).first<any>();
-    if (!order || order.status !== "pending_payment" || order.checkout_code !== code) return say(e, chat, "That code doesn't match your pending order. Please copy the exact code shown by the bot and try again.");
-    await e.DB.prepare(`UPDATE ${table} SET checkout_name=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND telegram_user_id=? AND status='pending_payment'`).bind(fullName, order.id, user).run();
+    const targetColumn = prompt.order_kind === "contact" ? "profile_id" : "service_id";
+    const rawOrder = await e.DB.prepare(`SELECT id,telegram_user_id,telegram_chat_id,telegram_username,${targetColumn} AS target_id,buyer_email,status,payment_method,payment_reference,checkout_code,checkout_name,created_at FROM ${table} WHERE id=? AND telegram_user_id=?`).bind(prompt.order_id, user).first<any>();
+    if (!rawOrder || rawOrder.status !== "pending_payment" || rawOrder.checkout_code !== code) return say(e, chat, "That code doesn't match your pending order. Please copy the exact code shown by the bot and try again.");
+    await e.DB.prepare(`UPDATE ${table} SET checkout_name=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND telegram_user_id=? AND status='pending_payment'`).bind(fullName, rawOrder.id, user).run();
     await e.DB.prepare("DELETE FROM checkout_name_prompts WHERE telegram_user_id=?").bind(user).run();
-    return say(e, chat, "Thanks. Your name and order code match. This does not confirm payment; the bot waits for Selar's sale event, and the admin checks payment manually.");
+    const order: CustomerOrder = { kind: prompt.order_kind === "contact" ? "contact" : "service", ...rawOrder, checkout_name: fullName };
+    return handlePaidClaim(e, chat, user, order, { nameJustRecorded: true });
   }
   const submittedCode = codeInName(t);
   if (submittedCode) return say(e, chat, "To submit your checkout name, tap Done on your checkout instructions first.");
@@ -423,18 +775,25 @@ async function message(e: Env, m: Msg) {
 }
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
-  if (data.startsWith("done:")) {
+  if (data.startsWith("done:") || data.startsWith("paid:")) {
     if (!u.message || String(u.message.chat.id) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Open the bot chat to continue." });
-    const id = data.slice(5);
-    const contact = await e.DB.prepare("SELECT id,status,telegram_user_id,checkout_code,checkout_name FROM contact_requests WHERE id=?").bind(id).first<any>();
-    const service = await e.DB.prepare("SELECT id,status,telegram_user_id,checkout_code,checkout_name FROM service_orders WHERE id=?").bind(id).first<any>();
-    const order = contact || service;
-    if (!order || String(order.telegram_user_id) !== actor || order.status !== "pending_payment") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "This order is not waiting for checkout-name confirmation." });
-    if (order.checkout_name) return say(e, actor, "Your checkout name and code have already been matched. Payment still needs to be checked manually.");
-    const kind = contact ? "contact" : "service";
-    await e.DB.prepare("INSERT OR REPLACE INTO checkout_name_prompts(telegram_user_id,order_id,order_kind) VALUES(?,?,?)").bind(actor, id, kind).run();
-    await say(e, actor, "Please send the exact full name you used in Selar's name field, including the code. Example: <code>Joseph Unaogu " + esc(order.checkout_code) + "</code>. This does not confirm payment; it only helps match the sale to the correct request.");
-    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Send your checkout name and code." });
+    const id = data.slice(data.indexOf(":") + 1);
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Invalid order reference." });
+    const order = await loadCustomerOrderById(e, id);
+    if (!order || String(order.telegram_user_id) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "This order is not available for this Telegram account." });
+    const outcome = await handlePaidClaim(e, actor, actor, order);
+    const callbackText = outcome === "name_needed"
+      ? "Send your checkout name and code."
+      : outcome === "sale_found"
+        ? "Sale record found. Manual verification is still required."
+        : outcome === "receipt_needed"
+          ? "No sale record found. Send your Selar receipt."
+          : outcome === "receipt_already_forwarded"
+            ? "Your receipt is already with the administrator."
+            : outcome === "verified"
+              ? "Payment has already been manually verified."
+              : "Payment check complete.";
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: callbackText });
   }
   if (data.startsWith("pay_")) {
     if (!u.message || String(u.message.chat.id) !== actor) {
@@ -453,10 +812,11 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       const markup = {
         inline_keyboard: [
           [{ text: "Open Selar Checkout ↗️", url: checkout.toString() }],
-          [{ text: "Done — I have completed checkout", callback_data: `done:${id}` }]
+          [{ text: "Done — I have completed checkout", callback_data: `done:${id}` }],
+          [{ text: "I've paid — check for my sale", callback_data: `paid:${id}` }]
         ]
       };
-      await say(e, r.telegram_chat_id, `Open the Selar checkout here: ${checkout.toString()}\n\nIn the customer name field, enter your full name followed by this code exactly: <code>${esc(r.checkout_code || "")}</code>\nExample: <code>Joseph Unaogu ${esc(r.checkout_code || "FL-7K4P9A")}</code>\n\nAfter paying, return here and tap Done below to confirm.\n\nThe admin checks payment manually; this does not confirm payment immediately. If matching later needs help, send your email as a fallback clue.`, markup);
+      await say(e, r.telegram_chat_id, `Open the Selar checkout here: ${checkout.toString()}\n\nIn the customer name field, enter your full name followed by this code exactly: <code>${esc(r.checkout_code || "")}</code>\nExample: <code>Joseph Unaogu ${esc(r.checkout_code || "FL-7K4P9A")}</code>\n\nAfter paying, return here and tap Done or “I've paid” below. The bot first checks for an existing backend sale record; only if none is attached will it ask you to forward your Selar receipt for manual review.\n\nThe admin checks payment manually; this does not confirm payment immediately. If matching later needs help, send your email as a fallback clue.`, markup);
     }
     await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Selar checkout instructions sent." }); return;
   }

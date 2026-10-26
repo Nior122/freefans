@@ -73,6 +73,14 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0005_one_active_request_per_user.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0006_receipt_review',
+    description: 'Manual receipt-review prompt and idempotent submission tracking tables',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0006_receipt_review.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
@@ -194,6 +202,15 @@ export const EXPECTED_SCHEMA = {
   ],
   checkout_name_prompts: [
     'telegram_user_id', 'order_id', 'order_kind', 'created_at'
+  ],
+  receipt_review_prompts: [
+    'telegram_user_id', 'order_id', 'order_kind', 'created_at'
+  ],
+  payment_receipt_submissions: [
+    'id', 'order_id', 'order_kind', 'telegram_user_id', 'telegram_chat_id',
+    'telegram_message_id', 'media_kind', 'telegram_file_id',
+    'telegram_file_unique_id', 'mime_type', 'file_size', 'status',
+    'admin_telegram_id', 'created_at', 'updated_at'
   ]
 };
 
@@ -201,7 +218,9 @@ export const EXPECTED_UNIQUE_INDEXES = [
   { table: 'contact_requests', name: 'idx_contact_requests_checkout_code' },
   { table: 'service_orders', name: 'idx_service_orders_checkout_code' },
   { table: 'contact_requests', name: 'idx_contact_requests_one_active_per_user' },
-  { table: 'service_orders', name: 'idx_service_orders_one_active_per_user' }
+  { table: 'service_orders', name: 'idx_service_orders_one_active_per_user' },
+  { table: 'payment_receipt_submissions', name: 'idx_payment_receipt_submissions_telegram_message' },
+  { table: 'payment_receipt_submissions', name: 'idx_payment_receipt_submissions_order_file' }
 ];
 
 /**
