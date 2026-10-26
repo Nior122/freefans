@@ -793,7 +793,7 @@ async function message(e: Env, m: Msg) {
       return say(e, chat, "Thanks — your email has been saved as a fallback reconciliation clue. It is only used if the admin needs to match a payment manually, and it does not verify payment.");
     }
   }
-  return aiReply(e, chat, t, "To start a contact request, open a profile on FansLeak and tap its Message button. Payment always requires admin verification and approval.");
+  return aiReply(e, chat, t, "👋 I'm here to help with your FansLeak requests, payment status, and next steps. You can ask me a question any time. If you've paid, say “I've paid — check again” and I'll re-check the available sale records. Payments still require admin verification and approval. 💬");
 }
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
