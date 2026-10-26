@@ -870,6 +870,13 @@ async function message(e: Env, m: Msg) {
       const missing=cat.filter((p:any)=>{const c:any=saved.get(p.id);return !(c && c.sharing_enabled===1 && c.consent_confirmed_at && c.contact_value);}).slice(0,25);
       return say(e,chat,"<b>🛡️ Profiles without confirmed sharing permission</b>\n"+(missing.map((p:any)=>"• "+esc(p.name)+" (<code>"+esc(p.id)+"</code>)").join("\n")||"All listed profiles have a saved contact and recorded sharing authorization."));
     }
+    const deliveryCode=t.match(/\bFL-[A-Z0-9]{6}\b/i);
+    if(deliveryCode && (intent.includes("deliver") || intent.includes("fulfil") || intent.includes("fulfill"))) {
+      const row=await e.DB.prepare("SELECT id,profile_id,status,checkout_code,payment_reference FROM contact_requests WHERE checkout_code=?").bind(deliveryCode[0].toUpperCase()).first<any>();
+      if(!row) return say(e,chat,"No contact request found for <code>"+esc(deliveryCode[0].toUpperCase())+"</code>.");
+      if(row.status!=="payment_verified") return say(e,chat,"Request <code>"+esc(row.checkout_code)+"</code> is currently <b>"+esc(row.status)+"</b>. Delivery preparation requires manual payment verification first.");
+      return say(e,chat,"📝 <b>Prepare delivery</b>\nRequest: <code>"+esc(row.id)+"</code>\nCode: <code>"+esc(row.checkout_code)+"</code>\nProfile: "+esc(row.profile_id)+"\n\nTap below to open the consent-gated draft composer. No customer message is sent until you preview and confirm.",{inline_keyboard:[[ {text:"📝 Prepare delivery",callback_data:"approve:"+row.id} ]]});
+    }
     const codeMatch=t.match(/\bFL-[A-Z0-9]{6}\b/i);
     if (codeMatch && (intent.includes("find") || intent.includes("request") || intent.includes("status"))) {
       const row=await e.DB.prepare("SELECT id,profile_id,status,checkout_code,payment_reference FROM contact_requests WHERE checkout_code=?").bind(codeMatch[0].toUpperCase()).first<any>();
