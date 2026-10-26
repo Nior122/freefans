@@ -1042,9 +1042,12 @@ async function selar(request: Request, e: Env) {
       return json({ ok: true, matched: false, reason: code ? "no_unique_code_or_full_name_match" : "missing_code_and_full_name" });
     }
 
+    // Normalize in application code so repeated whitespace and case are handled
+    // consistently. Fetch all eligible pending candidates so a LIMIT cannot hide
+    // a second exact-name match and accidentally make an ambiguous name look unique.
     const nameRows = kind === "contact"
-      ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE status='pending_payment' AND payment_method='selar' AND lower(trim(checkout_name))=? LIMIT 2").bind(fullName).all<any>()
-      : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name FROM service_orders WHERE status='pending_payment' AND lower(trim(checkout_name))=? LIMIT 2").bind(fullName).all<any>();
+      ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE status='pending_payment' AND payment_method='selar' AND checkout_name IS NOT NULL").all<any>()
+      : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name FROM service_orders WHERE status='pending_payment' AND checkout_name IS NOT NULL").all<any>();
     const exactNameRows = nameRows.results.filter((row: any) => row.checkout_name && normName(row.checkout_name) === fullName);
     if (exactNameRows.length !== 1) {
       return json({ ok: true, matched: false, reason: exactNameRows.length > 1 ? "ambiguous_full_name_match" : "no_unique_code_or_full_name_match" });
