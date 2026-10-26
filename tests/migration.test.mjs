@@ -32,7 +32,8 @@ test('Migration: fresh database migrates to fully verified schema', () => {
     '0003_abandoned_carts',
     '0004_checkout_codes',
     '0005_one_active_request_per_user',
-    '0006_receipt_review'
+    '0006_receipt_review',
+    '0007_front_desk_multi_requests'
   ]);
 
   const verified = verifySchema(db);
@@ -103,7 +104,7 @@ test('Migration: partially migrated database with existing prompts table but mis
   assert.equal(verified.ok, true);
 });
 
-test('Migration 0005: database rejects a second active request for the same user', () => {
+test('Migration 0007: contact users can keep multiple unpaid requests while service orders stay single-active', () => {
   const db = new DatabaseSync(':memory:');
   applyAllMigrations(db);
 
@@ -112,14 +113,12 @@ test('Migration 0005: database rejects a second active request for the same user
   ).run(id, user, user, 'anaimiya', status);
 
   insertContact('req-active-1', '7001', 'pending_payment');
-  assert.throws(
-    () => insertContact('req-active-2', '7001', 'payment_verified'),
-    /UNIQUE constraint failed/i,
-    'Second active contact request for one user must be rejected by the database'
-  );
-  // Non-active rows and other users are unaffected.
+  insertContact('req-active-2', '7001', 'pending_payment');
+  insertContact('req-active-3', '7001', 'pending_payment');
+  const count = db.prepare("SELECT COUNT(*) AS count FROM contact_requests WHERE telegram_user_id='7001' AND status='pending_payment'").get();
+  assert.equal(count.count, 3, 'Multiple pending contact requests must be allowed; the Worker enforces the three-request cap');
   insertContact('req-done-1', '7001', 'approved');
-  insertContact('req-active-3', '7002', 'pending_payment');
+  insertContact('req-active-4', '7002', 'pending_payment');
 
   db.prepare("INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status) VALUES ('svc-1','svc','7003','7003','pending_payment')").run();
   assert.throws(

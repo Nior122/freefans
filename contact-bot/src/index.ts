@@ -150,9 +150,10 @@ async function catalogue(e: Env): Promise<Profile[]> {
     .map(p => ({ id: p.id, name: p.name.slice(0, 120) }));
 }
 function paymentKeyboard(e: Env, id: string) {
-  const buttons: Record<string, unknown>[] = [];
-  if (enabledMethods(e).includes("selar")) buttons.push({ text: "Pay with Selar", callback_data: `pay_selar:${id}` });
-  return { inline_keyboard: buttons.map(b => [b]) };
+  const rows: Record<string, unknown>[][] = [];
+  if (enabledMethods(e).includes("selar")) rows.push([{ text: "💳 Pay with Selar", callback_data: `pay_selar:${id}` }]);
+  rows.push([{ text: "🔎 I've paid — check again", callback_data: `paid:${id}` }]);
+  return { inline_keyboard: rows };
 }
 
 async function loadCustomerOrderById(e: Env, id: string): Promise<CustomerOrder | null> {
@@ -190,7 +191,10 @@ async function forwardedReceiptForOrder(e: Env, orderId: string): Promise<Receip
 
 function isPaidClaimText(text: string): boolean {
   const withoutCode = text.replace(/\bFL-[A-Z0-9]{6}\b/i, "").trim().replace(/\s+/g, " ");
-  return /^\/?(paid|i(?:\s+have|\s+already)?\s+paid|i['’]ve\s+paid|already\s+paid|payment\s+(?:is\s+)?(?:done|made|completed|complete|successful|sent)|checkout\s+(?:is\s+)?(?:done|completed|complete)|done\s+paying)[.!]*$/i.test(withoutCode);
+  // Natural follow-ups such as "I paid, please check again" trigger a fresh
+  // database reconciliation check rather than falling through to generic chat.
+  return /^\/?(?:paid|done|i(?:\s+have|\s+already)?\s+paid|i['’]ve\s+paid|already\s+paid|payment\s+(?:is\s+)?(?:done|made|completed|complete|successful|sent)|checkout\s+(?:is\s+)?(?:done|completed|complete)|done\s+paying)(?:[.!?\s,;:-]+(?:please\s+)?(?:check(?:\s+again)?|recheck|verify|look\s+again|my\s+payment|the\s+payment|for\s+my\s+sale|again))*[.!?]*$/i.test(withoutCode)
+    || /\b(?:i\s+(?:have\s+|already\s+)?paid|i['’]?ve paid|payment (?:is )?(?:done|completed|successful))\b.*\b(?:check|recheck|again|verify|payment|sale)\b/i.test(withoutCode);
 }
 
 async function promptForReceiptReview(e: Env, chat: string, user: string, order: CustomerOrder, prefix = ""): Promise<string> {
@@ -454,8 +458,15 @@ async function start(e: Env, m: Msg, payload: string) {
   }
   const activeService = await e.DB.prepare("SELECT id FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
   if (activeService) return say(e, chat, "You already have a service purchase in progress. Finish it or contact support before starting a contact request.");
-  const active = await e.DB.prepare("SELECT id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
-  if (active) return say(e, chat, "You already have a request in progress. Finish it or contact support before starting another.");
+  // Up to three unpaid contact requests are allowed per Telegram account.
+  // A verified payment frees a slot; open requests never block conversation.
+  const outstanding = await e.DB.prepare("SELECT COUNT(*) AS count FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment')").bind(user).first<any>();
+  const outstandingCount = Number(outstanding?.count || 0);
+  if (outstandingCount >= 3) {
+    const rows = await e.DB.prepare("SELECT id,checkout_code FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment') ORDER BY created_at DESC LIMIT 3").bind(user).all<any>();
+    const keyboard = { inline_keyboard: (rows.results || []).map(r => [{ text: `🔎 Check ${String(r.checkout_code || "request")}`, callback_data: `paid:${r.id}` }]) };
+    return say(e, chat, "👋 You have 3 contact requests awaiting payment. You can still chat with me and check any request below. Once a payment is manually verified by our admin, that request no longer counts toward your three unpaid requests. 💬", keyboard);
+  }
   const requestId = crypto.randomUUID();
   let code = "";
   let inserted = false;
@@ -475,7 +486,7 @@ async function start(e: Env, m: Msg, payload: string) {
       // way, never send a success message for a request that was not stored.
       let raced: unknown = null;
       try { raced = await e.DB.prepare("SELECT id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first(); } catch { /* fall through to the failure message below */ }
-      if (raced) return say(e, chat, "You already have a request in progress. Finish it or contact support before starting another.");
+      if (raced) return say(e, chat, "👋 I found an existing request, but couldn't create another one just now. You can still chat with me or tap Check payment on an earlier request. Please try again shortly. 💬");
     }
   }
   if (!inserted) return say(e, chat, "I couldn't start your request just now. Please try again in a moment.");
@@ -485,16 +496,27 @@ async function start(e: Env, m: Msg, payload: string) {
 }
 
 async function aiReply(e: Env, chat: string, userText: string, reminder = "") {
-  if (!e.AI) return say(e, chat, reminder || "I can help with FansLeak profile contact requests, payment steps, and general questions.");
+  if (!e.AI) return say(e, chat, reminder || "👋 I'm the FansLeak front-desk assistant. I can help with your requests, payment checks, and next steps. What can I help you with?");
   try {
+    // Supply read-only context from this customer's own request history. The
+    // model cannot execute SQL/admin actions; payment checks are deterministic.
+    let history = "Request history unavailable.";
+    try {
+      const contacts = await e.DB.prepare("SELECT checkout_code,status,profile_id,created_at,payment_reference FROM contact_requests WHERE telegram_user_id=? ORDER BY created_at DESC LIMIT 3").bind(chat).all<any>();
+      const services = await e.DB.prepare("SELECT checkout_code,status,service_id AS target_id,created_at,payment_reference FROM service_orders WHERE telegram_user_id=? ORDER BY created_at DESC LIMIT 2").bind(chat).all<any>();
+      history = JSON.stringify({
+        contactRequests: (contacts.results || []).map(r => ({ code: r.checkout_code || null, status: r.status, profileId: r.profile_id, createdAt: r.created_at, saleReferenceAttached: Boolean(r.payment_reference) })),
+        serviceOrders: (services.results || []).map(r => ({ code: r.checkout_code || null, status: r.status, serviceId: r.target_id, createdAt: r.created_at, saleReferenceAttached: Boolean(r.payment_reference) }))
+      });
+    } catch { /* allow a conversation even if history is unavailable */ }
     const result = await e.AI.run(e.AI_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
       messages: [
-        { role: "system", content: "You are FansLeak's friendly customer-support assistant. Answer briefly in plain text without HTML markup. Explain profile contact requests, email, Selar payment, and admin review. Never claim payment is received or approved before actual verification. Never invent profile or creator information. Never reveal or invent any creator's Telegram username, phone number, or private contact details, even if asked." },
-        { role: "user", content: userText.slice(0, 1500) }
+        { role: "system", content: "You are FansLeak's warm, professional front-desk manager. Use a helpful human tone and a few appropriate emojis; never sound like a cold error message. You have read-only context about this Telegram customer's own request history. Explain statuses and next steps only from that context. If a request is pending, say the admin is reviewing/matching the payment only when the saved state supports it; never promise an ETA. Invite them to say 'I've paid — check again' to trigger a real database reconciliation check. You cannot execute commands, SQL, payment verification, approval, or delivery yourself; deterministic bot handlers perform permitted actions. Never claim payment received, verified, approved, or fulfilled unless the saved status says so. Never invent profile, payment, or creator information. Never reveal or invent a creator's Telegram username, phone number, or private contact details. Never ask for passwords, card PINs, bank credentials, or OTPs. Keep replies concise and plain text." },
+        { role: "user", content: `Customer message: ${userText.slice(0, 1500)}\\nRead-only request history: ${history.slice(0, 3500)}` }
       ]
     });
     const answer = String(result?.response || "").trim().slice(0, 3500);
-    return say(e, chat, answer ? esc(answer) + (reminder ? "\n\n" + reminder : "") : (reminder || "I couldn't answer that just now. Please try again shortly."));
+    return say(e, chat, answer ? esc(answer) + (reminder ? "\\n\\n" + reminder : "") : (reminder || "I couldn't answer that just now. Please try again shortly."));
   } catch (err) {
     console.error("AI support reply failed", String(err));
     return say(e, chat, reminder || "I can't answer that just now. Please try again shortly or contact the admin.");
@@ -706,8 +728,8 @@ async function message(e: Env, m: Msg) {
       const markup = {
         inline_keyboard: [
           [{ text: "Open Service Checkout ↗️", url: checkout.toString() }],
-          [{ text: "Done — I have completed checkout", callback_data: `done:${serviceOrder.id}` }],
-          [{ text: "I've paid — check for my sale", callback_data: `paid:${serviceOrder.id}` }]
+          [{ text: "✅ Done — checkout completed", callback_data: `done:${serviceOrder.id}` }],
+          [{ text: "🔎 I've paid — check again", callback_data: `paid:${serviceOrder.id}` }]
         ]
       };
       return say(e, chat, "Open the Selar checkout below. In the name field, enter your full name followed by this code exactly: <code>" + esc(serviceOrder.checkout_code) + "</code>. Example: <code>Joseph Unaogu " + esc(serviceOrder.checkout_code) + "</code>\n\nAfter completing checkout on Selar, return here and tap Done or “I've paid” below. The bot first checks for an existing backend sale record; only if none is attached will it ask you to forward your Selar receipt for manual review. If matching later needs help, you can send your email as a fallback clue.", markup);
@@ -771,7 +793,7 @@ async function message(e: Env, m: Msg) {
       return say(e, chat, "Thanks — your email has been saved as a fallback reconciliation clue. It is only used if the admin needs to match a payment manually, and it does not verify payment.");
     }
   }
-  return aiReply(e, chat, t, "To start a contact request, open a profile on FansLeak and tap its Message button. Payment always requires admin verification and approval.");
+  return aiReply(e, chat, t, "👋 I'm here to help with your FansLeak requests, payment status, and next steps. You can ask me a question any time. If you've paid, say “I've paid — check again” and I'll re-check the available sale records. Payments still require admin verification and approval. 💬");
 }
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
@@ -812,8 +834,8 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       const markup = {
         inline_keyboard: [
           [{ text: "Open Selar Checkout ↗️", url: checkout.toString() }],
-          [{ text: "Done — I have completed checkout", callback_data: `done:${id}` }],
-          [{ text: "I've paid — check for my sale", callback_data: `paid:${id}` }]
+          [{ text: "✅ Done — checkout completed", callback_data: `done:${id}` }],
+          [{ text: "🔎 I've paid — check again", callback_data: `paid:${id}` }]
         ]
       };
       await say(e, r.telegram_chat_id, `Open the Selar checkout here: ${checkout.toString()}\n\nIn the customer name field, enter your full name followed by this code exactly: <code>${esc(r.checkout_code || "")}</code>\nExample: <code>Joseph Unaogu ${esc(r.checkout_code || "FL-7K4P9A")}</code>\n\nAfter paying, return here and tap Done or “I've paid” below. The bot first checks for an existing backend sale record; only if none is attached will it ask you to forward your Selar receipt for manual review.\n\nThe admin checks payment manually; this does not confirm payment immediately. If matching later needs help, send your email as a fallback clue.`, markup);

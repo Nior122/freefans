@@ -81,6 +81,14 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0006_receipt_review.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0007_front_desk_multi_requests',
+    description: 'Allow up to three unpaid contact requests per Telegram user',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0007_front_desk_multi_requests.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
@@ -217,7 +225,6 @@ export const EXPECTED_SCHEMA = {
 export const EXPECTED_UNIQUE_INDEXES = [
   { table: 'contact_requests', name: 'idx_contact_requests_checkout_code' },
   { table: 'service_orders', name: 'idx_service_orders_checkout_code' },
-  { table: 'contact_requests', name: 'idx_contact_requests_one_active_per_user' },
   { table: 'service_orders', name: 'idx_service_orders_one_active_per_user' },
   { table: 'payment_receipt_submissions', name: 'idx_payment_receipt_submissions_telegram_message' },
   { table: 'payment_receipt_submissions', name: 'idx_payment_receipt_submissions_order_file' }
