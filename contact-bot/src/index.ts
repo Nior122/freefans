@@ -516,7 +516,7 @@ async function aiReply(e: Env, chat: string, userText: string, reminder = "") {
       ]
     });
     const answer = String(result?.response || "").trim().slice(0, 3500);
-    return say(e, chat, answer ? esc(answer) + (reminder ? "\\n\\n" + reminder : "") : (reminder || "I couldn't answer that just now. Please try again shortly."));
+    return say(e, chat, answer ? esc(answer) : (reminder || "I couldn't answer that just now. Please try again shortly."));
   } catch (err) {
     console.error("AI support reply failed", String(err));
     return say(e, chat, reminder || "I can't answer that just now. Please try again shortly or contact the admin.");
@@ -707,6 +707,8 @@ async function message(e: Env, m: Msg) {
     return say(e, chat, "Payment manually verified for contact request <code>" + esc(oid) + "</code>. It still needs your final approval (and recorded creator consent) before any contact details are sent.", { inline_keyboard: [[{ text: "Approve & send contact", callback_data: "approve:" + oid }, { text: "Reject", callback_data: "reject:" + oid }]] });
   }
 
+  if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/")) return say(e, chat, "I don't recognise that admin command. Open /admin for the button menu or /help for the available commands.");
+
   if (isPaidClaimText(t)) {
     const order = await findCustomerOrderForPaidClaim(e, user);
     const claimedCode = codeInName(t);
@@ -793,7 +795,7 @@ async function message(e: Env, m: Msg) {
       return say(e, chat, "Thanks — your email has been saved as a fallback reconciliation clue. It is only used if the admin needs to match a payment manually, and it does not verify payment.");
     }
   }
-  return aiReply(e, chat, t, "👋 I'm here to help with your FansLeak requests, payment status, and next steps. You can ask me a question any time. If you've paid, say “I've paid — check again” and I'll re-check the available sale records. Payments still require admin verification and approval. 💬");
+  return aiReply(e, chat, t);
 }
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
