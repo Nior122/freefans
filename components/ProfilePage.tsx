@@ -2,7 +2,6 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, Navigate, useNavigate } from 'react-router-dom';
 import {
   Star,
-  MessageSquare,
   Search,
   ChevronLeft,
   ChevronRight,
@@ -77,11 +76,6 @@ export const ProfilePage = () => {
   const REQUIRED_WAIT_MS = 4000; // 4 seconds
 
   const profile = profiles.find(p => p.id === id);
-  const telegramBotUsername = (import.meta.env.VITE_TELEGRAM_BOT_USERNAME || 'KasiQueenbot').trim().replace(/^@/, '');
-  // Telegram start parameters allow only letters, numbers, underscores, and hyphens.
-  // Encode dots in profile IDs so the bot can resolve the selected creator reliably.
-  const contactStartParam = `contact_${(profile?.id ?? '').replace(/\./g, '_dot_')}`;
-  const contactBotUrl = telegramBotUsername ? `https://t.me/${telegramBotUsername}?start=${contactStartParam}` : undefined;
   if (!profile) return <Navigate to="/" replace />;
 
   const isFav = isFavorite(profile.id);
@@ -454,19 +448,16 @@ export const ProfilePage = () => {
 
         {/* Actions */}
         <div className="flex items-center gap-4 w-full max-w-sm justify-center mb-3">
-          <a
-            href={contactBotUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label={`Request contact for ${profile.name} on Telegram`}
-            className="animate-wobble flex-1 bg-red-700 hover:bg-red-600 text-white py-2 rounded-full font-bold text-base transition-colors shadow-lg shadow-red-900/40 flex flex-col items-center justify-center gap-0"
+          <button
+            type="button"
+            disabled
+            aria-disabled="true"
+            aria-label={`Subscribe to ${profile.name} (currently unavailable)`}
+            title="Subscriptions are currently unavailable"
+            className="flex-1 cursor-not-allowed opacity-60 bg-red-700 text-white py-3 rounded-full font-bold text-base shadow-lg shadow-red-900/40 flex items-center justify-center"
           >
-            <div className="flex items-center gap-2">
-              <MessageSquare size={18} />
-              <span>Request Contact</span>
-            </div>
-            <span className="text-[11px] font-semibold text-red-200 tracking-wide">Continue in Telegram</span>
-          </a>
+            Subscribe
+          </button>
 
           <button
             onClick={handleFavorite}
