@@ -508,6 +508,15 @@ test('Admin authorization, payment verification, explicit consent, and fulfilmen
     const draft = db.raw.prepare("SELECT id,status FROM delivery_drafts WHERE request_id=?").get(reqId) as any;
     assert.ok(draft);
     assert.equal(draft.status, "draft");
+
+    // A second request must not create a concurrent editable draft that could
+    // receive the wrong customer's custom message or attachment.
+    const secondReqId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests (id, telegram_user_id, telegram_chat_id, profile_id, status, checkout_code)
+      VALUES (?, '5008', '5008', 'anaimiya', 'payment_verified', 'FL-SECOND1')`).run(secondReqId);
+    await worker.fetch(new Request("https://worker.local/telegram/webhook", { method: "POST", headers: { "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET }, body: JSON.stringify({ callback_query: { id: "cb-second-draft", from: { id: 10001 }, message: { chat: { id: 10001 } }, data: "approve:" + secondReqId } }) }), env);
+    assert.equal(db.raw.prepare("SELECT id FROM delivery_drafts WHERE request_id=?").get(secondReqId), undefined, "Overlapping contact draft is blocked");
+
     await worker.fetch(new Request("https://worker.local/telegram/webhook", { method: "POST", headers: { "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET }, body: JSON.stringify({ message: { chat: { id: 10001 }, from: { id: 10001 }, text: "Your approved creator contact is ready." } }) }), env);
     await worker.fetch(new Request("https://worker.local/telegram/webhook", { method: "POST", headers: { "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET }, body: JSON.stringify({ callback_query: { id: "cb-preview", from: { id: 10001 }, message: { chat: { id: 10001 } }, data: "draft:preview:" + draft.id } }) }), env);
     assert.ok(sentTelegramMessages.some(m => String(m.data.text || "").includes("Preview only")));
