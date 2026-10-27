@@ -1211,7 +1211,7 @@ async function message(e: Env, m: Msg) {
     if (!id || !/^[A-Za-z0-9._-]{1,50}$/.test(id) || !handle || !/^@[A-Za-z0-9_]{5,32}$/.test(handle)) return say(e, chat, "Usage: /setcontact PROFILE_ID @telegram_handle");
     const cat = await catalogue(e);
     if (!cat.some(p => p.id === id)) return say(e, chat, "That profile is not in the current public catalogue.");
-    await e.DB.prepare("INSERT INTO creator_contacts(profile_id,contact_value,sharing_enabled,consent_confirmed_at) VALUES(?,?,1,strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(profile_id) DO UPDATE SET contact_value=excluded.contact_value,sharing_enabled=1,consent_confirmed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')").bind(id, handle).run();
+    await e.DB.prepare("INSERT INTO creator_contacts(profile_id,contact_value) VALUES(?,?) ON CONFLICT(profile_id) DO UPDATE SET contact_value=excluded.contact_value,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')").bind(id, handle).run();
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(?,'contact_saved',?,'Admin saved the contact for verified contact-request fulfilment')").bind(user, id).run();
     return say(e, chat, `✅ Saved ${esc(handle)} for ${esc(id)}. It can be included in a contact delivery only after the matching payment is manually verified and you confirm delivery.`);
   }
