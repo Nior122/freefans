@@ -129,6 +129,14 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0012_hidden_profiles.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0013_admin_pending_actions',
+    description: 'Durable, expiring admin confirmation actions',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0013_admin_pending_actions.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
@@ -279,7 +287,8 @@ export const EXPECTED_SCHEMA = {
     'id', 'admin_telegram_id', 'message_text', 'media_kind', 'media_file_id',
     'media_mime_type', 'status', 'expires_at', 'created_at', 'updated_at'
   ],
-  hidden_profiles: ['profile_id', 'hidden_by_admin', 'reason', 'hidden_at']
+  hidden_profiles: ['profile_id', 'hidden_by_admin', 'reason', 'hidden_at'],
+  admin_pending_actions: ['id', 'admin_telegram_id', 'action', 'payload', 'status', 'expires_at', 'created_at', 'updated_at']
 };
 
 export const EXPECTED_UNIQUE_INDEXES = [
@@ -289,7 +298,8 @@ export const EXPECTED_UNIQUE_INDEXES = [
   { table: 'payment_receipt_submissions', name: 'idx_payment_receipt_submissions_telegram_message' },
   { table: 'payment_receipt_submissions', name: 'idx_payment_receipt_submissions_order_file' },
   { table: 'admin_message_drafts', name: 'idx_admin_message_drafts_one_editable_per_admin' },
-  { table: 'admin_broadcast_drafts', name: 'idx_admin_broadcast_one_editable_per_admin' }
+  { table: 'admin_broadcast_drafts', name: 'idx_admin_broadcast_one_editable_per_admin' },
+  { table: 'admin_pending_actions', name: 'idx_admin_pending_actions_one_pending_per_admin' }
 ];
 
 /**
