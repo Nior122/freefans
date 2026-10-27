@@ -105,6 +105,14 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0009_service_delivery_drafts.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0010_admin_message_drafts',
+    description: 'General expiring Admin Desk customer-support drafts with optional media',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0010_admin_message_drafts.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
@@ -244,6 +252,12 @@ export const EXPECTED_SCHEMA = {
   service_delivery_drafts: [
     'id', 'service_order_id', 'admin_telegram_id', 'message_text', 'status',
     'expires_at', 'delivered_at', 'created_at', 'updated_at'
+  ],
+  admin_message_drafts: [
+    'id', 'order_id', 'order_kind', 'admin_telegram_id', 'telegram_user_id',
+    'telegram_chat_id', 'checkout_code', 'message_text', 'media_kind',
+    'media_file_id', 'media_mime_type', 'status', 'expires_at',
+    'delivered_at', 'created_at', 'updated_at'
   ]
 };
 
@@ -252,7 +266,8 @@ export const EXPECTED_UNIQUE_INDEXES = [
   { table: 'service_orders', name: 'idx_service_orders_checkout_code' },
   { table: 'service_orders', name: 'idx_service_orders_one_active_per_user' },
   { table: 'payment_receipt_submissions', name: 'idx_payment_receipt_submissions_telegram_message' },
-  { table: 'payment_receipt_submissions', name: 'idx_payment_receipt_submissions_order_file' }
+  { table: 'payment_receipt_submissions', name: 'idx_payment_receipt_submissions_order_file' },
+  { table: 'admin_message_drafts', name: 'idx_admin_message_drafts_one_editable_per_admin' }
 ];
 
 /**

@@ -194,6 +194,14 @@ export function migrateRemote() {
     runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0009_service_delivery_drafts')");
   }
 
+  // Migration 10: general Admin Desk customer-support drafts. This remains
+  // separate from contact delivery and service fulfilment state.
+  if (!applied.has('0010_admin_message_drafts')) {
+    console.log('[migrate-d1] Applying 0010_admin_message_drafts migration...');
+    runWranglerFile(path.join(ROOT, 'contact-bot', 'migrations', '0010_admin_message_drafts.sql'));
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0010_admin_message_drafts')");
+  }
+
   // Final complete schema verification. These expectations are shared with the
   // local migration verifier to prevent the two definitions drifting apart.
   console.log('[migrate-d1] Verifying complete schema...');
