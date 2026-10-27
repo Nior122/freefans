@@ -360,6 +360,17 @@ function receiptFileSize(value: unknown): number | null {
   return Number.isFinite(size) && size >= 0 ? Math.trunc(size) : null;
 }
 
+function extractSupportMedia(m: Msg): { media?: ReceiptMedia; unsupported?: string } {
+  if (m.video) {
+    const video = m.video;
+    if (typeof video.file_id !== "string" || !video.file_id || video.file_id.length > 512) return { unsupported: "That video did not include a usable Telegram file reference. Please send it again." };
+    const fileSize = receiptFileSize(video.file_size);
+    if (fileSize !== null && fileSize > 20_000_000) return { unsupported: "Videos must be 20 MB or smaller to attach to a support message." };
+    return { media: { kind: "document", fileId: video.file_id, fileUniqueId: typeof video.file_unique_id === "string" ? video.file_unique_id.slice(0, 512) : null, mimeType: (video.mime_type || "video/mp4").toLowerCase().split(";", 1)[0].trim().slice(0, 100), fileSize } };
+  }
+  return extractReceiptMedia(m);
+}
+
 function extractReceiptMedia(m: Msg): { media?: ReceiptMedia; unsupported?: string } {
   const maxBytes = 20_000_000;
   if (Array.isArray(m.photo) && m.photo.length > 0) {
@@ -886,8 +897,8 @@ async function message(e: Env, m: Msg) {
     if (normalizedCaption === "/message" || normalizedCaption.startsWith("/message ")) {
       const command = normalizedCaption.match(/^\/message\s+([^\s]+)(?:\s+([\s\S]+))?$/i);
       if (!command) return say(e, chat, "Caption format: /message FL-ABC123 Your message here. This opens a draft only; it does not send.");
-      const extracted = extractReceiptMedia(m);
-      if (!extracted.media) return say(e, chat, "Attach one Telegram photo or a PDF, JPG, PNG, or WebP document under 20 MB. No support draft was opened.");
+      const extracted = extractSupportMedia(m);
+      if (!extracted.media) return say(e, chat, extracted.unsupported || "Attach one photo, video, or PDF/image document under 20 MB. No support draft was opened.");
       return createOrReopenAdminMessageDraft(e, m, command[1], command[2] || "", extracted.media);
     }
 
@@ -923,8 +934,8 @@ async function message(e: Env, m: Msg) {
       if (!contextBefore?.order || String(contextBefore.order.telegram_user_id) !== String(supportDraft.telegram_user_id) || String(contextBefore.order.telegram_chat_id) !== String(supportDraft.telegram_chat_id)) {
         return say(e, chat, "The support draft no longer matches the selected order's Telegram destination, so the media was not attached.", adminMessageKeyboard(supportDraft.id));
       }
-      const extracted = extractReceiptMedia(m);
-      if (!extracted.media) return say(e, chat, "Attach one Telegram photo or a PDF, JPG, PNG, or WebP document under 20 MB. The support draft was not changed.");
+      const extracted = extractSupportMedia(m);
+      if (!extracted.media) return say(e, chat, extracted.unsupported || "Attach one photo, video, or PDF/image document under 20 MB. The support draft was not changed.");
       let nextText = supportDraft.message_text || null;
       let note = "";
       if (caption && !caption.startsWith("/")) {
@@ -1930,7 +1941,8 @@ async function selar(request: Request, e: Env) {
   if (saleInserted.meta?.changes === 0) return json({ ok: true, duplicate: true });
 
   const effectiveCode = target.checkout_code || code || "unknown";
-  const clueNote = "\n\n<i>Matched by " + (matchedBy === "unique_code" ? "unique checkout code" : "exact full checkout name") + ". This is only a reconciliation match; an administrator must verify the payment directly in Selar.</i>";
+  const matchLabel = matchedBy === "unique_code" ? "unique checkout code" : matchedBy === "exact_full_name" ? "exact full checkout name" : "unique buyer email fallback";
+  const clueNote = "\n\n<i>Matched by " + matchLabel + ". This is only a reconciliation match; an administrator must verify the payment directly in Selar.</i>";
 
   try {
     if (kind === "contact") {
