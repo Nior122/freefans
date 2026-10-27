@@ -217,14 +217,12 @@ async function analysePhoto(e: Env, m: Msg, prompt: string): Promise<string> {
   if (!photo?.file_id) throw new Error("Image has no Telegram file ID");
   const bytes = await telegramFileBytes(e, photo.file_id, 8 * 1024 * 1024);
   const dataUrl = "data:image/jpeg;base64," + bytesToBase64(bytes);
-  const result = await e.AI.run("@cf/meta/llama-3.2-11b-vision-instruct", {
-    messages: [{ role: "user", content: [
-      { type: "text", text: (prompt || "Describe this image and answer any question the user included. Be concise and helpful.").slice(0, 1000) },
-      { type: "image_url", image_url: { url: dataUrl } }
-    ] }],
-    max_tokens: 500
+  const result = await e.AI.run("@cf/moondream/moondream3.1-9B-A2B", {
+    task: "query",
+    image: dataUrl,
+    question: (prompt || "Describe this image and answer any question the user included. Be concise and helpful.").slice(0, 1000)
   });
-  const answer = String(result?.response || result?.description || "").trim();
+  const answer = String(result?.answer || result?.response || result?.description || result?.result || "").trim();
   if (!answer) throw new Error("Image model returned no answer");
   return answer.slice(0, 3500);
 }
