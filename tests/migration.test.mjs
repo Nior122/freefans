@@ -23,7 +23,7 @@ test('Migration: fresh database migrates to fully verified schema', () => {
   const result = applyAllMigrations(db);
 
   assert.equal(result.ok, true);
-  assert.equal(result.verifiedTables.length, 12);
+  assert.equal(result.verifiedTables.length, 15);
 
   const applied = getAppliedMigrations(db);
   assert.deepEqual(applied, [
@@ -36,7 +36,10 @@ test('Migration: fresh database migrates to fully verified schema', () => {
     '0007_front_desk_multi_requests',
     '0008_delivery_drafts',
     '0009_service_delivery_drafts',
-    '0010_admin_message_drafts'
+    '0010_admin_message_drafts',
+    '0011_admin_broadcast_drafts',
+    '0012_hidden_profiles',
+    '0013_admin_pending_actions'
   ]);
 
   const verified = verifySchema(db);
@@ -255,7 +258,7 @@ function completeRemoteSchemaSnapshot() {
 test('Remote migration verifier: accepts all required tables, columns, and unique indexes', () => {
   const result = verifyRemoteSchema(completeRemoteSchemaSnapshot());
   assert.equal(result.ok, true);
-  assert.equal(result.verifiedTables.length, 12);
+  assert.equal(result.verifiedTables.length, 15);
 });
 
 test('Remote migration verifier: fails when a required column is missing', () => {

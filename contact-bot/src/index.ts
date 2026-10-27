@@ -19,11 +19,14 @@ export interface Env {
   SELAR_CHECKOUT_URL?: string;
   SELAR_WEBHOOK_SECRET?: string;
   SELAR_PRODUCT_ID?: string;
-  AI?: { run(model: string, input: { messages: Array<{ role: string; content: string }> }): Promise<{ response?: string }> };
+  AI?: { run(model: string, input: any): Promise<any> };
   AI_MODEL?: string;
 }
 type TelegramPhotoSize = { file_id?: string; file_unique_id?: string; file_size?: number; width?: number; height?: number };
 type TelegramDocument = { file_id?: string; file_unique_id?: string; file_name?: string; mime_type?: string; file_size?: number };
+type TelegramVoice = { file_id?: string; file_unique_id?: string; file_size?: number; duration?: number; mime_type?: string };
+type TelegramAudio = { file_id?: string; file_unique_id?: string; file_size?: number; duration?: number; mime_type?: string; file_name?: string };
+type TelegramVideo = { file_id?: string; file_unique_id?: string; file_size?: number; mime_type?: string; duration?: number };
 type Msg = {
   message_id?: number;
   chat: { id: number; type?: string };
@@ -32,6 +35,9 @@ type Msg = {
   caption?: string;
   photo?: TelegramPhotoSize[];
   document?: TelegramDocument;
+  voice?: TelegramVoice;
+  audio?: TelegramAudio;
+  video?: TelegramVideo;
 };
 type Update = { message?: Msg; callback_query?: { id: string; from: { id: number }; message?: Msg; data?: string } };
 type Profile = { id: string; name: string };
@@ -63,6 +69,7 @@ type ReceiptSubmission = {
   order_id: string;
   status: string;
 };
+type AdminBroadcastDraft = { id: string; admin_telegram_id: string; message_text?: string | null; media_kind?: "photo" | "document" | null; media_file_id?: string | null; media_mime_type?: string | null; status: string; expires_at: string };
 type AdminMessageDraft = {
   id: string;
   order_id: string;
@@ -150,6 +157,75 @@ async function notifyAdminIfConfigured(e: Env, text: string) {
   if (!e.ADMIN_TELEGRAM_ID) return;
   await say(e, e.ADMIN_TELEGRAM_ID, text);
 }
+async function telegramFileBytes(e: Env, fileId: string, maxBytes = 10 * 1024 * 1024): Promise<Uint8Array> {
+  const metaResponse = await fetch(`https://api.telegram.org/bot${e.TELEGRAM_BOT_TOKEN}/getFile?file_id=${encodeURIComponent(fileId)}`);
+  if (!metaResponse.ok) throw new Error("Telegram file lookup failed");
+  const meta = await metaResponse.json() as { ok?: boolean; result?: { file_path?: string; file_size?: number } };
+  if (!meta.ok || !meta.result?.file_path) throw new Error("Telegram file metadata unavailable");
+  if (meta.result.file_size && meta.result.file_size > maxBytes) throw new Error("Media exceeds the supported size limit");
+  const response = await fetch(`https://api.telegram.org/file/bot${e.TELEGRAM_BOT_TOKEN}/${meta.result.file_path}`);
+  if (!response.ok) throw new Error("Telegram file download failed");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > maxBytes) throw new Error("Media exceeds the supported size limit");
+  return bytes;
+}
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + 0x8000, bytes.length)));
+  return btoa(binary);
+}
+async function sendVoiceReply(e: Env, chat: string | number, text: string) {
+  if (!e.AI || !text.trim()) return false;
+  try {
+    const result = await e.AI.run("@cf/myshell-ai/melotts", { prompt: text.slice(0, 700), lang: "en" });
+    let bytes: Uint8Array | null = null;
+    if (result instanceof ArrayBuffer) bytes = new Uint8Array(result);
+    else if (result instanceof Uint8Array) bytes = result;
+    else if (result?.audio instanceof ArrayBuffer) bytes = new Uint8Array(result.audio);
+    else if (Array.isArray(result?.audio)) bytes = new Uint8Array(result.audio);
+    else if (typeof result?.audio === "string") {
+      const raw = atob(result.audio);
+      bytes = Uint8Array.from(raw, c => c.charCodeAt(0));
+    }
+    if (!bytes?.byteLength) return false;
+    const form = new FormData();
+    form.set("chat_id", String(chat));
+    form.set("voice", new Blob([new Uint8Array(bytes).buffer as ArrayBuffer], { type: "audio/mpeg" }), "reply.mp3");
+    const response = await fetch(`https://api.telegram.org/bot${e.TELEGRAM_BOT_TOKEN}/sendVoice`, { method: "POST", body: form });
+    const body = await response.json() as { ok?: boolean };
+    return response.ok && body.ok === true;
+  } catch (error) {
+    console.error("Voice reply unavailable", String(error));
+    return false;
+  }
+}
+async function transcribeVoice(e: Env, m: Msg): Promise<string> {
+  if (!e.AI) throw new Error("Speech recognition is unavailable");
+  const media = m.voice || m.audio;
+  if (!media?.file_id) throw new Error("Voice message has no Telegram file ID");
+  if ((media.file_size || 0) > 10 * 1024 * 1024) throw new Error("Voice messages must be under 10 MB");
+  const bytes = await telegramFileBytes(e, media.file_id);
+  const result = await e.AI.run("@cf/openai/whisper", { audio: Array.from(bytes) });
+  const transcript = String(result?.text || result?.transcription || "").trim();
+  if (!transcript) throw new Error("Speech could not be transcribed");
+  return transcript.slice(0, 3500);
+}
+async function analysePhoto(e: Env, m: Msg, prompt: string): Promise<string> {
+  if (!e.AI) throw new Error("Image analysis is unavailable");
+  const photos = Array.isArray(m.photo) ? m.photo : [];
+  const photo = photos[photos.length - 1];
+  if (!photo?.file_id) throw new Error("Image has no Telegram file ID");
+  const bytes = await telegramFileBytes(e, photo.file_id, 8 * 1024 * 1024);
+  const dataUrl = "data:image/jpeg;base64," + bytesToBase64(bytes);
+  const result = await e.AI.run("@cf/moondream/moondream3.1-9B-A2B", {
+    task: "query",
+    image: dataUrl,
+    question: (prompt || "Describe this image and answer any question the user included. Be concise and helpful.").slice(0, 1000)
+  });
+  const answer = String(result?.answer || result?.response || result?.description || result?.result || "").trim();
+  if (!answer) throw new Error("Image model returned no answer");
+  return answer.slice(0, 3500);
+}
 async function sayBestEffort(e: Env, chat: string | number, text: string) {
   // Informational customer notifications must never roll back a recorded payment
   // or strand an admin action (e.g. the customer blocked the bot). Actual delivery
@@ -161,10 +237,13 @@ async function catalogue(e: Env): Promise<Profile[]> {
   if (!r.ok) throw new Error("profile catalogue unavailable");
   const j = await r.json() as { profiles?: Profile[] };
   if (!Array.isArray(j.profiles)) throw new Error("invalid catalogue");
+  const hidden = await e.DB.prepare("SELECT profile_id FROM hidden_profiles").all<any>();
+  const hiddenIds = new Set((hidden.results || []).map((row:any) => String(row.profile_id)));
   // Defence in depth: only the two public fields are ever carried into bot logic,
   // even if a future catalogue regression added restricted fields.
   return j.profiles
     .filter(p => p && typeof p.id === "string" && /^[A-Za-z0-9._-]{1,50}$/.test(p.id) && typeof p.name === "string" && p.name.trim().length > 0)
+    .filter(p => !hiddenIds.has(p.id))
     .map(p => ({ id: p.id, name: p.name.slice(0, 120) }));
 }
 function paymentKeyboard(e: Env, id: string) {
@@ -408,6 +487,9 @@ async function expireAdminMessageDraftIfNeeded(e: Env, draft: AdminMessageDraft)
   return true;
 }
 
+async function activeBroadcastDraft(e: Env, adminTelegramId: string): Promise<AdminBroadcastDraft | null> {
+  return e.DB.prepare("SELECT id,admin_telegram_id,message_text,media_kind,media_file_id,media_mime_type,status,expires_at FROM admin_broadcast_drafts WHERE admin_telegram_id=? AND status IN ('draft','sending') ORDER BY created_at DESC LIMIT 1").bind(adminTelegramId).first<AdminBroadcastDraft>();
+}
 async function activeAdminMessageDraft(e: Env, adminTelegramId: string): Promise<AdminMessageDraft | null> {
   const draft = await e.DB.prepare("SELECT id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,message_text,media_kind,media_file_id,media_mime_type,status,expires_at,delivered_at,created_at,updated_at FROM admin_message_drafts WHERE admin_telegram_id=? AND status='draft' ORDER BY updated_at DESC LIMIT 1").bind(adminTelegramId).first<AdminMessageDraft>();
   if (!draft) return null;
@@ -738,7 +820,7 @@ async function start(e: Env, m: Msg, payload: string) {
   return say(e, chat, `${intro}\n\n${instructions}`, paymentKeyboard(e, requestId));
 }
 
-async function aiReply(e: Env, chat: string, userText: string, reminder = "") {
+async function aiReply(e: Env, chat: string, userText: string, reminder = "", voiceReply = false) {
   if (!e.AI) return say(e, chat, reminder || "👋 I'm the FansLeak front-desk assistant. I can help with your requests, payment checks, and next steps. What can I help you with?");
   try {
     // Supply read-only context from this customer's own request history. The
@@ -775,8 +857,8 @@ async function startService(e: Env, m: Msg, serviceId: string) {
     return;
   }
   // Service orders and creator contact requests are independent purchases.
-  const active = await e.DB.prepare("SELECT id FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
-  if (active) return say(e, chat, "You already have a service order in progress. Finish it or contact support before starting another.");
+  const active = await e.DB.prepare("SELECT id,checkout_code,status,service_id,request_text FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
+  if (active) return say(e, chat, "👋 Welcome back — your existing service order is still here.\n\nOrder code: <code>" + esc(String(active.checkout_code || "not assigned")) + "</code>\nStatus: <b>" + esc(String(active.status)) + "</b>\n\nYou can keep chatting with me normally about this order. If you are describing the work, tell me what you need; when ready to pay, type PAY. I won’t create a duplicate order.");
   const id = crypto.randomUUID();
   let inserted = false;
   for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
@@ -793,7 +875,7 @@ async function startService(e: Env, m: Msg, serviceId: string) {
     } catch {
       let raced: unknown = null;
       try { raced = await e.DB.prepare("SELECT id FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first(); } catch { /* fall through to the failure message below */ }
-      if (raced) return say(e, chat, "You already have a service order in progress. Finish it or contact support before starting another.");
+      if (raced) return say(e, chat, "👋 You already have a service order open. I can still help you here — continue describing what you need, or type PAY when you are ready to check out.");
     }
   }
   if (!inserted) return say(e, chat, "I couldn't start your service order just now. Please try again in a moment.");
@@ -803,7 +885,7 @@ async function startService(e: Env, m: Msg, serviceId: string) {
 async function message(e: Env, m: Msg) {
   let t = (m.text || "").trim();
   const caption = (m.caption || "").trim(), chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
-  const hasReceiptCandidateMedia = Boolean((Array.isArray(m.photo) && m.photo.length > 0) || m.document);
+  const hasReceiptCandidateMedia = Boolean((Array.isArray(m.photo) && m.photo.length > 0) || m.document || m.video);
   if (hasReceiptCandidateMedia && user === e.ADMIN_TELEGRAM_ID) {
     const normalizedCaption = caption.replace(/^(\/[A-Za-z0-9_]+)@[A-Za-z0-9_]+(?=\s|$)/, "$1");
     if (normalizedCaption === "/message" || normalizedCaption.startsWith("/message ")) {
@@ -814,6 +896,16 @@ async function message(e: Env, m: Msg) {
       return createOrReopenAdminMessageDraft(e, m, command[1], command[2] || "", extracted.media);
     }
 
+    const broadcastDraft = await activeBroadcastDraft(e, user);
+    if (broadcastDraft && broadcastDraft.status === "draft") {
+      const extracted = m.video?.file_id
+        ? { media: { kind: "document" as const, fileId: m.video.file_id, fileUniqueId: m.video.file_unique_id || null, mimeType: m.video.mime_type || "video/mp4", fileSize: m.video.file_size || null } }
+        : extractReceiptMedia(m);
+      if (!extracted.media) return say(e, chat, extracted.unsupported || "Attach one photo or document under 20 MB.");
+      const updated = await e.DB.prepare("UPDATE admin_broadcast_drafts SET media_kind=?,media_file_id=?,media_mime_type=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(extracted.media.kind, extracted.media.fileId, extracted.media.mimeType, broadcastDraft.id, user).run();
+      if (!updated.meta?.changes) return say(e, chat, "Broadcast draft changed; media was not attached.");
+      return say(e, chat, "📎 Media attached. Nothing has been sent.", { inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + broadcastDraft.id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + broadcastDraft.id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + broadcastDraft.id }]] });
+    }
     const deliveryDraft = await activeDeliveryDraft(e, user);
     const supportDraft = await activeAdminMessageDraft(e, user);
     if (deliveryDraft && supportDraft) {
@@ -875,7 +967,44 @@ async function message(e: Env, m: Msg) {
     // the existing text flow; it is not treated as a payment receipt.
     t = caption;
   }
+  let voiceReply = false;
+  if (m.voice || m.audio) {
+    try {
+      t = await transcribeVoice(e, m);
+      voiceReply = true;
+      if (user !== e.ADMIN_TELEGRAM_ID) await sayBestEffort(e, chat, "🎙️ I heard: " + t);
+    } catch (error) {
+      console.error("Voice transcription failed", String(error));
+      return say(e, chat, "Sorry, I couldn’t understand that voice note. Please try a clearer, shorter recording or send the message as text.");
+    }
+  }
+  if (Array.isArray(m.photo) && m.photo.length > 0 && !t) {
+    try {
+      const answer = await analysePhoto(e, m, caption);
+      await say(e, chat, "🖼️ " + esc(answer));
+      return;
+    } catch (error) {
+      console.error("Image analysis failed", String(error));
+      return say(e, chat, "I couldn’t analyse that image just now. Please try a smaller photo or describe what you want me to look at.");
+    }
+  }
   if (!t) return;
+  if (user === e.ADMIN_TELEGRAM_ID && chat === user && /^(?:yes|yes please|confirm|confirm it|go ahead|do it)[.! ]*$/i.test(t)) {
+    const pending = await e.DB.prepare("SELECT id,admin_telegram_id,action,payload,status,expires_at FROM admin_pending_actions WHERE admin_telegram_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
+    if (pending) { await confirmPendingAdminAction(e, user, chat, String(pending.id)); return; }
+    const broadcastDraft = await activeBroadcastDraft(e, user);
+    if (broadcastDraft?.status === "draft") { await executeBroadcast(e, user, chat, broadcastDraft); return; }
+    const supportDraft = await activeAdminMessageDraft(e, user);
+    if (supportDraft?.status === "draft") { await executeSupportDraft(e, user, chat, supportDraft.id); return; }
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && !t.startsWith("/") && chat === user) {
+    const broadcastDraft = await activeBroadcastDraft(e, user);
+    if (broadcastDraft && broadcastDraft.status === "draft") {
+      if (t.length > 900) return say(e, chat, "Broadcast text must be 900 characters or fewer. The draft was not changed.");
+      await e.DB.prepare("UPDATE admin_broadcast_drafts SET message_text=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(t, broadcastDraft.id, user).run();
+      return say(e, chat, "📝 Broadcast text updated. Nothing has been sent.", { inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + broadcastDraft.id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + broadcastDraft.id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + broadcastDraft.id }]] });
+    }
+  }
   // Ordinary admin text can edit exactly one open composer. If both editable
   // workflows somehow have a draft, fail closed instead of guessing.
   if (user === e.ADMIN_TELEGRAM_ID && !t.startsWith("/")) {
@@ -908,7 +1037,26 @@ async function message(e: Env, m: Msg) {
     }
   }
   // Telegram may append @BotName to slash commands. Normalize only the command token.
-  t = t.replace(/^(\/[A-Za-z0-9_]+)@[A-Za-z0-9_]+(?=\s|$)/, "$1");
+  t = t.replace(/^([\/][A-Za-z0-9_]+)@[A-Za-z0-9_]+(?=\s|$)/, "$1");
+  if (user === e.ADMIN_TELEGRAM_ID) {
+    if (/^(?:list|show|view)\s+(?:all\s+)?profiles$/i.test(t)) t = "/profiles";
+    else if (/^(?:list|show|view)\s+(?:recent\s+)?orders$/i.test(t)) t = "/orders";
+    else if (/^delete\s+profile\s+(.+)$/i.test(t)) {
+      const requested = t.match(/^delete\s+profile\s+(.+)$/i)[1].trim();
+      const cat = await catalogue(e);
+      const profile = cat.find(p => p.id.toLowerCase() === requested.toLowerCase() || p.name.toLowerCase() === requested.toLowerCase());
+      if (!profile) return say(e, chat, "I couldn't match that name to a visible profile. Send the exact profile name or ID from /profiles.");
+      t = "/deleteprofile " + profile.id;
+    }
+    else if (/^restore\s+profile\s+([A-Za-z0-9._-]{1,50})$/i.test(t)) t = "/restoreprofile " + t.match(/^restore\s+profile\s+([A-Za-z0-9._-]{1,50})$/i)[1];
+    else if (/^(?:reject|decline)\s+(?:order\s+)?FL-[A-Z0-9]{6}$/i.test(t)) t = "/reject " + t.match(/FL-[A-Z0-9]{6}/i)[0];
+    else if (/^(?:approve|deliver|fulfil|fulfill)\s+(?:order\s+)?FL-[A-Z0-9]{6}$/i.test(t)) t = "deliver " + t.match(/FL-[A-Z0-9]{6}/i)[0];
+    else if (/^(?:send\s+)?broadcast(?:\s+to\s+(?:all\s+)?clients)?$/i.test(t) || /^send\s+(?:mass\s+)?messages?\s+to\s+clients$/i.test(t) || /^send\s+(?:photo|video|media)\s+to\s+clients$/i.test(t) || /^send\s+(?:a\s+)?message\s+to\s+all\s+clients$/i.test(t)) t = "/broadcast";
+    else if (/^(?:send\s+)?broadcast\s*[:\-]?\s+[\s\S]+$/i.test(t)) t = "/broadcast " + t.replace(/^(?:send\s+)?broadcast\s*[:\-]?\s+/i, "");
+    else if (/^(?:send\s+)?(?:a\s+)?message\s+to\s+customer\s+FL-[A-Z0-9]{6}\s*[:\-]\s*[\s\S]+$/i.test(t)) t = "/message " + t.replace(/^(?:send\s+)?(?:a\s+)?message\s+to\s+customer\s+(FL-[A-Z0-9]{6})\s*[:\-]\s*/i, "$1 ");
+    else if (/^message\s+customer\s+FL-[A-Z0-9]{6}\s*[:\-]\s*[\s\S]+$/i.test(t)) t = "/message " + t.replace(/^message\s+customer\s+(FL-[A-Z0-9]{6})\s*[:\-]\s*/i, "$1 ");
+    else if (/^(?:delete|close|cancel)\s+all\s+pending\s+orders$/i.test(t)) t = "/expirepending";
+  }
   if (t.startsWith("/start")) {
     const arg = t.split(/\s+/, 2)[1] || "";
     if (arg.startsWith("contact_")) return start(e, m, arg);
@@ -933,16 +1081,109 @@ async function message(e: Env, m: Msg) {
     }
   }
 
+  if (user === e.ADMIN_TELEGRAM_ID && /^\/broadcast(?:\s|$)/i.test(t)) {
+    const text = t.replace(/^\/broadcast(?:@[A-Za-z0-9_]+)?\s*/i, "").trim();
+    const active = await activeBroadcastDraft(e, user);
+    if (active?.status === "sending") return say(e, chat, "⚠️ A broadcast is already sending or has an uncertain outcome. Check before retrying.");
+    if (active?.status === "draft") return say(e, chat, "You already have a broadcast draft. Send text to update it, attach one photo/document, or use /broadcastcancel.");
+    if (text.length > 900) return say(e, chat, "Broadcast text must be 900 characters or fewer.");
+    const id = crypto.randomUUID();
+    await e.DB.prepare("INSERT INTO admin_broadcast_drafts(id,admin_telegram_id,message_text,status,expires_at) VALUES(?,?,?,'draft',datetime('now','+30 minutes'))").bind(id, user, text || null).run();
+    return say(e, chat, "📣 <b>Broadcast draft created</b>\nAudience: customers with active/recent order records (maximum 100 recipients).\n\n" + (text ? esc(text) : "No message text yet. Send text or attach media.") + "\n\nNothing has been sent. Preview and confirm when ready.", {
+      inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + id }]]
+    });
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && t === "/broadcastcancel") {
+    const draft = await activeBroadcastDraft(e, user);
+    if (!draft || draft.status !== "draft") return say(e, chat, "No editable broadcast draft to cancel.");
+    await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(draft.id).run();
+    return say(e, chat, "✖️ Broadcast draft cancelled. Nothing was sent.");
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && /^\/deleteprofile\s+/i.test(t)) {
+    const match = t.match(/^\/deleteprofile\s+([A-Za-z0-9._-]{1,50})$/i);
+    if (!match) return say(e, chat, "Usage: /deleteprofile PROFILE_ID");
+    const profileId = match[1];
+    const cat = await catalogue(e);
+    const profile = cat.find(p => p.id === profileId);
+    if (!profile) return say(e, chat, "That profile is not currently visible. Check /profiles or use /restoreprofile PROFILE_ID.");
+    const id = await createPendingAdminAction(e, user, "hide_profile", profileId);
+    if (!id) return say(e, chat, "You already have an admin action awaiting confirmation. Reply YES or cancel it before starting another.");
+    return say(e, chat, "⚠️ <b>Remove website profile?</b>\n" + esc(profile.name) + " (<code>" + esc(profile.id) + "</code>) will be hidden from public listings and the Telegram request catalogue. The source profile files remain recoverable in GitHub.\n\nReply <b>YES</b> or use the button to confirm.", {
+      inline_keyboard: [[{ text: "🗑️ Confirm hide profile", callback_data: "admin-action:confirm:" + id }], [{ text: "Cancel", callback_data: "admin-action:cancel:" + id }]]
+    });
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && t === "/expirepending") {
+    const contacts = await e.DB.prepare("SELECT COUNT(*) AS total FROM contact_requests WHERE status IN ('awaiting_email','pending_payment','awaiting_bank_reference','pending_manual_payment')").first<any>();
+    const services = await e.DB.prepare("SELECT COUNT(*) AS total FROM service_orders WHERE status IN ('awaiting_request','awaiting_email','pending_payment','payment_verified','payment_review')").first<any>();
+    const id = await createPendingAdminAction(e, user, "close_pending_orders", null);
+    if (!id) return say(e, chat, "You already have an admin action awaiting confirmation. Reply YES or cancel it before starting another.");
+    return say(e, chat, "⚠️ <b>Close all pending orders?</b>\nContact requests to expire: <b>" + Number(contacts?.total || 0) + "</b>\nService orders to cancel: <b>" + Number(services?.total || 0) + "</b>\n\nThis retains audit records and does not verify or approve payments. Reply <b>YES</b> or use the button to confirm.", {
+      inline_keyboard: [[{ text: "✅ Confirm close pending orders", callback_data: "admin-action:confirm:" + id }], [{ text: "Cancel", callback_data: "admin-action:cancel:" + id }]]
+    });
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && /^\/restoreprofile\s+/i.test(t)) {
+    const match = t.match(/^\/restoreprofile\s+([A-Za-z0-9._-]{1,50})$/i);
+    if (!match) return say(e, chat, "Usage: /restoreprofile PROFILE_ID");
+    const result = await e.DB.prepare("DELETE FROM hidden_profiles WHERE profile_id=?").bind(match[1]).run();
+    if (!result.meta?.changes) return say(e, chat, "That profile was not hidden, or the ID is invalid.");
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(?,'profile_restored',?,'Admin restored profile visibility')").bind(user, match[1]).run();
+    return say(e, chat, "✅ Profile visibility restored for <code>" + esc(match[1]) + "</code>. Refresh the website to see it again.");
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && /^\/authorizecontact\s+/i.test(t)) {
+    const match = t.match(/^\/authorizecontact\s+([A-Za-z0-9._-]{1,50})$/i);
+    if (!match) return say(e, chat, "Usage: /authorizecontact PROFILE_ID — use only after the creator explicitly authorised sharing this contact.");
+    const profileId = match[1];
+    const cat = await catalogue(e);
+    if (!cat.some(p => p.id === profileId)) return say(e, chat, "That profile is not in the current public catalogue.");
+    const contact = await e.DB.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id=?").bind(profileId).first<any>();
+    if (!contact || !String(contact.contact_value || "").trim()) return say(e, chat, "No contact is saved for that profile. Save the authorised contact first with /setcontact.");
+    return say(e, chat, "<b>Confirm creator authorisation</b>\nProfile: <code>" + esc(profileId) + "</code>\nContact: " + esc(String(contact.contact_value)) + "\n\nConfirm only if the creator explicitly authorised release of this contact.", {
+      inline_keyboard: [[{ text: "✅ Confirm authorisation", callback_data: "admin:consentconfirm:" + profileId }], [{ text: "Cancel", callback_data: "admin:home" }]]
+    });
+  }
   if (user === e.ADMIN_TELEGRAM_ID && (t === "/admin" || t === "/menu")) {
     return say(e, chat, "<b>FansLeak Admin Desk</b>\nChoose what you want to manage. Payment checks and contact release remain manual and consent-gated.", {
       inline_keyboard: [
         [{ text: "📥 Review contact requests", callback_data: "admin:pending" }],
         [{ text: "🧾 Review service orders", callback_data: "admin:orders" }],
         [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }],
-        [{ text: "🛡️ Creator sharing permissions", callback_data: "admin:consent" }],
         [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]
       ]
     });
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && (t === "/profiles" || /^list profiles$/i.test(t))) {
+    const cat = await catalogue(e);
+    const lines = cat.map((p, i) => String(i + 1) + ". <b>" + esc(p.name) + "</b> · <code>" + esc(p.id) + "</code>");
+    return say(e, chat, "<b>📚 Current website profiles (" + cat.length + ")</b>\n" + (lines.join("\n") || "No profiles found."));
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && (t === "/orders" || /^show orders$/i.test(t))) {
+    const contacts = await e.DB.prepare("SELECT checkout_code,status,profile_id AS target,created_at,'contact' AS kind FROM contact_requests ORDER BY created_at DESC LIMIT 15").all<any>();
+    const services = await e.DB.prepare("SELECT checkout_code,status,service_id AS target,created_at,'service' AS kind FROM service_orders ORDER BY created_at DESC LIMIT 15").all<any>();
+    const rows = [...(contacts.results || []), ...(services.results || [])].sort((a:any,b:any) => String(b.created_at || "").localeCompare(String(a.created_at || ""))).slice(0,20);
+    const lines = rows.map((r:any) => "• <code>" + esc(String(r.checkout_code || "no code")) + "</code> · " + esc(String(r.kind)) + " · " + esc(String(r.target || "")) + " · " + esc(String(r.status)));
+    return say(e, chat, "<b>🧾 Recent orders (" + rows.length + ")</b>\n" + (lines.join("\n") || "No orders found."));
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && /^\/reject\s+/i.test(t)) {
+    const match = t.match(/^\/reject\s+(FL-[A-Z0-9]{6})$/i);
+    if (!match) return say(e, chat, "Usage: /reject FL-ABC123 — rejects the selected order and notifies its customer.");
+    const code = match[1].toUpperCase();
+    const contact = await e.DB.prepare("SELECT id,telegram_chat_id,status FROM contact_requests WHERE checkout_code=?").bind(code).first<any>();
+    if (contact) {
+      if (["approved","rejected","expired"].includes(String(contact.status))) return say(e, chat, "Request " + esc(code) + " is already " + esc(String(contact.status)) + ". No change made.");
+      const changed = await e.DB.prepare("UPDATE contact_requests SET status='rejected',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status IN ('awaiting_email','pending_payment','awaiting_bank_reference','pending_manual_payment','payment_verified')").bind(contact.id).run();
+      if (!changed.meta?.changes) return say(e, chat, "Request state changed before rejection. Refresh /orders; no success was reported.");
+      await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'admin_request_rejected',?,?)").bind(user, contact.id, "Admin rejected request " + code).run();
+      await sayBestEffort(e, contact.telegram_chat_id, "Your FansLeak request " + code + " was rejected by support. If you think this is a mistake, reply here to contact support.");
+      return say(e, chat, "🚫 Request " + esc(code) + " rejected and customer notified.");
+    }
+    const service = await e.DB.prepare("SELECT id,telegram_chat_id,status FROM service_orders WHERE checkout_code=?").bind(code).first<any>();
+    if (!service) return say(e, chat, "No contact request or service order found for " + esc(code) + ".");
+    if (["fulfilled","cancelled"].includes(String(service.status))) return say(e, chat, "Service order " + esc(code) + " is already " + esc(String(service.status)) + ". No change made.");
+    const changed = await e.DB.prepare("UPDATE service_orders SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status IN ('awaiting_request','awaiting_email','pending_payment','payment_verified','payment_review')").bind(service.id).run();
+    if (!changed.meta?.changes) return say(e, chat, "Service order state changed before cancellation. Refresh /orders; no success was reported.");
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'admin_service_order_cancelled',?,?)").bind(user, service.id, "Admin cancelled service order " + code).run();
+    await sayBestEffort(e, service.telegram_chat_id, "Your FansLeak service order " + code + " was cancelled by support. Reply here if you need help.");
+    return say(e, chat, "🚫 Service order " + esc(code) + " cancelled and customer notified.");
   }
   if (user === e.ADMIN_TELEGRAM_ID && (t === "/message" || t.startsWith("/message "))) {
     const match = t.match(/^\/message\s+([^\s]+)(?:\s+([\s\S]+))?$/i);
@@ -1099,7 +1340,13 @@ async function message(e: Env, m: Msg) {
         const transcript = (updated + "\nAssistant: " + answer).slice(-8000);
         await e.DB.prepare("UPDATE service_orders SET request_text=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_request'").bind(transcript, serviceOrder.id).run();
       }
-      return say(e, chat, answer ? esc(answer) : "Thanks. Tell me a little more about what you need, or type PAY when you’re ready to purchase.");
+      const finalAnswer = answer ? answer : "Thanks. Tell me a little more about what you need, or type PAY when you’re ready to purchase.";
+      await say(e, chat, esc(finalAnswer));
+      if (voiceReply) {
+        const sent = await sendVoiceReply(e, chat, finalAnswer);
+        if (!sent) await sayBestEffort(e, chat, "🔊 I couldn’t generate an audio reply this time, so I’ve sent the answer as text.");
+      }
+      return;
     } catch (err) {
       console.error("AI service conversation failed", String(err));
       return say(e, chat, "I saved your message. You can tell me more, or type PAY when you’re ready to purchase.");
@@ -1186,10 +1433,177 @@ async function message(e: Env, m: Msg) {
       return say(e,chat,"<b>Contact request</b>\nID: <code>"+esc(row.id)+"</code>\nCode: <code>"+esc(row.checkout_code)+"</code>\nProfile: "+esc(row.profile_id)+"\nStatus: "+esc(row.status)+"\nSale reference: "+(row.payment_reference?"attached":"not attached"));
     }
   }
-  return aiReply(e, chat, t);
+  return aiReply(e, chat, t, "", voiceReply);
 }
+async function createPendingAdminAction(e: Env, actor: string, action: "hide_profile" | "close_pending_orders", payload: string | null): Promise<string | null> {
+  const current = await e.DB.prepare("SELECT id FROM admin_pending_actions WHERE admin_telegram_id=? AND status='pending' LIMIT 1").bind(actor).first<any>();
+  if (current) return null;
+  const id = crypto.randomUUID();
+  await e.DB.prepare("INSERT INTO admin_pending_actions(id,admin_telegram_id,action,payload,status,expires_at) VALUES(?,?,?,?,'pending',datetime('now','+10 minutes'))").bind(id, actor, action, payload).run();
+  return id;
+}
+async function confirmPendingAdminAction(e: Env, actor: string, chat: string | number, id: string): Promise<boolean> {
+  const action = await e.DB.prepare("SELECT id,admin_telegram_id,action,payload,status,expires_at FROM admin_pending_actions WHERE id=?").bind(id).first<any>();
+  if (!action || String(action.admin_telegram_id) !== actor || action.status !== "pending") {
+    await say(e, chat, "That confirmation is no longer active. Nothing was changed.");
+    return false;
+  }
+  if (Date.parse(String(action.expires_at).replace(" ", "T") + (String(action.expires_at).endsWith("Z") ? "" : "Z")) < Date.now()) {
+    await e.DB.prepare("UPDATE admin_pending_actions SET status='expired',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending'").bind(id).run();
+    await say(e, chat, "That confirmation expired. Nothing was changed.");
+    return false;
+  }
+  const claimed = await e.DB.prepare("UPDATE admin_pending_actions SET status='executing',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending' AND admin_telegram_id=?").bind(id, actor).run();
+  if (!claimed.meta?.changes) { await say(e, chat, "That action is already being handled. Nothing was repeated."); return false; }
+  try {
+    if (action.action === "hide_profile") {
+      const profileId = String(action.payload || "");
+      if (!/^[A-Za-z0-9._-]{1,50}$/.test(profileId)) throw new Error("invalid_profile_id");
+      await e.DB.prepare("INSERT OR IGNORE INTO hidden_profiles(profile_id,hidden_by_admin,reason) VALUES(?,?,?)").bind(profileId, actor, "Hidden by admin from Telegram Admin Desk").run();
+      await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(?,'profile_hidden',?,'Admin hid profile from public site listings and Telegram catalogue')").bind(actor, profileId).run();
+      await e.DB.prepare("UPDATE admin_pending_actions SET status='completed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='executing'").bind(id).run();
+      await say(e, chat, "🗑️ Profile <code>" + esc(profileId) + "</code> is hidden from website listings and Telegram requests. Refresh the website to see the change; source files remain recoverable in GitHub.");
+      return true;
+    }
+    if (action.action === "close_pending_orders") {
+      const contacts = await e.DB.prepare("SELECT id,checkout_code,telegram_chat_id FROM contact_requests WHERE status IN ('awaiting_email','pending_payment','awaiting_bank_reference','pending_manual_payment')").all<any>();
+      const services = await e.DB.prepare("SELECT id,checkout_code,telegram_chat_id FROM service_orders WHERE status IN ('awaiting_request','awaiting_email','pending_payment','payment_verified','payment_review')").all<any>();
+      const c = await e.DB.prepare("UPDATE contact_requests SET status='expired',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE status IN ('awaiting_email','pending_payment','awaiting_bank_reference','pending_manual_payment')").run();
+      const sv = await e.DB.prepare("UPDATE service_orders SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE status IN ('awaiting_request','awaiting_email','pending_payment','payment_verified','payment_review')").run();
+      const customerChats = [...new Set([...(contacts.results || []), ...(services.results || [])].map((r:any) => String(r.telegram_chat_id)).filter(Boolean))];
+      for (const customerChat of customerChats) await sayBestEffort(e, customerChat, "Your pending FansLeak order was closed by support. Reply here if you need help.");
+      await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,details) VALUES(?,'admin_closed_pending_orders',?)").bind(actor, "Closed pending contact requests=" + Number(c.meta?.changes || 0) + ", service orders=" + Number(sv.meta?.changes || 0)).run();
+      await e.DB.prepare("UPDATE admin_pending_actions SET status='completed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='executing'").bind(id).run();
+      await say(e, chat, "✅ Pending orders closed. Contact requests expired: <b>" + Number(c.meta?.changes || 0) + "</b>; service orders cancelled: <b>" + Number(sv.meta?.changes || 0) + "</b>. Customers were notified. Records were retained for audit; no payment was verified.");
+      return true;
+    }
+    throw new Error("unsupported_admin_action");
+  } catch (error) {
+    await e.DB.prepare("UPDATE admin_pending_actions SET status='failed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='executing'").bind(id).run();
+    await notifyAdminIfConfigured(e, "⚠️ Admin action failed. Reference: <code>" + esc(id) + "</code>. No success was reported; inspect the audit and database state before retrying.");
+    console.error("Admin action failed", String(error));
+    return false;
+  }
+}
+
+async function executeBroadcast(e: Env, actor: string, chat: string | number, draft: AdminBroadcastDraft): Promise<boolean> {
+  if (draft.status !== "draft") { await say(e, chat, "This broadcast is no longer editable. It will not be sent again."); return false; }
+  if (Date.parse(draft.expires_at.replace(" ", "T") + (draft.expires_at.endsWith("Z") ? "" : "Z")) < Date.now()) {
+    await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='expired',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(draft.id).run();
+    await say(e, chat, "This broadcast draft expired. Nothing was sent."); return false;
+  }
+  if (!draft.message_text?.trim() && !draft.media_file_id) { await say(e, chat, "Add message text or attach media before confirming the broadcast."); return false; }
+  const audience = await e.DB.prepare("SELECT telegram_chat_id FROM contact_requests WHERE status IN ('pending_payment','payment_verified','approved') UNION SELECT telegram_chat_id FROM service_orders WHERE status IN ('pending_payment','payment_verified','fulfilled')").all<any>();
+  const recipients = [...new Set((audience.results || []).map((r:any) => String(r.telegram_chat_id)).filter(Boolean))].slice(0, 100);
+  if (!recipients.length) { await say(e, chat, "There are no customers in the active/recent order audience. Nothing was sent."); return false; }
+  const claimed = await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(draft.id, actor).run();
+  if (!claimed.meta?.changes) { await say(e, chat, "Broadcast state changed or is already being sent. Nothing was sent by this attempt."); return false; }
+  let sent = 0, failed = 0;
+  for (const recipient of recipients) {
+    try {
+      const body = String(draft.message_text || "");
+      if (draft.media_file_id && draft.media_kind === "photo") await tg(e, "sendPhoto", { chat_id: recipient, photo: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
+      else if (draft.media_file_id && draft.media_kind === "document" && /^video\//i.test(draft.media_mime_type || "")) await tg(e, "sendVideo", { chat_id: recipient, video: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
+      else if (draft.media_file_id && draft.media_kind === "document") await tg(e, "sendDocument", { chat_id: recipient, document: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
+      else await say(e, recipient, esc(body));
+      sent++;
+    } catch { failed++; }
+  }
+  const status = failed === 0 ? "sent" : "partial";
+  await e.DB.prepare("UPDATE admin_broadcast_drafts SET status=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(status, draft.id).run();
+  await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,details) VALUES(?,?,?)").bind(actor, "admin_broadcast_" + status, "Broadcast draft " + draft.id + ": sent=" + sent + ", failed=" + failed + ", recipients=" + recipients.length).run();
+  await say(e, chat, (failed ? "⚠️" : "✅") + " Broadcast finished. Sent: <b>" + sent + "</b>; failed: <b>" + failed + "</b>. The draft is locked against duplicate sends.");
+  return failed === 0;
+}
+
+async function executeSupportDraft(e: Env, actor: string, chat: string | number, draftId: string): Promise<boolean> {
+  const context = await loadAdminMessageDraftContext(e, draftId);
+  if (!context || String(context.draft.admin_telegram_id) !== actor) { await say(e, chat, "Support draft not found for this admin."); return false; }
+  const draft = context.draft, order = context.order;
+  if (await expireAdminMessageDraftIfNeeded(e, draft)) { await say(e, chat, "Support draft expired. Nothing was sent."); return false; }
+  if (draft.status !== "draft") { await say(e, chat, draft.status === "sending" ? "This support message is locked while its delivery outcome is checked." : "Support draft is no longer active."); return false; }
+  if (!order || String(order.telegram_user_id) !== String(draft.telegram_user_id) || String(order.telegram_chat_id) !== String(draft.telegram_chat_id)) { await say(e, chat, "The selected order or customer destination changed. Nothing was sent."); return false; }
+  const problem = adminMessageSendProblem(draft);
+  if (problem) { await say(e, chat, problem); return false; }
+  const orderTable = draft.order_kind === "contact" ? "contact_requests" : "service_orders";
+  const claimed = await e.DB.prepare("UPDATE admin_message_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=? AND message_text IS ? AND media_kind IS ? AND media_file_id IS ? AND media_mime_type IS ? AND EXISTS(SELECT 1 FROM " + orderTable + " o WHERE o.id=admin_message_drafts.order_id AND o.telegram_user_id=admin_message_drafts.telegram_user_id AND o.telegram_chat_id=admin_message_drafts.telegram_chat_id)")
+    .bind(draftId, actor, draft.message_text || null, draft.media_kind || null, draft.media_file_id || null, draft.media_mime_type || null).run();
+  if (!claimed.meta?.changes) { await say(e, chat, "Support draft changed, is already sending, or its destination no longer matches."); return false; }
+  const body = adminMessageBody(draft);
+  try {
+    if (draft.media_file_id && draft.media_kind === "photo") await tg(e, "sendPhoto", { chat_id: draft.telegram_chat_id, photo: draft.media_file_id, ...(body ? { caption: adminMessageCaption(body), parse_mode: "HTML" } : {}) });
+    else if (draft.media_file_id && draft.media_kind === "document") await tg(e, "sendDocument", { chat_id: draft.telegram_chat_id, document: draft.media_file_id, ...(body ? { caption: adminMessageCaption(body), parse_mode: "HTML" } : {}) });
+    else await say(e, draft.telegram_chat_id, ADMIN_MESSAGE_HEADER + "\n\n" + esc(body));
+  } catch {
+    try { await auditAdminMessageDraft(e, actor, "admin_support_message_uncertain", draft, order, "Telegram support-message outcome uncertain for " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + "; draft locked as sending; " + adminMessageContentDetails(draft)); } catch {}
+    try { await notifyAdminIfConfigured(e, "⚠️ Customer support message outcome is uncertain for " + draft.order_kind + " order <code>" + esc(String(order.checkout_code || draft.checkout_code || draft.order_id)) + "</code>. The draft remains locked to prevent duplicates. Inspect the customer conversation before any retry."); } catch {}
+    await say(e, chat, "⚠️ Message outcome uncertain. The draft is locked to prevent duplicate sends; inspect the customer conversation before retrying.");
+    return false;
+  }
+  const sent = await e.DB.prepare("UPDATE admin_message_drafts SET status='sent',delivered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draftId).run();
+  await auditAdminMessageDraft(e, actor, "admin_message_customer", draft, order, "Admin sent customer support message for " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + "; " + adminMessageContentDetails(draft));
+  if (!sent.meta?.changes) await notifyAdminIfConfigured(e, "A customer support message was sent for <code>" + esc(String(order.checkout_code || draft.order_id)) + "</code>, but the draft status changed concurrently. Inspect the audit before any retry.");
+  await say(e, chat, "✅ Support message sent for order <code>" + esc(String(order.checkout_code || order.id)) + "</code>.");
+  return true;
+}
+
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
+  if (data.startsWith("admin-action:")) {
+    if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin private chat only." });
+    const match = data.match(/^admin-action:(confirm|cancel):([0-9a-f-]{36})$/i);
+    if (!match) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Invalid admin action." });
+    if (match[1].toLowerCase() === "cancel") {
+      const cancelled = await e.DB.prepare("UPDATE admin_pending_actions SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND admin_telegram_id=? AND status='pending'").bind(match[2], actor).run();
+      await say(e, chat, cancelled.meta?.changes ? "Action cancelled. Nothing was changed." : "That action is no longer pending.");
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Cancellation processed." });
+    }
+    await confirmPendingAdminAction(e, actor, chat, match[2]);
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin action processed." });
+  }
+  if (data.startsWith("profiledelete:")) {
+    if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin private chat only." });
+    const match = data.match(/^profiledelete:(confirm|cancel):([A-Za-z0-9._-]{1,50})$/i);
+    if (!match) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Invalid profile action." });
+    const action = match[1].toLowerCase(), profileId = match[2];
+    if (action === "cancel") {
+      await say(e, chat, "Profile removal cancelled. The website was not changed.");
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Cancelled." });
+    }
+    const cat = await catalogue(e);
+    const profile = cat.find(p => p.id === profileId);
+    if (!profile) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Profile is already hidden or unavailable." });
+    await e.DB.prepare("INSERT OR IGNORE INTO hidden_profiles(profile_id,hidden_by_admin,reason) VALUES(?,?,?)").bind(profileId, actor, "Hidden by admin from Telegram Admin Desk").run();
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(?,'profile_hidden',?,'Admin hid profile from public site listings and Telegram catalogue')").bind(actor, profileId).run();
+    await say(e, chat, "🗑️ Profile <b>" + esc(profile.name) + "</b> is now hidden from the website listings and Telegram request catalogue. Refresh the website to see the change. The source files remain recoverable in GitHub.");
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Profile hidden." });
+  }
+  if (data.startsWith("broadcast:")) {
+    if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin private chat only." });
+    const match = data.match(/^broadcast:(preview|send|cancel):([0-9a-f-]{36})$/i);
+    if (!match) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Invalid broadcast action." });
+    const action = match[1].toLowerCase(), id = match[2];
+    const draft = await e.DB.prepare("SELECT id,admin_telegram_id,message_text,media_kind,media_file_id,media_mime_type,status,expires_at FROM admin_broadcast_drafts WHERE id=?").bind(id).first<AdminBroadcastDraft>();
+    if (!draft || draft.admin_telegram_id !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast draft not found." });
+    if (draft.status !== "draft") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast draft is no longer editable." });
+    if (Date.parse(draft.expires_at.replace(" ", "T") + (draft.expires_at.endsWith("Z") ? "" : "Z")) < Date.now()) {
+      await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='expired',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(id).run();
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast draft expired." });
+    }
+    if (action === "cancel") {
+      await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(id).run();
+      await say(e, chat, "✖️ Broadcast cancelled. Nothing was sent.");
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast cancelled." });
+    }
+    const audience = await e.DB.prepare("SELECT telegram_chat_id FROM contact_requests WHERE status IN ('pending_payment','payment_verified','approved') UNION SELECT telegram_chat_id FROM service_orders WHERE status IN ('pending_payment','payment_verified','fulfilled')").all<any>();
+    const recipients = [...new Set((audience.results || []).map((r:any) => String(r.telegram_chat_id)).filter(Boolean))].slice(0, 100);
+    if (action === "preview") {
+      await say(e, chat, "👀 <b>Broadcast preview</b>\nRecipients: " + recipients.length + " (maximum 100 per broadcast)\nMessage: " + (draft.message_text ? esc(draft.message_text) : "—") + "\nMedia: " + (draft.media_kind ? esc(draft.media_mime_type || draft.media_kind) : "none") + "\n\nNo messages sent.", { inline_keyboard: [[{ text: "✅ Confirm and send", callback_data: "broadcast:send:" + id }], [{ text: "✖️ Cancel", callback_data: "broadcast:cancel:" + id }]] });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Preview only." });
+    }
+    await executeBroadcast(e, actor, chat, draft);
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast action processed." });
+  }
   if (data.startsWith("draft:")) {
     if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Admin access only."});
     const dm = data.match(/^draft:(preview|send|cancel):([0-9a-f-]{36})$/i);
@@ -1306,41 +1720,8 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Preview only — nothing has been sent." });
     }
 
-    const problem = adminMessageSendProblem(draft);
-    if (problem) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: problem.slice(0, 200) });
-
-    const orderTable = draft.order_kind === "contact" ? "contact_requests" : "service_orders";
-    const claimed = await e.DB.prepare(`UPDATE admin_message_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=? AND message_text IS ? AND media_kind IS ? AND media_file_id IS ? AND media_mime_type IS ? AND EXISTS(SELECT 1 FROM ${orderTable} o WHERE o.id=admin_message_drafts.order_id AND o.telegram_user_id=admin_message_drafts.telegram_user_id AND o.telegram_chat_id=admin_message_drafts.telegram_chat_id)`)
-      .bind(draftId, actor, draft.message_text || null, draft.media_kind || null, draft.media_file_id || null, draft.media_mime_type || null)
-      .run();
-    if (!claimed.meta?.changes) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support draft changed, is already sending, or its destination no longer matches." });
-
-    const body = adminMessageBody(draft);
-    try {
-      if (draft.media_file_id && draft.media_kind === "photo") {
-        await tg(e, "sendPhoto", { chat_id: draft.telegram_chat_id, photo: draft.media_file_id, ...(body ? { caption: adminMessageCaption(body), parse_mode: "HTML" } : {}) });
-      } else if (draft.media_file_id && draft.media_kind === "document") {
-        await tg(e, "sendDocument", { chat_id: draft.telegram_chat_id, document: draft.media_file_id, ...(body ? { caption: adminMessageCaption(body), parse_mode: "HTML" } : {}) });
-      } else {
-        await say(e, draft.telegram_chat_id, ADMIN_MESSAGE_HEADER + "\n\n" + esc(body));
-      }
-    } catch {
-      try {
-        await auditAdminMessageDraft(e, actor, "admin_support_message_uncertain", draft, order, "Telegram support-message outcome uncertain for " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + "; draft locked as sending; " + adminMessageContentDetails(draft));
-      } catch { /* Preserve the locked sending state even if audit insertion fails. */ }
-      try {
-        await notifyAdminIfConfigured(e, "⚠️ Customer support message outcome is uncertain for " + draft.order_kind + " order <code>" + esc(String(order.checkout_code || draft.checkout_code || draft.order_id)) + "</code>. The draft remains locked as sending to prevent a duplicate. Inspect the customer conversation before any manual retry.");
-      } catch { /* The callback response below still tells the acting admin. */ }
-      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support-message outcome uncertain. Draft locked to prevent duplicates." });
-    }
-
-    const sent = await e.DB.prepare("UPDATE admin_message_drafts SET status='sent',delivered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draftId).run();
-    await auditAdminMessageDraft(e, actor, "admin_message_customer", draft, order, "Admin sent customer support message for " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + "; " + adminMessageContentDetails(draft));
-    if (!sent.meta?.changes) {
-      try { await notifyAdminIfConfigured(e, "A customer support message was sent for <code>" + esc(String(order.checkout_code || draft.order_id)) + "</code>, but the draft status changed concurrently. Inspect the audit before any retry."); } catch { /* The audit row above is the primary record. */ }
-    }
-    await say(e, chat, "✅ Support message sent for order <code>" + esc(String(order.checkout_code || order.id)) + "</code>.");
-    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support message sent once and recorded." });
+    await executeSupportDraft(e, actor, chat, draftId);
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support send action processed." });
   }
   if (data.startsWith("done:") || data.startsWith("paid:")) {
     if (!u.message || String(u.message.chat.id) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Open the bot chat to continue." });
@@ -1399,46 +1780,13 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       await say(e, chat, "<b>Contact requests needing attention</b>\nChoose a request to review its saved status. A sale notification is not payment verification.", { inline_keyboard: [...buttons, [{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Contact requests loaded." });
     }
-    if (action === "consent") {
-      const cat = await catalogue(e);
-      const rows = await e.DB.prepare("SELECT profile_id,contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts").all<any>();
-      const saved = new Map((rows.results || []).map((r:any) => [String(r.profile_id),r]));
-      const buttons = cat.slice(0,20).map((p:any) => { const c:any=saved.get(p.id); const state=c && c.sharing_enabled===1 && c.consent_confirmed_at && c.contact_value ? "enabled" : c && c.contact_value ? "disabled" : "no contact"; return [{text:(p.name+" · "+state).slice(0,60),callback_data:"admin:creator:"+p.id}]; });
-      await say(e,chat,"<b>Creator sharing permissions</b>\nChoose a current public profile. Missing contact or consent is never treated as permission.",{inline_keyboard:[...buttons,[{text:"↩️ Admin Desk",callback_data:"admin:home"}]]});
-      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Creator permissions loaded."});
-    }
-    if (action.startsWith("creator:")) {
-      const profileId=action.slice("creator:".length);
-      if(!/^[A-Za-z0-9._-]{1,50}$/.test(profileId)) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Invalid profile."});
-      const cat=await catalogue(e), profile=cat.find((p:any)=>p.id===profileId);
-      if(!profile) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Profile not found in the current catalogue."});
-      const c=await e.DB.prepare("SELECT contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts WHERE profile_id=?").bind(profileId).first<any>();
-      const enabled=Boolean(c && c.sharing_enabled===1 && c.consent_confirmed_at && c.contact_value);
-      await say(e,chat,"<b>Creator sharing permission</b>\nProfile: "+esc(profile.name)+" (<code>"+esc(profileId)+"</code>)\nContact: "+(c?.contact_value?esc(c.contact_value):"not saved")+"\nSharing: "+(enabled?"enabled with recorded admin attestation":"disabled / not confirmed")+"\n\nOnly enable sharing after the creator has explicitly authorised release of this contact.",{inline_keyboard:[[ {text:"➕ Save/update contact",callback_data:"admin:contacthelp:"+profileId} ],[ {text:"🔐 Confirm creator authorization",callback_data:"admin:consentprompt:"+profileId} ],[ {text:"🚫 Revoke sharing",callback_data:"admin:consentrevoke:"+profileId} ],[ {text:"↩️ Back to profiles",callback_data:"admin:consent"} ]]});
-      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Creator details opened."});
-    }
-    if(action.startsWith("contacthelp:")) { const profileId=action.slice("contacthelp:".length); return say(e,chat,"Save the authorized handle using:\n<code>/setcontact "+esc(profileId)+" @telegram_handle</code>\nThe contact is saved with sharing disabled.",{inline_keyboard:[[ {text:"↩️ Back",callback_data:"admin:creator:"+profileId} ]]}); }
-    if(action.startsWith("consentprompt:")) {
-      const profileId=action.slice("consentprompt:".length), c=await e.DB.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id=?").bind(profileId).first<any>();
-      if(!c || !String(c.contact_value||"").trim()) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Save the authorized contact first."});
-      await say(e,chat,"<b>Confirm creator authorization</b>\nProfile: <code>"+esc(profileId)+"</code>\nContact: "+esc(c.contact_value)+"\n\nConfirm only if the creator explicitly authorized sharing this contact.",{inline_keyboard:[[ {text:"✅ Yes, authorization exists",callback_data:"admin:consentconfirm:"+profileId} ],[ {text:"↩️ Cancel",callback_data:"admin:creator:"+profileId} ]]});
-      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Explicit confirmation required."});
-    }
     if(action.startsWith("consentconfirm:")) {
       const profileId=action.slice("consentconfirm:".length), c=await e.DB.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id=?").bind(profileId).first<any>();
       if(!c || !String(c.contact_value||"").trim()) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"No contact saved; sharing remains disabled."});
       await e.DB.prepare("UPDATE creator_contacts SET sharing_enabled=1,consent_confirmed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE profile_id=?").bind(profileId).run();
       await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(? ,'creator_consent_confirmed',?,'Admin attested authorization through UI confirmation')").bind(actor,profileId).run();
-      await say(e,chat,"✅ Sharing authorization recorded for <code>"+esc(profileId)+"</code>. This is your attestation that the creator explicitly authorized sharing.",{inline_keyboard:[[ {text:"↩️ Back to creator",callback_data:"admin:creator:"+profileId} ]]});
+      await say(e,chat,"✅ Sharing authorization recorded for <code>"+esc(profileId)+"</code>. This is your attestation that the creator explicitly authorized sharing.");
       return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Authorization attestation recorded."});
-    }
-    if(action.startsWith("consentrevoke:")) {
-      const profileId=action.slice("consentrevoke:".length);
-      const result=await e.DB.prepare("UPDATE creator_contacts SET sharing_enabled=0,consent_confirmed_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE profile_id=?").bind(profileId).run();
-      if(!result.meta?.changes) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"No saved contact to revoke."});
-      await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(? ,'creator_consent_revoked',?,'Admin revoked authorization through UI')").bind(actor,profileId).run();
-      await say(e,chat,"🚫 Sharing disabled and consent revoked for <code>"+esc(profileId)+"</code>.");
-      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Sharing revoked."});
     }
     if (action === "orders") {
       const rows = await e.DB.prepare("SELECT id,service_id,status,checkout_code,payment_reference FROM service_orders ORDER BY created_at DESC LIMIT 12").all<any>();
@@ -1455,7 +1803,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin guide opened." });
     }
     if (action === "home") {
-      await say(e, chat, "<b>FansLeak Admin Desk</b>\nChoose an action:", { inline_keyboard: [[{ text: "📥 Review contact requests", callback_data: "admin:pending" }], [{ text: "🧾 Review service orders", callback_data: "admin:orders" }], [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }], [{ text: "🛡️ Creator sharing permissions", callback_data: "admin:consent" }], [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]] });
+      await say(e, chat, "<b>FansLeak Admin Desk</b>\nChoose an action:", { inline_keyboard: [[{ text: "📥 Review contact requests", callback_data: "admin:pending" }], [{ text: "🧾 Review service orders", callback_data: "admin:orders" }], [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }], [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin menu." });
     }
     const requestMatch = action.match(/^request:([0-9a-f-]{36})$/i);
@@ -1510,8 +1858,8 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   if (r.status !== "payment_verified") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment is not verified." });
   const c = await e.DB.prepare("SELECT contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts WHERE profile_id=?").bind(r.profile_id).first<any>();
   if (!c || c.sharing_enabled !== 1 || !c.consent_confirmed_at || !String(c.contact_value || "").trim()) {
-    await notifyAdminIfConfigured(e, "Cannot prepare delivery for request <code>" + id + "</code>: sharing authorization is not confirmed for <code>" + esc(r.profile_id) + "</code>. Open /admin → Creator sharing permissions. No contact was sent.");
-    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Creator sharing permission is not confirmed." });
+    await notifyAdminIfConfigured(e, "Cannot prepare delivery for request <code>" + id + "</code>: sharing authorization is not confirmed for <code>" + esc(r.profile_id) + "</code>. Use /authorizecontact PROFILE_ID after confirming the creator explicitly authorised sharing. No contact was sent.");
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Creator authorisation is not recorded yet." });
   }
   const otherDraft = await e.DB.prepare("SELECT id,checkout_code FROM delivery_drafts WHERE admin_telegram_id=? AND status='draft' AND request_id<>? ORDER BY updated_at DESC LIMIT 1").bind(actor,id).first<any>();
   if (otherDraft) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Finish or cancel the existing contact delivery draft (code " + String(otherDraft.checkout_code || "unknown") + ") before preparing another." });
@@ -1696,6 +2044,12 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const u = new URL(request.url);
     if (request.method === "GET" && u.pathname === "/health") return json({ ok: true, service: "fansleak-contact-bot", provider: provider(env), methods: enabledMethods(env) });
+    if (request.method === "OPTIONS" && u.pathname === "/public/hidden-profiles") return new Response(null, { status: 204, headers: { "access-control-allow-origin": "https://fansleak.pages.dev", "access-control-allow-methods": "GET,OPTIONS", "access-control-allow-headers": "content-type", "access-control-max-age": "86400" } });
+    if (request.method === "GET" && u.pathname === "/public/hidden-profiles") {
+      const rows = await env.DB.prepare("SELECT profile_id FROM hidden_profiles").all<any>();
+      return new Response(JSON.stringify({ hiddenProfileIds: (rows.results || []).map((row:any) => String(row.profile_id)) }), { status: 200, headers: { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "https://fansleak.pages.dev", "cache-control": "no-store" } });
+    }
+
     if (request.method === "POST" && u.pathname === "/telegram/webhook") {
       if (!env.TELEGRAM_WEBHOOK_SECRET || !safeEq(request.headers.get("x-telegram-bot-api-secret-token") || "", env.TELEGRAM_WEBHOOK_SECRET)) return json({ error: "unauthorised" }, 401);
       let update: Update;

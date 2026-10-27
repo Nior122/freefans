@@ -22,6 +22,9 @@ function createTestDb() {
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0008_delivery_drafts.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0009_service_delivery_drafts.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0010_admin_message_drafts.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0011_admin_broadcast_drafts.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0012_hidden_profiles.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0013_admin_pending_actions.sql'), 'utf8'));
 
   return {
     raw: db,
@@ -1910,3 +1913,46 @@ test('A backend sale arriving after the receipt prompt supersedes receipt forwar
 });
 
 
+
+
+test('Admin natural-language profile deletion waits for YES, then hides profile persistently', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    await tgPost(env, adminMsg('delete profile Anaimiya'));
+    const pending = db.raw.prepare("SELECT id,action,payload,status FROM admin_pending_actions WHERE admin_telegram_id='10001'").get() as any;
+    assert.ok(pending);
+    assert.equal(pending.action, 'hide_profile');
+    assert.equal(pending.payload, 'anaimiya');
+    assert.equal(pending.status, 'pending');
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM hidden_profiles").get().cnt, 0);
+
+    await tgPost(env, adminMsg('yes'));
+    assert.equal(db.raw.prepare("SELECT status FROM admin_pending_actions WHERE id=?").get(pending.id).status, 'completed');
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM hidden_profiles WHERE profile_id='anaimiya'").get().cnt, 1);
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('hidden from website listings')));
+  } finally {
+    cleanup();
+  }
+});
+
+test('Admin broadcast requires explicit confirmation and sends to recent-order customers once', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const id = crypto.randomUUID();
+    db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,'8102','8102','anaimiya','pending_payment','FL-BCAST1')").run(id);
+    await tgPost(env, adminMsg('/broadcast Service update: your order status is available.'));
+    const draft = db.raw.prepare("SELECT id,status FROM admin_broadcast_drafts WHERE admin_telegram_id='10001'").get() as any;
+    assert.ok(draft);
+    assert.equal(draft.status, 'draft');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8102').length, 0);
+    await tgPost(env, adminMsg('yes'));
+    assert.equal(db.raw.prepare("SELECT status FROM admin_broadcast_drafts WHERE id=?").get(draft.id).status, 'sent');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8102').length, 1);
+    await tgPost(env, adminMsg('yes'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8102').length, 1, 'A completed broadcast cannot be resent by a second yes');
+  } finally {
+    cleanup();
+  }
+});

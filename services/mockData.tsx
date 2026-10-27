@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { Profile, User, UserRole, Image, MediaType } from '../types';
 import anaimiyaData from './anaimiyaData.json';
 import ruriData from './ruriData.json';
@@ -12029,6 +12029,26 @@ const MockDataContext = createContext<MockDataContextType | undefined>(undefined
 export const MockDataProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>(PROFILES);
+
+  // Admin-hidden profiles are stored in the Cloudflare Worker D1 database so
+  // visibility changes apply across browsers instead of only changing local React state.
+  useEffect(() => {
+    let active = true;
+    fetch('https://fansleak-contact-bot.nelliekate2001.workers.dev/public/hidden-profiles', { cache: 'no-store' })
+      .then(response => {
+        if (!response.ok) throw new Error('Profile visibility service unavailable');
+        return response.json() as Promise<{ hiddenProfileIds?: unknown }>;
+      })
+      .then(data => {
+        if (!active || !Array.isArray(data.hiddenProfileIds)) return;
+        const hidden = new Set(data.hiddenProfileIds.filter((id): id is string => typeof id === 'string'));
+        setProfiles(current => current.filter(profile => !hidden.has(profile.id)));
+      })
+      .catch(() => {
+        // A visibility API outage must not blank the site; existing profile data stays available.
+      });
+    return () => { active = false; };
+  }, []);
 
   const login = (email: string, role: UserRole) => {
     setUser({

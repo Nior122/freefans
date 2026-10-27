@@ -222,3 +222,22 @@ Use [`PRODUCTION-RELEASE-CHECKLIST.md`](./PRODUCTION-RELEASE-CHECKLIST.md) for t
 5. Smoke-test with the owner's own Telegram account: start a contact request from a profile (including a dotted-ID profile), confirm the code/instructions, and verify no creator handle appears anywhere before admin approval. Only store/enable a creator contact (`/setcontact`, then `/enablecontact`) after that creator has explicitly authorised sharing.
 6. Make a real low-value Selar purchase using the name + code format; confirm webhook reconciliation → manual verification → approval → single contact delivery, and that duplicate webhook deliveries are ignored.
 7. Separately smoke-test a paid claim with no attached sale using an owner-controlled test order and a non-sensitive test receipt image: confirm the bot requests the receipt only after the backend check, forwards it once to the admin with order context, leaves the order `pending_payment`, and does not verify until the admin checks Selar and uses `/verify` or `/verifyservice`. Never use a real creator's private contact as a test fixture.
+
+
+## Admin Desk commands and multimodal support
+
+The private Telegram Admin Desk supports these explicit commands:
+
+- `/profiles` — list currently visible profile IDs and names.
+- `/deleteprofile PROFILE_ID` — preview and confirm hiding a profile from public listings and the Telegram request catalogue. This is a reversible visibility change; the source files remain in GitHub.
+- `/restoreprofile PROFILE_ID` — restore a hidden profile.
+- `/orders` — inspect recent contact requests and service orders.
+- `/reject FL-XXXXXX` — reject a contact request or cancel a service order and notify its customer.
+- `/message FL-XXXXXX Your message` — open a private support draft for one customer; text and supported media are sent only after confirmation.
+- `/broadcast Your message` — draft a message to up to 100 customers with active/recent order records. Send a photo, video, or document while the draft is open to attach media. Preview before sending. Replying `YES` confirms an active broadcast draft.
+- `/expirepending` — preview and confirm closure of all pending requests/orders. This retains records for audit and does not verify payment.
+- `/authorizecontact PROFILE_ID` — record an explicit admin attestation that the creator authorised sharing the saved contact. This replaces the old Creator sharing permissions menu; the consent guard remains in place.
+
+Natural-language admin aliases include `list profiles`, `show orders`, `delete profile PROFILE_NAME`, `reject order FL-XXXXXX`, `delete all pending orders`, and `send mass messages to clients`. Destructive or bulk actions require confirmation. Payment verification remains a separate manual admin action.
+
+The bot also supports Telegram voice notes through Workers AI Whisper, image questions through Moondream vision, and optional spoken replies through MeloTTS. Voice and image requests may fall back to text if the model is unavailable or the account's free AI allocation is exhausted. Audio, image, broadcast, and profile-visibility paths must be tested against the deployed Worker after the migrations have completed.
