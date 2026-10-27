@@ -890,9 +890,9 @@ test('Non-admin users cannot invoke admin callbacks or commands', async () => {
       VALUES (?, '5120', '5120', 'anaimiya', 'pending_payment', 'selar', 'ref-attack-1', 'FL-ATK001')`).run(reqId);
     db.raw.prepare(`INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status, payment_method, payment_reference, checkout_code)
       VALUES (?, 'svc', '5121', '5121', 'pending_payment', 'selar', 'ref-attack-2', 'FL-ATK002')`).run(svcId);
-    // Consent is fully enabled, so any authorization bypass WOULD leak the handle.
-    db.raw.prepare(`INSERT INTO creator_contacts (profile_id, contact_value, sharing_enabled, consent_confirmed_at)
-      VALUES ('anaimiya', '@anaimiya_real', 1, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`).run();
+    // A saved contact must still be protected by admin-only delivery callbacks.
+    db.raw.prepare(`INSERT INTO creator_contacts (profile_id, contact_value)
+      VALUES ('anaimiya', '@anaimiya_real')`).run();
 
     const attacker = 9999;
     for (const data of [`selarverify:${reqId}`, `approve:${reqId}`, `reject:${reqId}`, `serviceverify:${svcId}`]) {
