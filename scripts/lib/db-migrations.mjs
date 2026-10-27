@@ -89,6 +89,22 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0007_front_desk_multi_requests.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0008_delivery_drafts',
+    description: 'Request-bound expiring creator-contact delivery drafts',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0008_delivery_drafts.sql'), 'utf8');
+      db.exec(sql);
+    }
+  },
+  {
+    version: '0009_service_delivery_drafts',
+    description: 'Expiring service fulfilment drafts requiring explicit confirmation',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0009_service_delivery_drafts.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
@@ -219,6 +235,15 @@ export const EXPECTED_SCHEMA = {
     'telegram_message_id', 'media_kind', 'telegram_file_id',
     'telegram_file_unique_id', 'mime_type', 'file_size', 'status',
     'admin_telegram_id', 'created_at', 'updated_at'
+  ],
+  delivery_drafts: [
+    'id', 'request_id', 'admin_telegram_id', 'checkout_code', 'message_text',
+    'media_kind', 'media_file_id', 'media_mime_type', 'status', 'expires_at',
+    'delivered_at', 'created_at', 'updated_at'
+  ],
+  service_delivery_drafts: [
+    'id', 'service_order_id', 'admin_telegram_id', 'message_text', 'status',
+    'expires_at', 'delivered_at', 'created_at', 'updated_at'
   ]
 };
 
