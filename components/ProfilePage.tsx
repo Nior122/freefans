@@ -77,13 +77,6 @@ export const ProfilePage = () => {
   const REQUIRED_WAIT_MS = 4000; // 4 seconds
 
   const profile = profiles.find(p => p.id === id);
-  const telegramBotUsername = (import.meta.env.VITE_TELEGRAM_BOT_USERNAME || 'KasiQueenbot').trim().replace(/^@/, '');
-  // Telegram ?start= parameters only allow [A-Za-z0-9_-]. Profile IDs may contain
-  // "." (e.g. emanuela.ebony), so encode dots as "_dot_"; the bot resolves the
-  // encoded value back through the public contact catalogue.
-  const contactStartParam = `contact_${(profile?.id ?? '').replace(/\./g, '_dot_')}`;
-  const contactBotUrl = telegramBotUsername ? `https://t.me/${telegramBotUsername}?start=${contactStartParam}` : undefined;
-
   if (!profile) return <Navigate to="/" replace />;
 
   const isFav = isFavorite(profile.id);
@@ -456,24 +449,6 @@ export const ProfilePage = () => {
 
         {/* Actions */}
         <div className="flex items-center gap-4 w-full max-w-sm justify-center mb-3">
-          <a
-            href={contactBotUrl ?? '#'}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(event) => {
-              if (!contactBotUrl) {
-                event.preventDefault();
-                alert('Contact requests are being set up. Please try again later.');
-              }
-            }}
-            className="flex-1 bg-[#1a1a1a] hover:bg-[#2a2a2a] text-white py-2.5 px-4 rounded-full font-bold text-base transition-colors border border-red-900/40 shadow-lg shadow-black/20 flex flex-col items-center justify-center"
-          >
-            <div className="flex items-center gap-2">
-              <MessageSquare size={18} />
-              <span>Message</span>
-            </div>
-            <span className="text-[11px] font-semibold text-red-200 tracking-wide">Request contact</span>
-          </a>
           <button
             className="animate-wobble flex-1 bg-red-700 hover:bg-red-600 text-white py-2 rounded-full font-bold text-base transition-colors shadow-lg shadow-red-900/40 flex flex-col items-center justify-center gap-0"
           >
