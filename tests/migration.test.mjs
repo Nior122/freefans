@@ -39,7 +39,8 @@ test('Migration: fresh database migrates to fully verified schema', () => {
     '0010_admin_message_drafts',
     '0011_admin_broadcast_drafts',
     '0012_hidden_profiles',
-    '0013_admin_pending_actions'
+    '0013_admin_pending_actions',
+    '0014_remove_creator_sharing_permissions'
   ]);
 
   const verified = verifySchema(db);

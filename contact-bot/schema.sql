@@ -14,7 +14,6 @@ CREATE INDEX IF NOT EXISTS idx_requests_manual_payment ON contact_requests(statu
 CREATE UNIQUE INDEX IF NOT EXISTS idx_requests_unique_manual_payment_reference ON contact_requests(manual_payment_reference) WHERE manual_payment_reference IS NOT NULL;
 CREATE TABLE IF NOT EXISTS creator_contacts (
  profile_id TEXT PRIMARY KEY, contact_value TEXT NOT NULL, contact_type TEXT NOT NULL DEFAULT 'telegram',
- sharing_enabled INTEGER NOT NULL DEFAULT 0 CHECK(sharing_enabled IN(0,1)), consent_confirmed_at TEXT,
  updated_at TEXT NOT NULL DEFAULT(strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 CREATE TABLE IF NOT EXISTS processed_sales (
