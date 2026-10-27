@@ -1124,20 +1124,8 @@ async function message(e: Env, m: Msg) {
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(?,'profile_restored',?,'Admin restored profile visibility')").bind(user, match[1]).run();
     return say(e, chat, "✅ Profile visibility restored for <code>" + esc(match[1]) + "</code>. Refresh the website to see it again.");
   }
-  if (user === e.ADMIN_TELEGRAM_ID && /^\/authorizecontact\s+/i.test(t)) {
-    const match = t.match(/^\/authorizecontact\s+([A-Za-z0-9._-]{1,50})$/i);
-    if (!match) return say(e, chat, "Usage: /authorizecontact PROFILE_ID — use only after the creator explicitly authorised sharing this contact.");
-    const profileId = match[1];
-    const cat = await catalogue(e);
-    if (!cat.some(p => p.id === profileId)) return say(e, chat, "That profile is not in the current public catalogue.");
-    const contact = await e.DB.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id=?").bind(profileId).first<any>();
-    if (!contact || !String(contact.contact_value || "").trim()) return say(e, chat, "No contact is saved for that profile. Save the authorised contact first with /setcontact.");
-    return say(e, chat, "<b>Confirm creator authorisation</b>\nProfile: <code>" + esc(profileId) + "</code>\nContact: " + esc(String(contact.contact_value)) + "\n\nConfirm only if the creator explicitly authorised release of this contact.", {
-      inline_keyboard: [[{ text: "✅ Confirm authorisation", callback_data: "admin:consentconfirm:" + profileId }], [{ text: "Cancel", callback_data: "admin:home" }]]
-    });
-  }
   if (user === e.ADMIN_TELEGRAM_ID && (t === "/admin" || t === "/menu")) {
-    return say(e, chat, "<b>FansLeak Admin Desk</b>\nChoose what you want to manage. Payment checks and contact release remain manual and consent-gated.", {
+    return say(e, chat, "<b>FansLeak Admin Desk</b>\nChoose what you want to manage. Payment checks and contact release remain manual and explicitly confirmed.", {
       inline_keyboard: [
         [{ text: "📥 Review contact requests", callback_data: "admin:pending" }],
         [{ text: "🧾 Review service orders", callback_data: "admin:orders" }],
@@ -1210,26 +1198,11 @@ async function message(e: Env, m: Msg) {
   if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/setcontact ")) {
     const [, id, handle] = t.split(/\s+/);
     if (!id || !/^[A-Za-z0-9._-]{1,50}$/.test(id) || !handle || !/^@[A-Za-z0-9_]{5,32}$/.test(handle)) return say(e, chat, "Usage: /setcontact PROFILE_ID @telegram_handle");
-    await e.DB.prepare("INSERT INTO creator_contacts(profile_id,contact_value,sharing_enabled,consent_confirmed_at) VALUES(?,?,0,NULL) ON CONFLICT(profile_id) DO UPDATE SET contact_value=excluded.contact_value,sharing_enabled=0,consent_confirmed_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')").bind(id, handle).run();
-    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id) VALUES(?,'set_contact_disabled',?)").bind(user, id).run();
-    return say(e, chat, `Saved ${esc(handle)} for ${esc(id)}, with sharing disabled. Only use /enablecontact after the creator has explicitly authorised sharing.`);
-  }
-  if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/enablecontact ")) {
-    const id = t.split(/\s+/)[1];
-    if (!id || !/^[A-Za-z0-9._-]{1,50}$/.test(id)) return say(e, chat, "Usage: /enablecontact PROFILE_ID");
-    const found = await e.DB.prepare("SELECT profile_id FROM creator_contacts WHERE profile_id=?").bind(id).first();
-    if (!found) return say(e, chat, "No contact saved. Use /setcontact first.");
-    await e.DB.prepare("UPDATE creator_contacts SET sharing_enabled=1,consent_confirmed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE profile_id=?").bind(id).run();
-    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(?,'creator_consent_confirmed',?,'Admin attested creator authorisation')").bind(user, id).run();
-    return say(e, chat, `Sharing enabled for ${esc(id)}. This records your confirmation that the creator authorised sharing.`);
-  }
-  if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/disablecontact ")) {
-    const id = t.split(/\s+/)[1];
-    if (!id || !/^[A-Za-z0-9._-]{1,50}$/.test(id)) return say(e, chat, "Usage: /disablecontact PROFILE_ID");
-    const updateRes = await e.DB.prepare("UPDATE creator_contacts SET sharing_enabled=0,consent_confirmed_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE profile_id=?").bind(id).run();
-    if (!updateRes.meta?.changes) return say(e, chat, "No contact saved for " + esc(id));
-    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(?,'creator_consent_revoked',?,'Admin revoked creator sharing consent')").bind(user, id).run();
-    return say(e, chat, `Sharing disabled and consent revoked for ${esc(id)}.`);
+    const cat = await catalogue(e);
+    if (!cat.some(p => p.id === id)) return say(e, chat, "That profile is not in the current public catalogue.");
+    await e.DB.prepare("INSERT INTO creator_contacts(profile_id,contact_value,sharing_enabled,consent_confirmed_at) VALUES(?,?,1,strftime('%Y-%m-%dT%H:%M:%fZ','now')) ON CONFLICT(profile_id) DO UPDATE SET contact_value=excluded.contact_value,sharing_enabled=1,consent_confirmed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')").bind(id, handle).run();
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(?,'contact_saved',?,'Admin saved the contact for verified contact-request fulfilment')").bind(user, id).run();
+    return say(e, chat, `✅ Saved ${esc(handle)} for ${esc(id)}. It can be included in a contact delivery only after the matching payment is manually verified and you confirm delivery.`);
   }
   if (user === e.ADMIN_TELEGRAM_ID && t === "/pending") {
     const rows = await e.DB.prepare("SELECT id,profile_id,buyer_email,status,checkout_code,payment_reference FROM contact_requests WHERE status IN('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 20").all<any>();
@@ -1244,12 +1217,10 @@ async function message(e: Env, m: Msg) {
       "/verifyservice ORDER_UUID SELAR_REFERENCE — manually verify a service payment after checking it in Selar",
       "/deliver ORDER_UUID fulfilment text — send fulfilment for a verified service order",
       "/message ORDER_CODE_OR_UUID [text] — open a customer support draft; add text and/or one photo/document, then preview and explicitly send or cancel",
-      "/setcontact PROFILE_ID @handle — store a creator contact with sharing DISABLED",
-      "/enablecontact PROFILE_ID — record that the creator explicitly authorised sharing",
-      "/disablecontact PROFILE_ID — revoke sharing consent immediately",
+      "/setcontact PROFILE_ID @handle — save the contact used for verified contact-request fulfilment",
       "",
       "If a customer says they paid and no backend sale is attached, the bot may forward their Selar receipt here with the order context and exact /verify command. A receipt is evidence only and never changes payment status by itself.",
-      "Payments are never verified automatically. Contact details are only sent after manual payment verification, your approval, and recorded creator consent."
+      "Payments are never verified automatically. Contact delivery is a separate, explicit admin action after manual payment verification."
     ].join("\n"));
   }
   if (user === e.ADMIN_TELEGRAM_ID && (t.startsWith("/verify ") || t.startsWith("/verifyservice "))) {
@@ -1408,18 +1379,12 @@ async function message(e: Env, m: Msg) {
       const row=await e.DB.prepare("SELECT COUNT(*) AS total,SUM(CASE WHEN status='pending_payment' THEN 1 ELSE 0 END) AS pending,SUM(CASE WHEN status='payment_verified' THEN 1 ELSE 0 END) AS verified,SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END) AS approved FROM contact_requests WHERE date(created_at)=date('now')").first<any>();
       return say(e,chat,"<b>📊 Today’s contact request summary</b>\nCreated: "+String(row?.total||0)+"\nAwaiting payment/manual verification: "+String(row?.pending||0)+"\nPayment verified, awaiting approval: "+String(row?.verified||0)+"\nApproved: "+String(row?.approved||0));
     }
-    if (intent.includes("sharing permission") || intent.includes("consent not confirmed") || intent.includes("without consent")) {
-      const cat=await catalogue(e), rows=await e.DB.prepare("SELECT profile_id,contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts").all<any>();
-      const saved=new Map((rows.results||[]).map((r:any)=>[String(r.profile_id),r]));
-      const missing=cat.filter((p:any)=>{const c:any=saved.get(p.id);return !(c && c.sharing_enabled===1 && c.consent_confirmed_at && c.contact_value);}).slice(0,25);
-      return say(e,chat,"<b>🛡️ Profiles without confirmed sharing permission</b>\n"+(missing.map((p:any)=>"• "+esc(p.name)+" (<code>"+esc(p.id)+"</code>)").join("\n")||"All listed profiles have a saved contact and recorded sharing authorization."));
-    }
     const deliveryCode=t.match(/\bFL-[A-Z0-9]{6}\b/i);
     if(deliveryCode && (intent.includes("deliver") || intent.includes("fulfil") || intent.includes("fulfill"))) {
       const row=await e.DB.prepare("SELECT id,profile_id,status,checkout_code,payment_reference FROM contact_requests WHERE checkout_code=?").bind(deliveryCode[0].toUpperCase()).first<any>();
       if(!row) return say(e,chat,"No contact request found for <code>"+esc(deliveryCode[0].toUpperCase())+"</code>.");
       if(row.status!=="payment_verified") return say(e,chat,"Request <code>"+esc(row.checkout_code)+"</code> is currently <b>"+esc(row.status)+"</b>. Delivery preparation requires manual payment verification first.");
-      return say(e,chat,"📝 <b>Prepare delivery</b>\nRequest: <code>"+esc(row.id)+"</code>\nCode: <code>"+esc(row.checkout_code)+"</code>\nProfile: "+esc(row.profile_id)+"\n\nTap below to open the consent-gated draft composer. No customer message is sent until you preview and confirm.",{inline_keyboard:[[ {text:"📝 Prepare delivery",callback_data:"approve:"+row.id} ]]});
+      return say(e,chat,"📝 <b>Prepare delivery</b>\nRequest: <code>"+esc(row.id)+"</code>\nCode: <code>"+esc(row.checkout_code)+"</code>\nProfile: "+esc(row.profile_id)+"\n\nTap below to open the delivery draft. No customer message is sent until you preview and confirm.",{inline_keyboard:[[ {text:"📝 Prepare delivery",callback_data:"approve:"+row.id} ]]});
     }
     const codeMatch=t.match(/\bFL-[A-Z0-9]{6}\b/i);
     if (codeMatch && (intent.includes("find") || intent.includes("request") || intent.includes("status"))) {
@@ -1604,7 +1569,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     const dm = data.match(/^draft:(preview|send|cancel):([0-9a-f-]{36})$/i);
     if (!dm) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Unknown draft action."});
     const draftAction=dm[1].toLowerCase(), draftId=dm[2];
-    const d=await e.DB.prepare("SELECT d.id,d.request_id,d.admin_telegram_id,d.checkout_code,d.message_text,d.media_kind,d.media_file_id,d.status,d.expires_at,r.telegram_chat_id,r.profile_id,r.status AS request_status,c.contact_value,c.sharing_enabled,c.consent_confirmed_at FROM delivery_drafts d JOIN contact_requests r ON r.id=d.request_id LEFT JOIN creator_contacts c ON c.profile_id=r.profile_id WHERE d.id=?").bind(draftId).first<any>();
+    const d=await e.DB.prepare("SELECT d.id,d.request_id,d.admin_telegram_id,d.checkout_code,d.message_text,d.media_kind,d.media_file_id,d.status,d.expires_at,r.telegram_chat_id,r.profile_id,r.status AS request_status,c.contact_value FROM delivery_drafts d JOIN contact_requests r ON r.id=d.request_id LEFT JOIN creator_contacts c ON c.profile_id=r.profile_id WHERE d.id=?").bind(draftId).first<any>();
     if (!d || String(d.admin_telegram_id)!==actor) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft not found for this admin."});
     if (draftAction==="cancel") {
       if(d.status!=="draft") return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Only an unsent draft can be cancelled."});
@@ -1618,14 +1583,14 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft expired or is no longer active."});
     }
     if(d.request_status!=="payment_verified") return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Payment or request state changed. Nothing was sent."});
-    if(d.sharing_enabled!==1 || !d.consent_confirmed_at || !String(d.contact_value||"").trim()) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Creator sharing consent is missing or revoked."});
+    if(!String(d.contact_value||"").trim()) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"No contact is saved for this profile. Use /setcontact PROFILE_ID @handle before preparing delivery."});
     const body=String(d.message_text||"").trim();
     if(draftAction==="preview") {
       const preview="👀 <b>Delivery preview</b>\nRequest: <code>"+d.request_id+"</code>\nCheckout code: <code>"+esc(d.checkout_code||"")+"</code>\nProfile: <code>"+esc(d.profile_id)+"</code>\n\n🎉 Congratulations! Your payment has been verified and your request approved.\n\n"+(body?esc(body):"<i>No custom message added.</i>")+"\n\nCreator contact: <b>"+esc(d.contact_value)+"</b>\n\n"+(d.media_kind?"📎 One "+esc(d.media_kind)+" attached.":"No media attached.")+"\n\n<i>Preview only — nothing has been sent.</i>";
       return say(e,chat,preview,{inline_keyboard:[[ {text:"✅ Send to customer",callback_data:"draft:send:"+draftId},{text:"✖️ Cancel",callback_data:"draft:cancel:"+draftId} ]]});
     }
     if(!body && !d.media_file_id) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Add a message or media before sending."});
-    const claimed=await e.DB.prepare("UPDATE delivery_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=? AND EXISTS (SELECT 1 FROM contact_requests r JOIN creator_contacts c ON c.profile_id=r.profile_id WHERE r.id=delivery_drafts.request_id AND r.status='payment_verified' AND c.sharing_enabled=1 AND c.consent_confirmed_at IS NOT NULL AND c.contact_value=?)").bind(draftId,actor,d.contact_value).run();
+    const claimed=await e.DB.prepare("UPDATE delivery_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=? AND EXISTS (SELECT 1 FROM contact_requests r JOIN creator_contacts c ON c.profile_id=r.profile_id WHERE r.id=delivery_drafts.request_id AND r.status='payment_verified' AND c.contact_value=?)").bind(draftId,actor,d.contact_value).run();
     if(!claimed.meta?.changes) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft is already sending or inactive."});
     const deliveryText="🎉 <b>Congratulations!</b> Your payment has been verified and your request approved.\n\n"+(body?esc(body)+"\n\n":"")+"Creator contact: <b>"+esc(d.contact_value)+"</b>\n\nPlease respect the creator boundaries.";
     try {
@@ -1775,14 +1740,6 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       await say(e, chat, "<b>Contact requests needing attention</b>\nChoose a request to review its saved status. A sale notification is not payment verification.", { inline_keyboard: [...buttons, [{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Contact requests loaded." });
     }
-    if(action.startsWith("consentconfirm:")) {
-      const profileId=action.slice("consentconfirm:".length), c=await e.DB.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id=?").bind(profileId).first<any>();
-      if(!c || !String(c.contact_value||"").trim()) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"No contact saved; sharing remains disabled."});
-      await e.DB.prepare("UPDATE creator_contacts SET sharing_enabled=1,consent_confirmed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE profile_id=?").bind(profileId).run();
-      await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(? ,'creator_consent_confirmed',?,'Admin attested authorization through UI confirmation')").bind(actor,profileId).run();
-      await say(e,chat,"✅ Sharing authorization recorded for <code>"+esc(profileId)+"</code>. This is your attestation that the creator explicitly authorized sharing.");
-      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Authorization attestation recorded."});
-    }
     if (action === "orders") {
       const rows = await e.DB.prepare("SELECT id,service_id,status,checkout_code,payment_reference FROM service_orders ORDER BY created_at DESC LIMIT 12").all<any>();
       const lines = (rows.results || []).map(r => "• <code>" + esc(r.checkout_code || r.id) + "</code> — " + esc(r.service_id || "service") + " — " + esc(r.status) + " — " + (r.payment_reference ? "sale reference attached" : "no sale reference"));
@@ -1794,7 +1751,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Customer-message instructions opened." });
     }
     if (action === "help") {
-      await say(e, chat, "<b>Admin guide</b>\n• Review the real sale in Selar before confirming payment.\n• Payment confirmation and contact approval are separate actions.\n• Contact delivery requires explicit creator consent.\n• Use /message ORDER_CODE_OR_UUID to open a customer support draft; nothing sends until you preview and confirm.\n• Use /help for all supported commands.\n• AI replies cannot verify payments or approve contact delivery.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
+      await say(e, chat, "<b>Admin guide</b>\n• Review the real sale in Selar before confirming payment.\n• Payment confirmation and contact approval are separate actions.\n• Contact delivery requires a saved contact and a manually verified payment.\n• Use /message ORDER_CODE_OR_UUID to open a customer support draft; nothing sends until you preview and confirm.\n• Use /help for all supported commands.\n• AI replies cannot verify payments or approve contact delivery.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin guide opened." });
     }
     if (action === "home") {
@@ -1851,10 +1808,10 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Rejected." });
   }
   if (r.status !== "payment_verified") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment is not verified." });
-  const c = await e.DB.prepare("SELECT contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts WHERE profile_id=?").bind(r.profile_id).first<any>();
-  if (!c || c.sharing_enabled !== 1 || !c.consent_confirmed_at || !String(c.contact_value || "").trim()) {
-    await notifyAdminIfConfigured(e, "Cannot prepare delivery for request <code>" + id + "</code>: sharing authorization is not confirmed for <code>" + esc(r.profile_id) + "</code>. Use /authorizecontact PROFILE_ID after confirming the creator explicitly authorised sharing. No contact was sent.");
-    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Creator authorisation is not recorded yet." });
+  const c = await e.DB.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id=?").bind(r.profile_id).first<any>();
+  if (!c || !String(c.contact_value || "").trim()) {
+    await notifyAdminIfConfigured(e, "Cannot prepare delivery for request <code>" + id + "</code>: no contact is saved for <code>" + esc(r.profile_id) + "</code>. Use /setcontact PROFILE_ID @handle to add the fulfilment contact. No contact was sent.");
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "No contact is saved for this profile." });
   }
   const otherDraft = await e.DB.prepare("SELECT id,checkout_code FROM delivery_drafts WHERE admin_telegram_id=? AND status='draft' AND request_id<>? ORDER BY updated_at DESC LIMIT 1").bind(actor,id).first<any>();
   if (otherDraft) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Finish or cancel the existing contact delivery draft (code " + String(otherDraft.checkout_code || "unknown") + ") before preparing another." });
