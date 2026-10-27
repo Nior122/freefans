@@ -2,31 +2,30 @@
 
 One Telegram bot supports two separate Selar products on a unified Cloudflare Worker with D1 storage. The incoming deep link chooses the customer flow; customers are never shown an ambiguous product menu.
 
-**Core safety rule, enforced in code and tests:** a webhook, an email, an order code, a customer tap, a customer saying they paid, or a submitted receipt can *never* verify a payment. Only the configured Telegram administrator can verify payment, and creator contact details are only sent when *all* of these are true for the same request and creator:
+**Core safety rule, enforced in code and tests:** a webhook, an email, an order code, a customer tap, a customer saying they paid, or a submitted receipt can *never* verify a payment. Only the configured Telegram administrator can verify payment. There is **no creator contact to store, authorize, or share**. A verified profile request is fulfilled only when both of these are true for the same request:
 
 1. Payment was manually verified by the administrator (`status = 'payment_verified'`).
-2. The administrator approves the specific request (`approve` callback).
-3. Creator sharing consent is explicitly recorded (`creator_contacts.sharing_enabled = 1` **and** `consent_confirmed_at IS NOT NULL`) for that exact profile, re-checked immediately before the contact is sent.
+2. The administrator prepares their own delivery message and/or media for that exact customer and explicitly confirms sending it.
 
-Missing rows, failed queries, revoked consent, unknown statuses, and identity mismatches all fail closed (nothing is sent).
+The Worker does not append anything from the legacy `creator_contacts` table. Missing rows, failed queries, unknown statuses, and identity mismatches fail closed (nothing is sent).
 
 ## Customer flows
 
-### 1. FansLeak contact/assessment flow
+### 1. FansLeak profile-request/assessment flow
 
-1. The customer opens a creator profile's **Message / Request contact** button on FansLeak (`/start contact_PROFILE_ID`). Profile IDs containing `.` are encoded as `_dot_` because Telegram start parameters only allow `A–Z a–z 0–9 _ -`; the bot resolves both forms against the live catalogue.
+1. Creator profiles are browsed on the FansLeak website; the bot does **not** provide a client-side creator/profile list. A request starts from an authorized profile-specific `/start contact_PROFILE_ID` deep link. The website Subscribe control remains non-clickable unless separately authorized. Profile IDs containing `.` are encoded as `_dot_` because Telegram start parameters only allow `A–Z a–z 0–9 _ -`; the bot resolves both forms against the live catalogue.
 2. The bot loads the public catalogue (see below), rejects unknown/malformed profile IDs, and permits up to three unpaid contact requests per Telegram user; contact and service purchases are independent.
 3. A unique `FL-XXXXXX` checkout code is generated, checked against both order tables, and stored on a `pending_payment` request. **No email is required to start checkout.**
 4. The customer taps **Pay with Selar**, opens the configured checkout, and enters their full name followed by the exact code in Selar's **customer name field** (e.g. `Joseph Unaogu FL-7K4P9A`).
 5. After checkout, the customer taps **Done** or **I've paid — check for my sale** (or sends `/paid` / “I have paid”). The bot first checks the existing backend records. If no sale is attached and the checkout name has not been recorded, it asks for the exact name + code; that only records `checkout_name` and never confirms payment.
-6. **Optional fallback email:** at any point the customer may send an email address. It is stored on their pending request, the admin is alerted, and it is only ever a *reconciliation clue*. Customers are told never to send passwords, PINs, or OTPs.
-7. When the sale webhook arrives, the bot attaches it for admin review if either (a) the checkout code identifies exactly one pending order, or (b) the sale has no unique code match and the full customer name exactly matches one saved checkout name after case/whitespace normalization. A code match does not require the name to match. Full-name matching never uses partial names and must be unique. Email and price are never used as matching criteria. Unmatched or ambiguous webhook events return without an unsolicited admin notification. If the customer taps a paid-check button and no sale is attached, the receipt-review fallback below asks for a Selar receipt; the admin must check Selar directly before using `/verify`.
-8. After payment verification, the admin separately approves or rejects. Approval sends the creator's contact only if creator consent is recorded (see the rule above).
+6. **Optional email:** at any point the customer may send an email address. It may be stored on their pending request as audit information and shown to the admin, but it can never match, attach, verify, or approve an order. Customers are told never to send passwords, PINs, or OTPs.
+7. When the sale webhook arrives, the bot attaches it for admin review only if either (a) the supplied checkout code identifies exactly one pending order and any saved checkout name agrees with the supplied name, or (b) no checkout code was supplied and the distinctive full customer name exactly matches one saved checkout name after case/whitespace normalization. A supplied code that belongs to a different order is conflicting evidence and blocks name-only attachment. Full-name matching never uses partial names and must be unique. Email and price are never used as matching criteria. Unmatched or ambiguous webhook events return without an unsolicited admin notification. If the customer taps a paid-check button and no sale is attached, the receipt-review fallback below asks for a Selar receipt; the admin must check Selar directly before using `/verify`.
+8. After manual payment verification, the admin separately prepares the customer's fulfilment. The customer receives only the message, media, or other content the admin composed in the delivery draft and explicitly confirmed; no creator contact is added.
 
 ### Front-desk conversation and request limits
 
-- Customers can continue chatting while any contact request is pending. The assistant receives a small read-only summary of that Telegram user's own recent requests and service orders, so it can explain saved statuses without exposing other customers' data or creator contact details.
-- Up to **three unpaid contact requests** may be open per Telegram account. A request in `awaiting_email` or `pending_payment` counts toward the limit. Once an admin manually verifies payment, that request no longer counts toward the three unpaid slots; verification, approval, and creator-consent gates remain unchanged.
+- Customers can continue chatting while any profile request is pending. The assistant receives a small read-only summary of that Telegram user's own recent requests and service orders, so it can explain saved statuses without exposing other customers' data or private creator information.
+- Up to **three unpaid profile requests** may be open per Telegram account. A request in `awaiting_email` or `pending_payment` counts toward the limit. Once an admin manually verifies payment, that request no longer counts toward the three unpaid slots; payment verification and delivery remain separate manual steps.
 - At the limit, the bot offers inline **🔎 Check** buttons for the customer's own pending requests instead of a cold block. Each request's checkout instructions also include a **🔎 I've paid — check again** button.
 - Messages such as “I've paid, please check again” invoke the deterministic paid-claim handler, which re-reads the customer's saved order and attached sale reference. The AI cannot verify payment or run arbitrary commands. If no sale is attached, the existing name/receipt/admin reconciliation path is used; repeated claims do not themselves mark payment verified.
 - Contact requests are independent records with separate codes and statuses. Service-order creation and its one-active-order constraint remain separate.
@@ -35,8 +34,8 @@ Missing rows, failed queries, revoked consent, unknown statuses, and identity mi
 
 1. The customer opens `https://t.me/<BOT_USERNAME>?start=service_SERVICE_ID`.
 2. The bot creates a `service_orders` row (with its own `FL-XXXXXX` code) and the assistant chats to understand the request. The code is shown when the customer types `PAY` and receives the service checkout link.
-3. Checkout, **Done**, **I've paid**, fallback email, webhook reconciliation, receipt review, and manual verification (`serviceverify:` callback or `/verifyservice`) mirror the contact flow but only ever touch `service_orders`.
-4. After manual payment verification, the admin enters `/deliver ORDER_ID fulfilment text`. This creates an expiring preview draft; the order remains `payment_verified` and no customer message is sent until the admin taps **Confirm and send**. Confirmed sends are status-claimed and audited. If Telegram's response is uncertain, the draft remains locked as `sending` to prevent a blind duplicate; inspect Telegram before taking any manual recovery action. Service orders never release creator contacts, and contact callbacks never mutate service orders (covered by tests).
+3. Checkout, **Done**, **I've paid**, optional email audit information, webhook reconciliation, receipt review, and manual verification (`serviceverify:` callback or `/verifyservice`) mirror the profile-request flow but only ever touch `service_orders`.
+4. After manual payment verification, the admin enters `/deliver ORDER_ID fulfilment text`. This creates an expiring preview draft; the order remains `payment_verified` and no customer message is sent until the admin taps **Confirm and send**. Confirmed sends are status-claimed and audited. If Telegram's response is uncertain, the draft remains locked as `sending` to prevent a blind duplicate; inspect Telegram before taking any manual recovery action. Service fulfilment is separate from profile-request delivery, and callbacks for one flow never mutate the other (covered by tests).
 
 ### Paid-claim and Selar receipt-review fallback
 
@@ -49,7 +48,7 @@ This fallback is used only after the customer claims payment through **Done**, *
 5. Only if there is still no attached sale does it create a `receipt_review_prompts` row and ask the customer, in their private bot chat, to forward the Selar receipt as a Telegram photo or a PDF/JPG/PNG/WebP document (20 MB maximum based on Telegram's reported size).
 6. The Worker re-checks for a sale immediately before accepting and again immediately before forwarding, so a late Selar/Zapier sale supersedes the receipt path. It sends the Telegram `file_id` directly to `ADMIN_TELEGRAM_ID` with the order UUID, flow, public profile/service ID, checkout code/name, saved email clue, Telegram user context, submission ID, and the exact `/verify …` or `/verifyservice …` command for use *only after* checking Selar.
 7. `payment_receipt_submissions` records delivery state (`forwarding`, `forwarded`, `delivery_failed`, or `superseded`) and Telegram file identifiers only — not receipt contents, filenames, captions, or OCR text. Unique indexes on `(telegram_user_id, telegram_message_id)` and `(order_id, telegram_file_unique_id)`, plus a status-claimed forward, make duplicate updates and retries idempotent. A Telegram delivery failure leaves the prompt open and the submission retryable.
-8. A forwarded receipt is evidence only. It never sets `payment_reference`, `payment_verified`, `approved`, or `fulfilled`, and it never bypasses creator consent or admin approval.
+8. A forwarded receipt is evidence only. It never sets `payment_reference`, `payment_verified`, `approved`, or `fulfilled`, and it never bypasses manual payment verification or the admin's separate delivery confirmation.
 
 Receipts are accepted only in a private chat (`chat_id` matching the sender). Unsupported files are rejected without creating a submission. Logs contain only sanitized Telegram delivery errors; bot tokens, captions, filenames, and file contents are not logged.
 
@@ -58,7 +57,7 @@ Receipts are accepted only in a private chat (`chat_id` matching the sender). Un
 ## Public catalogue and privacy
 
 - `scripts/generate-contact-catalogue.mjs` runs in the site `prebuild` and writes `public/contact-catalogue.json` from the visible site profiles. Entries contain **only** `{ id, name }` — stable public profile ID and display name. New profiles appear automatically on the next site build; there is no separate hardcoded creator list in the bot.
-- The bot fetches `${SITE_URL}/contact-catalogue.json` at request time, validates each entry, and only ever carries `id` + `name` into bot logic. Creator Telegram handles live exclusively in the private D1 `creator_contacts` table and are never present in public JSON, client bundles, pre-approval messages, webhook responses, or logs.
+- The bot fetches `${SITE_URL}/contact-catalogue.json` at request time, validates each entry, and only ever carries `id` + `name` into bot logic. Clients cannot list those profiles in the bot; only the configured admin can use `/profiles` in the private Admin Desk chat. The legacy D1 `creator_contacts` table may still exist for historical schema compatibility, but the Worker no longer reads or writes it for request delivery and no new creator contact should be stored there.
 - To regenerate manually: `node scripts/generate-contact-catalogue.mjs` (then commit the result; `npm test` fails if the committed catalogue drifts from the source profiles). Output is deterministic except for the `generatedAt` timestamp.
 - Regenerate + verify locally with: `npm test` (includes catalogue privacy, completeness, handle-leak, and Telegram start-parameter tests).
 
@@ -111,7 +110,7 @@ Accepted field aliases (Zapier should pass the Selar values through under any on
 | Exact product code (required, single product only) | `product_code`, `productCode`, `all_product_codes`, `allProductCodes` |
 | Buyer email (optional clue) | `email`, `buyer_email`, `customer_email`, `customerEmail`, `customer.email` |
 
-Processing: route by exact product code → extract code with `/\bFL-[A-Z0-9]{6}\b/i` → match the unique `pending_payment` order by code (a unique code match does not require the customer name to match) → otherwise if no code match, match by exact normalized full customer name if uniquely matched against a saved checkout name. Email and price are never used as matching criteria. Ambiguous or unmatched events return `200 { matched: false, reason }` without an unsolicited admin notification, and change nothing. A matched sale attaches `payment_reference` (status stays `pending_payment`), records `processed_sales` with `INSERT OR IGNORE` (duplicate deliveries return `{ duplicate: true }` with no repeated alerts), and sends the admin a **Confirm payment manually** prompt. If processing fails after the dedup marker is written, the marker is removed so a sender retry can reprocess, and the admin is alerted.
+Processing: route by exact product code → extract a code with `/\bFL-[A-Z0-9]{6}\b/i` → if a code was supplied, match only the unique `pending_payment` order with that exact code (and require any saved checkout name to agree); if no code was supplied, match only by a distinctive exact normalized full customer name saved on exactly one pending order. A supplied code for another order is conflicting evidence and blocks name-only attachment. Email and price are never used as matching criteria. Ambiguous or unmatched events return `200 { matched: false, reason: "no_unique_code_or_name_match" }` without an unsolicited admin notification, and change nothing. A matched sale attaches `payment_reference` (status stays `pending_payment`), records `processed_sales` with `INSERT OR IGNORE` (duplicate deliveries return `{ duplicate: true }` with no repeated alerts), and sends the admin a **Confirm payment manually** prompt. If processing fails after the dedup marker is written, the marker is removed so a sender retry can reprocess, and the admin is alerted.
 
 ### `POST /webhooks/selar-abandoned-cart`
 
@@ -138,26 +137,24 @@ Telegram updates require the `x-telegram-bot-api-secret-token` header to match `
 
 ## Admin commands (only `ADMIN_TELEGRAM_ID`; everyone else is rejected)
 
-Open `/admin` in the private bot chat for the button-based Admin Desk. The dashboard buttons open contact-request review, service-order review, customer-message instructions, and the safety guide. Every admin callback requires the configured admin Telegram user ID. Use `/message FL-XXXXXX [your message]` or the full order UUID to open an expiring customer-support draft for the Telegram account linked to that order. The draft accepts plain text and one Telegram photo or PDF/image document; nothing is sent until the admin previews it and taps **Send to customer**. Support drafts are separate from contact delivery and service fulfilment, do not overlap with an editable contact-delivery draft, and do not alter payment, approval, consent, delivery, or fulfilment status. Unknown slash commands from the configured admin return an admin-specific help hint instead of being treated as customer chat.
+Open `/admin` in the private bot chat for the button-based Admin Desk. Admin commands, callbacks, draft editing, and admin media require both the configured admin Telegram user ID and the private chat whose chat ID equals that user ID. Use `/message FL-XXXXXX [your message]` or the full order UUID to open an expiring customer-support draft for the Telegram account linked to that order. The draft accepts plain text and one Telegram photo, video, or PDF/image document; nothing is sent until the admin previews it and taps **Send to customer**. Support drafts are separate from request delivery and service fulfilment, do not overlap with an editable request-delivery draft, and do not alter payment, approval, delivery, or fulfilment status. Unknown slash commands from the configured admin return an admin-specific help hint instead of being treated as customer chat. A voice transcript is echoed first; a voice-derived YES, payment verification, or rejection is not executed—the admin must tap a button or type the exact command/YES.
 
 
 - `/admin` or `/menu` — open the button-based Admin Desk.
 - `/help` — list these commands.
 - `/pending` — contact requests awaiting payment verification/final approval (shows status, order code, and whether a sale reference is attached).
 - `/orders` — recent service orders (request text stays hidden until payment is verified).
-- `/verify REQUEST_UUID SELAR_REFERENCE` — manually verify a **contact** payment after checking it in Selar. Sets `payment_verified`, records the reference in `processed_sales` (so one reference can never verify two orders and a late webhook becomes a duplicate), audits the action, and offers Approve/Reject. It does **not** approve or send contact details.
+- `/verify REQUEST_UUID SELAR_REFERENCE` — manually verify a **profile-request** payment after checking it in Selar. Sets `payment_verified`, records the reference in `processed_sales` (so one reference can never verify two orders and a late webhook becomes a duplicate), audits the action, and offers **Prepare delivery** / **Reject**. It does **not** send request fulfilment by itself.
 - `/verifyservice ORDER_UUID SELAR_REFERENCE` — same for a **service** order.
-- Inline buttons on webhook alerts: **Confirm payment manually** (`selarverify:` / `serviceverify:`), then **Approve & send contact** / **Reject** for contact requests. All are idempotent; repeats are no-ops.
+- Inline buttons on webhook alerts: **Confirm payment manually** (`selarverify:` / `serviceverify:`), then **Prepare delivery** / **Reject** for profile requests. The internal `approve:` callback name is retained for compatibility; it only opens a draft and sends nothing until the admin confirms the composed delivery.
 - Receipt-review messages: when no backend sale is attached, the bot may send the admin a customer-submitted Selar receipt photo/document with order context and an exact `/verify …` / `/verifyservice …` command. Compare it with Selar first; the receipt alone changes nothing.
-- `/deliver ORDER_UUID fulfilment text` — send fulfilment for a `payment_verified` service order (exactly-once claim, retry-safe on Telegram failure).
-- `/message ORDER_CODE_OR_UUID [message]` — open a 30-minute support draft for the customer attached to a contact request or service order. Add or replace text, optionally attach one photo/document, preview it, then explicitly send or cancel. It does not change payment, approval, consent, delivery, or fulfilment status; an uncertain Telegram send remains locked against blind retries.
-- `/setcontact PROFILE_ID @handle` — store a creator's Telegram handle with sharing **disabled** and any previous consent cleared.
-- `/enablecontact PROFILE_ID` — record the admin's attestation that the creator *explicitly authorised* sharing this contact; sets `sharing_enabled = 1` and `consent_confirmed_at`.
-- `/disablecontact PROFILE_ID` — immediately revoke sharing (`sharing_enabled = 0`, `consent_confirmed_at = NULL`). Future approvals fail closed, including an approval already in flight (consent is re-checked just before sending).
+- `/deliver ORDER_UUID fulfilment text` — open an expiring service-fulfilment draft for a `payment_verified` service order; preview it and explicitly confirm before anything is sent.
+- `/message ORDER_CODE_OR_UUID [message]` — open a 30-minute support draft for the customer attached to a profile request or service order. Add or replace text, optionally attach one photo, video, or PDF/image document, preview it, then explicitly send or cancel. It does not change payment, approval, delivery, or fulfilment status; an uncertain Telegram send remains locked against blind retries.
+- `/setcontact`, `/enablecontact`, `/disablecontact`, and `/authorizecontact` — **retired**. They save nothing and send nothing. FansLeak has no creator contact to share; after manually verifying payment, use **Prepare delivery** and send the customer the admin's chosen message/media through the bot.
 
-Every verification, approval, rejection, consent change, and fulfilment writes an `admin_audit` row (admin ID, action, request/order + profile IDs, details incl. payment reference where relevant, timestamp).
+Every verification, approval/delivery, rejection, and fulfilment writes an `admin_audit` row (admin ID, action, request/order + profile IDs, details incl. payment reference where relevant, timestamp).
 
-Reviewing ambiguous sales: the admin alert states the reason (wrong product, non-paid status, or no unique code/name match). Confirm the real payment in Selar, find the intended request via `/pending` / `/orders` (match the `FL-XXXXXX` code, never the amount), then `/verify …` with the exact Selar reference. Emails shown in alerts are customer-provided clues, never proof.
+Reviewing ambiguous sales: the admin alert states the reason (wrong product, non-paid status, or no unique code/name match). Confirm the real payment in Selar, find the intended request via `/pending` / `/orders` (use the `FL-XXXXXX` code or exact saved checkout name, never email or amount), then `/verify …` with the exact Selar reference. Any email shown is audit context only, never matching evidence or proof.
 
 ---
 
@@ -173,11 +170,15 @@ Baseline `contact-bot/schema.sql` (`0001_baseline`) plus ordered migrations:
 | `0005_one_active_request_per_user` | `contact-bot/migrations/0005_one_active_request_per_user.sql` | Partial unique indexes: one active contact request / service order per Telegram user. Blocks with a clear error if duplicate active rows already exist; reconcile manually (keep the newest legitimate request, reject/cancel the rest), then re-run. |
 | `0006_receipt_review` | `contact-bot/migrations/0006_receipt_review.sql` | `receipt_review_prompts` and `payment_receipt_submissions` for the manual receipt fallback, including unique Telegram-message/file indexes for idempotent retries. It stores file identifiers and delivery state only, never receipt contents/captions. |
 | `0007_front_desk_multi_requests` | `contact-bot/migrations/0007_front_desk_multi_requests.sql` | Removes the one-active-contact-request unique index. The Worker allows up to three unpaid contact requests per Telegram account; service orders retain their separate one-active-order guard. |
-| `0008_delivery_drafts` | `contact-bot/migrations/0008_delivery_drafts.sql` | Expiring request-bound creator-contact delivery drafts, optional single media attachment, send-state lock, and delivery audit support. |
+| `0008_delivery_drafts` | `contact-bot/migrations/0008_delivery_drafts.sql` | Expiring request-bound admin delivery drafts, optional single media attachment, send-state lock, and delivery audit support. |
 | `0009_service_delivery_drafts` | `contact-bot/migrations/0009_service_delivery_drafts.sql` | Expiring service fulfilment drafts requiring a preview and explicit admin confirmation before sending. |
 | `0010_admin_message_drafts` | `contact-bot/migrations/0010_admin_message_drafts.sql` | Dedicated expiring general customer-support drafts for either order type, with optional single media, one editable draft per admin, and a send-state lock. |
+| `0011_admin_broadcast_drafts` | `contact-bot/migrations/0011_admin_broadcast_drafts.sql` | Expiring admin broadcast drafts with optional media and send-state tracking. |
+| `0012_hidden_profiles` | `contact-bot/migrations/0012_hidden_profiles.sql` | Reversible website/catalogue profile-visibility overrides. |
+| `0013_admin_pending_actions` | `contact-bot/migrations/0013_admin_pending_actions.sql` | Expiring one-at-a-time admin confirmations for profile hiding and snapshot-bound pending-order closure. |
+| `0014_remove_creator_sharing_permissions` | `contact-bot/migrations/0014_remove_creator_sharing_permissions.sql` | Historical migration that removed sharing/consent columns from the now-legacy `creator_contacts` table. Current request delivery does not read that table. |
 
-Apply/inspect with `node scripts/migrate-d1.mjs --remote` (requires Wrangler auth; used by the deploy workflow *before* the Worker deploy, so a failed migration leaves the old Worker running). It tracks applied versions in `schema_migrations` and verifies all 12 application tables, expected columns, and the unique indexes afterwards. Applied versions can be inspected read-only:
+Apply/inspect with `node scripts/migrate-d1.mjs --remote` (requires Wrangler auth; used by the deploy workflow *before* the Worker deploy, so a failed migration leaves the old Worker running). It tracks applied versions in `schema_migrations` and verifies all 15 application tables, expected columns, and the unique indexes afterwards. Applied versions can be inspected read-only:
 
 ```bash
 npx wrangler@4 d1 execute fansleak-contact-requests --remote \
@@ -215,12 +216,12 @@ CI (`.github/workflows/check-contact-bot.yml`) runs the test suite, `tsc`, and t
 
 Use [`PRODUCTION-RELEASE-CHECKLIST.md`](./PRODUCTION-RELEASE-CHECKLIST.md) for the release gate, deployment sequence, smoke tests, stop conditions, and rollback guidance. It is a preparation document; it does not authorize or trigger production changes.
 
-1. Merge the reviewed PR into `fan`.
-2. Run **Actions → Deploy FansLeak contact bot → Run workflow** *from `fan`*, entering both Selar checkout URLs and exact product codes. It preflights secrets, applies all pending migrations (including `0008`, `0009`, and `0010`) with verification, deploys the Worker, writes Worker secrets, and reconnects the Telegram webhook. If the `0005` pre-check reports duplicate active rows, reconcile them as described above and re-run.
+1. Merge the reviewed PR into `fan`. Merging or pushing to `fan` does **not** deploy the Worker.
+2. Manually run **Actions → Deploy FansLeak contact bot → Run workflow** *from `fan`*, entering both Selar checkout URLs and exact product codes. It preflights secrets, applies all pending migrations with verification, deploys the Worker, writes Worker secrets, and reconnects the Telegram webhook. If the `0005` pre-check reports duplicate active rows, reconcile them as described above and re-run.
 3. Preserve the existing production Zapier configuration. The receipt fallback requires no Zapier change; only use the fresh-environment POST notes above when provisioning a genuinely new environment.
 4. Confirm Cloudflare Pages serves the rebuilt site (fresh `contact-catalogue.json`, Message buttons) and that `VITE_TELEGRAM_BOT_USERNAME` matches the live bot if it ever changes.
-5. Smoke-test with the owner's own Telegram account: start a contact request from a profile (including a dotted-ID profile), confirm the code/instructions, and verify no creator handle appears anywhere before admin approval. Only store/enable a creator contact (`/setcontact`, then `/enablecontact`) after that creator has explicitly authorised sharing.
-6. Make a real low-value Selar purchase using the name + code format; confirm webhook reconciliation → manual verification → approval → single contact delivery, and that duplicate webhook deliveries are ignored.
+5. Smoke-test with owner-controlled Telegram accounts: confirm a client sending `/creators` or `/profiles` receives only the website direction and no profile list; confirm the configured admin in the private chat can use `/profiles` and `/profiles SEARCH`; start a profile request (including a dotted-ID profile) and confirm the code/instructions. Do not use the retired creator-contact commands—no creator contact exists in this flow.
+6. Make a real low-value Selar purchase using the name + code format; confirm webhook reconciliation → manual verification → admin delivery draft → explicit send of only the admin-composed message/media, and that duplicate webhook deliveries are ignored.
 7. Separately smoke-test a paid claim with no attached sale using an owner-controlled test order and a non-sensitive test receipt image: confirm the bot requests the receipt only after the backend check, forwards it once to the admin with order context, leaves the order `pending_payment`, and does not verify until the admin checks Selar and uses `/verify` or `/verifyservice`. Never use a real creator's private contact as a test fixture.
 
 
@@ -228,16 +229,16 @@ Use [`PRODUCTION-RELEASE-CHECKLIST.md`](./PRODUCTION-RELEASE-CHECKLIST.md) for t
 
 The private Telegram Admin Desk supports these explicit commands:
 
-- `/profiles` — list currently visible profile IDs and names.
+- `/profiles [search text]` — admin-only private-chat list/search of currently visible website profile IDs and names, sent in safe chunks. Clients sending `/profiles` or `/creators` are directed to the website and receive no list.
 - `/deleteprofile PROFILE_ID` — preview and confirm hiding a profile from public listings and the Telegram request catalogue. This is a reversible visibility change; the source files remain in GitHub.
 - `/restoreprofile PROFILE_ID` — restore a hidden profile.
 - `/orders` — inspect recent contact requests and service orders.
 - `/reject FL-XXXXXX` — reject a contact request or cancel a service order and notify its customer.
 - `/message FL-XXXXXX Your message` — open a private support draft for one customer; text and supported media are sent only after confirmation.
 - `/broadcast Your message` — draft a message to up to 100 customers with active/recent order records. Send a photo, video, or document while the draft is open to attach media. Preview before sending. Replying `YES` confirms an active broadcast draft.
-- `/expirepending` — preview and confirm closure of all pending requests/orders. This retains records for audit and does not verify payment.
-- `/authorizecontact PROFILE_ID` — record an explicit admin attestation that the creator authorised sharing the saved contact. This replaces the old Creator sharing permissions menu; the consent guard remains in place.
+- `/expirepending` — preview and confirm closure of the exact unpaid order IDs/statuses captured at preview time. It excludes `payment_verified` and `payment_review`, skips orders changed or created after preview, retains records for audit, and does not verify payment.
+- `/setcontact`, `/enablecontact`, `/disablecontact`, `/authorizecontact` — retired no-ops with an explanatory reply. There is no creator-contact authorization workflow because no creator contact is shared.
 
 Natural-language admin aliases include `list profiles`, `show orders`, `delete profile PROFILE_NAME`, `reject order FL-XXXXXX`, `delete all pending orders`, and `send mass messages to clients`. Destructive or bulk actions require confirmation. Payment verification remains a separate manual admin action.
 
-The bot also supports Telegram voice notes through Workers AI Whisper, image questions through Moondream vision, and optional spoken replies through MeloTTS. Voice and image requests may fall back to text if the model is unavailable or the account's free AI allocation is exhausted. Audio, image, broadcast, and profile-visibility paths must be tested against the deployed Worker after the migrations have completed.
+The bot also supports Telegram voice notes through Workers AI Whisper, image questions through the configured vision path, and optional spoken replies through MeloTTS. Voice transcripts are echoed to the admin. A voice-derived YES, `/verify`, `/verifyservice`, or rejection is blocked and must be repeated by an explicit button tap or typed command/YES. Workers AI features are metered beyond any applicable account allowance and must not be represented as unconditionally free; live behaviour still requires deployed-Worker testing.

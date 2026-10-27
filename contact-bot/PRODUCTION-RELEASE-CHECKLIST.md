@@ -4,8 +4,8 @@
 **Target branch:** `fan`  
 **Worker:** `fansleak-contact-bot`  
 **D1 database:** `fansleak-contact-requests`  
-**Status:** Deployed to production (Workflow run 40447735934 on 2026-10-27).  
-**Safety boundary:** Do not alter remote migrations, change Telegram's webhook, or send real creator contact details without authorization.
+**Status:** Historical record for the PR #33 production release (Workflow run 40447735934 on 2026-10-27). Sections describing creator-sharing consent are historical and are superseded by the current Phase B model in `README.md`: there is no creator contact to share; clients browse profiles on the website; the admin fulfils a manually verified request by sending their own composed message/media in the bot. Do not use the historical consent checks below as current release gates.
+**Safety boundary:** Do not alter remote migrations, change Telegram's webhook, or send private creator contact details. Current production deployment is manual `workflow_dispatch` only; merging to `fan` does not deploy.
 
 ## 1. Release candidate verification
 
@@ -101,3 +101,17 @@ Fill in after the authorized release:
 - Telegram webhook confirmed: `https://fansleak-contact-bot.nelliekate2001.workers.dev/telegram/webhook` (HTTP 200 returned by Telegram setWebhook API)
 - Smoke tests completed: Live `/health` check returned `{"ok":true,"service":"fansleak-contact-bot","provider":"selar","methods":["selar"]}`; 50 automated tests pass; dry-run build passes.
 - Outstanding issues: None. Manual conversational smoke tests with the owner's Telegram account can be conducted anytime.
+
+## 8. Current Phase B Release 1 gates (complete only with live evidence)
+
+Do not check these from local tests alone. Record the merge SHA, manual deployment run, and owner smoke-test results in the release report.
+
+- [ ] The reviewed Release 1 PR is merged to `fan`, and the production workflow was dispatched manually from `fan` after merge.
+- [ ] Live `/health` responds successfully after the manual deployment.
+- [ ] A client account sending `/creators` and `/profiles` receives only the website direction and no profile names/IDs.
+- [ ] The configured admin in the private Admin Desk chat can view `/profiles` and search with `/profiles SEARCH_TEXT`.
+- [ ] `/setcontact` explains that it is retired and creates/sends nothing.
+- [ ] A synthetic email-only Selar event does not attach a sale; a unique FL code or exact saved checkout name still requires manual admin verification.
+- [ ] `/expirepending` previews exact counts, excludes `payment_verified` and `payment_review`, and does not close an order created after preview.
+- [ ] A manually verified synthetic request can be fulfilled with one admin-composed text or video only after **Prepare delivery** → preview → explicit send.
+- [ ] A voice-transcribed YES or verification command does not execute; a typed/button confirmation is required.
