@@ -456,8 +456,8 @@ async function start(e: Env, m: Msg, payload: string) {
     await notifyAdminIfConfigured(e, "Setup required: configure the Selar checkout URL and product code.");
     return;
   }
-  const activeService = await e.DB.prepare("SELECT id FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
-  if (activeService) return say(e, chat, "You already have a service purchase in progress. Finish it or contact support before starting a contact request.");
+  // Contact requests and service orders are independent purchases. An open order
+  // in one flow must not block the customer from starting the other flow.
   // Up to three unpaid contact requests are allowed per Telegram account.
   // A verified payment frees a slot; open requests never block conversation.
   const outstanding = await e.DB.prepare("SELECT COUNT(*) AS count FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment')").bind(user).first<any>();
@@ -531,8 +531,7 @@ async function startService(e: Env, m: Msg, serviceId: string) {
     await notifyAdminIfConfigured(e, "Service purchase setup required: configure the service Selar checkout URL and product code.");
     return;
   }
-  const activeContact = await e.DB.prepare("SELECT id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
-  if (activeContact) return say(e, chat, "You already have a FansLeak contact request in progress. Finish it or contact support before starting a service purchase.");
+  // Service orders and creator contact requests are independent purchases.
   const active = await e.DB.prepare("SELECT id FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
   if (active) return say(e, chat, "You already have a service order in progress. Finish it or contact support before starting another.");
   const id = crypto.randomUUID();
@@ -562,6 +561,15 @@ async function message(e: Env, m: Msg) {
   let t = (m.text || "").trim();
   const caption = (m.caption || "").trim(), chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
   const hasReceiptCandidateMedia = Boolean((Array.isArray(m.photo) && m.photo.length > 0) || m.document);
+  if (hasReceiptCandidateMedia && user === e.ADMIN_TELEGRAM_ID) {
+    const draft = await e.DB.prepare("SELECT id,checkout_code FROM delivery_drafts WHERE admin_telegram_id=? AND status='draft' ORDER BY updated_at DESC LIMIT 1").bind(user).first<any>();
+    if (draft) {
+      const media = extractReceiptMedia(m);
+      if (!media.media) return say(e,chat,media.unsupported || "Send one photo or document.");
+      await e.DB.prepare("UPDATE delivery_drafts SET media_kind=?,media_file_id=?,media_mime_type=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(media.media.kind,media.media.fileId,media.media.mimeType,draft.id,user).run();
+      return say(e,chat,"📎 Media attached to draft <code>"+esc(draft.checkout_code || "request")+"</code>.",{inline_keyboard:[[ {text:"👀 Preview",callback_data:"draft:preview:"+draft.id} ],[ {text:"✅ Send to customer",callback_data:"draft:send:"+draft.id},{text:"✖️ Cancel",callback_data:"draft:cancel:"+draft.id} ]]});
+    }
+  }
   if (hasReceiptCandidateMedia) {
     const receiptPrompt = await e.DB.prepare("SELECT order_id,order_kind FROM receipt_review_prompts WHERE telegram_user_id=?").bind(user).first<any>();
     let order = receiptPrompt ? await loadCustomerOrderById(e, String(receiptPrompt.order_id)) : null;
@@ -582,6 +590,17 @@ async function message(e: Env, m: Msg) {
     t = caption;
   }
   if (!t) return;
+  // If the administrator has an active delivery draft, ordinary text becomes draft content.
+  if (user === e.ADMIN_TELEGRAM_ID && !t.startsWith("/")) {
+    const draft = await e.DB.prepare("SELECT id,checkout_code FROM delivery_drafts WHERE admin_telegram_id=? AND status='draft' ORDER BY updated_at DESC LIMIT 1").bind(user).first<any>();
+    if (draft) {
+      if (t.length > 700) return say(e,chat,"Please keep delivery text under 700 characters.");
+      await e.DB.prepare("UPDATE delivery_drafts SET message_text=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(t,draft.id,user).run();
+      return say(e,chat,"📝 Draft updated for <code>"+esc(draft.checkout_code || "request")+"</code>. Optionally attach one photo or document, then preview before sending.",{inline_keyboard:[[ {text:"👀 Preview",callback_data:"draft:preview:"+draft.id} ],[ {text:"✅ Send to customer",callback_data:"draft:send:"+draft.id},{text:"✖️ Cancel",callback_data:"draft:cancel:"+draft.id} ]]});
+    }
+  }
+  // Telegram may append @BotName to slash commands. Normalize only the command token.
+  t = t.replace(/^(\/[A-Za-z0-9_]+)@[A-Za-z0-9_]+(?=\s|$)/, "$1");
   if (t.startsWith("/start")) {
     const arg = t.split(/\s+/, 2)[1] || "";
     if (arg.startsWith("contact_")) return start(e, m, arg);
@@ -612,6 +631,7 @@ async function message(e: Env, m: Msg) {
         [{ text: "📥 Review contact requests", callback_data: "admin:pending" }],
         [{ text: "🧾 Review service orders", callback_data: "admin:orders" }],
         [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }],
+        [{ text: "🛡️ Creator sharing permissions", callback_data: "admin:consent" }],
         [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]
       ]
     });
@@ -631,19 +651,20 @@ async function message(e: Env, m: Msg) {
 
   if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/deliver ")) {
     const match = t.match(/^\/deliver\s+([0-9a-f-]{36})\s+([\s\S]{1,3500})$/i);
-    if (!match) return say(e, chat, "Usage: /deliver ORDER_ID service details or fulfilment text");
-    const order = await e.DB.prepare("SELECT id,telegram_chat_id,status FROM service_orders WHERE id=?").bind(match[1]).first<any>();
+    if (!match) return say(e, chat, "Usage: /deliver ORDER_UUID fulfilment text — this creates a draft for preview and confirmation.");
+    const order = await e.DB.prepare("SELECT id,checkout_code,status FROM service_orders WHERE id=?").bind(match[1]).first<any>();
     if (!order || order.status !== "payment_verified") return say(e, chat, "Order not found or payment has not been verified. Nothing was sent.");
-    const updateRes = await e.DB.prepare("UPDATE service_orders SET status='fulfilled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='payment_verified'").bind(order.id).run();
-    if (!updateRes.meta?.changes) return say(e, chat, "Order was already fulfilled or status changed. Nothing was sent.");
-    try {
-      await tg(e, "sendMessage", { chat_id: order.telegram_chat_id, text: "Your service order is ready. Details from the provider:\n\n" + match[2], disable_web_page_preview: true });
-    } catch (err) {
-      await e.DB.prepare("UPDATE service_orders SET status='payment_verified',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='fulfilled'").bind(order.id).run();
-      throw err;
+    const existing = await e.DB.prepare("SELECT id,status FROM service_delivery_drafts WHERE service_order_id=?").bind(order.id).first<any>();
+    if (existing && (existing.status === "sent" || existing.status === "sending")) return say(e, chat, "A fulfilment draft was already sent or has an uncertain delivery outcome. Inspect Telegram before any retry.");
+    const draftId = existing?.id || crypto.randomUUID();
+    if (existing) {
+      const updated = await e.DB.prepare("UPDATE service_delivery_drafts SET admin_telegram_id=?,message_text=?,status='draft',expires_at=datetime('now','+30 minutes'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status IN('draft','cancelled','expired')").bind(user,match[2],draftId).run();
+      if (!updated.meta?.changes) return say(e,chat,"Could not reopen the draft because its state changed. Nothing was sent.");
+    } else {
+      await e.DB.prepare("INSERT INTO service_delivery_drafts(id,service_order_id,admin_telegram_id,message_text,status,expires_at) VALUES(?,?,?,?,'draft',datetime('now','+30 minutes'))").bind(draftId,order.id,user,match[2]).run();
     }
-    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_order_fulfilled',?,?)").bind(user, order.id, "Admin sent service fulfilment").run();
-    return say(e, chat, "Fulfilment sent to customer for order " + esc(String(order.id)));
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_delivery_draft_created',?,?)").bind(user,order.id,"Admin created fulfilment draft; no customer message sent").run();
+    return say(e,chat,"📝 <b>Service fulfilment preview</b>\nOrder: <code>"+esc(String(order.checkout_code||order.id))+"</code>\n\n"+esc(match[2])+"\n\n<i>Draft only — nothing has been sent. Expires in 30 minutes.</i>",{inline_keyboard:[[ {text:"✅ Confirm and send",callback_data:"service-delivery:send:"+draftId},{text:"✖️ Cancel",callback_data:"service-delivery:cancel:"+draftId} ]]});
   }
   if (user === e.ADMIN_TELEGRAM_ID && t === "/orders") {
     const rows = await e.DB.prepare("SELECT id,service_id,telegram_username,telegram_user_id,status,CASE WHEN status='payment_verified' THEN substr(request_text,-180) ELSE 'Request hidden until payment verification' END AS summary FROM service_orders ORDER BY created_at DESC LIMIT 20").all<any>();
@@ -818,10 +839,133 @@ async function message(e: Env, m: Msg) {
       return say(e, chat, "Thanks — your email has been saved as a fallback reconciliation clue. It is only used if the admin needs to match a payment manually, and it does not verify payment.");
     }
   }
+  if (user === e.ADMIN_TELEGRAM_ID) {
+    const intent = t.toLowerCase().replace(/[!?.,]/g," ").replace(/\s+/g," ").trim();
+    if (/^(show|list|view)? ?(pending )?(contact )?requests?$/.test(intent) || intent.includes("pending contact requests")) {
+      const rows=await e.DB.prepare("SELECT id,profile_id,status,checkout_code,payment_reference FROM contact_requests WHERE status IN ('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 15").all<any>();
+      const lines=(rows.results||[]).map((r:any)=>"• <code>"+esc(r.checkout_code||r.id)+"</code> · "+esc(r.profile_id)+" · "+esc(r.status)+" · "+(r.payment_reference?"sale attached":"no sale attached"));
+      return say(e,chat,"<b>📥 Pending contact requests</b>\n"+(lines.join("\n")||"No pending contact requests."));
+    }
+    if (intent.includes("awaiting verification") || intent.includes("payments awaiting") || intent.includes("awaiting payment verification")) {
+      const row=await e.DB.prepare("SELECT COUNT(*) AS total FROM contact_requests WHERE status='pending_payment' AND payment_reference IS NOT NULL").first<any>();
+      return say(e,chat,"🧾 Payments awaiting manual Selar verification: <b>"+String(row?.total||0)+"</b>. A webhook match is not payment verification.");
+    }
+    if (intent.includes("latest matched sales") || intent.includes("matched sales")) {
+      const rows=await e.DB.prepare("SELECT provider_reference,request_id,received_at FROM processed_sales WHERE request_id IS NOT NULL ORDER BY received_at DESC LIMIT 10").all<any>();
+      const lines=(rows.results||[]).map((r:any)=>"• <code>"+esc(r.request_id)+"</code> · "+esc(r.received_at)+" · reference attached");
+      return say(e,chat,"<b>Latest matched sales</b>\n"+(lines.join("\n")||"No matched sales recorded."));
+    }
+    if (intent.includes("service orders") || intent.includes("service orders waiting")) {
+      const rows=await e.DB.prepare("SELECT id,service_id,status,checkout_code,payment_reference FROM service_orders WHERE status IN ('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 15").all<any>();
+      const lines=(rows.results||[]).map((r:any)=>"• <code>"+esc(r.checkout_code||r.id)+"</code> · "+esc(r.service_id)+" · "+esc(r.status));
+      return say(e,chat,"<b>🧾 Service orders needing attention</b>\n"+(lines.join("\n")||"No service orders awaiting review."));
+    }
+    if (intent.includes("today") && (intent.includes("summary") || intent.includes("requests") || intent.includes("statistics"))) {
+      const row=await e.DB.prepare("SELECT COUNT(*) AS total,SUM(CASE WHEN status='pending_payment' THEN 1 ELSE 0 END) AS pending,SUM(CASE WHEN status='payment_verified' THEN 1 ELSE 0 END) AS verified,SUM(CASE WHEN status='approved' THEN 1 ELSE 0 END) AS approved FROM contact_requests WHERE date(created_at)=date('now')").first<any>();
+      return say(e,chat,"<b>📊 Today’s contact request summary</b>\nCreated: "+String(row?.total||0)+"\nAwaiting payment/manual verification: "+String(row?.pending||0)+"\nPayment verified, awaiting approval: "+String(row?.verified||0)+"\nApproved: "+String(row?.approved||0));
+    }
+    if (intent.includes("sharing permission") || intent.includes("consent not confirmed") || intent.includes("without consent")) {
+      const cat=await catalogue(e), rows=await e.DB.prepare("SELECT profile_id,contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts").all<any>();
+      const saved=new Map((rows.results||[]).map((r:any)=>[String(r.profile_id),r]));
+      const missing=cat.filter((p:any)=>{const c:any=saved.get(p.id);return !(c && c.sharing_enabled===1 && c.consent_confirmed_at && c.contact_value);}).slice(0,25);
+      return say(e,chat,"<b>🛡️ Profiles without confirmed sharing permission</b>\n"+(missing.map((p:any)=>"• "+esc(p.name)+" (<code>"+esc(p.id)+"</code>)").join("\n")||"All listed profiles have a saved contact and recorded sharing authorization."));
+    }
+    const deliveryCode=t.match(/\bFL-[A-Z0-9]{6}\b/i);
+    if(deliveryCode && (intent.includes("deliver") || intent.includes("fulfil") || intent.includes("fulfill"))) {
+      const row=await e.DB.prepare("SELECT id,profile_id,status,checkout_code,payment_reference FROM contact_requests WHERE checkout_code=?").bind(deliveryCode[0].toUpperCase()).first<any>();
+      if(!row) return say(e,chat,"No contact request found for <code>"+esc(deliveryCode[0].toUpperCase())+"</code>.");
+      if(row.status!=="payment_verified") return say(e,chat,"Request <code>"+esc(row.checkout_code)+"</code> is currently <b>"+esc(row.status)+"</b>. Delivery preparation requires manual payment verification first.");
+      return say(e,chat,"📝 <b>Prepare delivery</b>\nRequest: <code>"+esc(row.id)+"</code>\nCode: <code>"+esc(row.checkout_code)+"</code>\nProfile: "+esc(row.profile_id)+"\n\nTap below to open the consent-gated draft composer. No customer message is sent until you preview and confirm.",{inline_keyboard:[[ {text:"📝 Prepare delivery",callback_data:"approve:"+row.id} ]]});
+    }
+    const codeMatch=t.match(/\bFL-[A-Z0-9]{6}\b/i);
+    if (codeMatch && (intent.includes("find") || intent.includes("request") || intent.includes("status"))) {
+      const row=await e.DB.prepare("SELECT id,profile_id,status,checkout_code,payment_reference FROM contact_requests WHERE checkout_code=?").bind(codeMatch[0].toUpperCase()).first<any>();
+      if (!row) return say(e,chat,"No contact request found for <code>"+esc(codeMatch[0].toUpperCase())+"</code>.");
+      return say(e,chat,"<b>Contact request</b>\nID: <code>"+esc(row.id)+"</code>\nCode: <code>"+esc(row.checkout_code)+"</code>\nProfile: "+esc(row.profile_id)+"\nStatus: "+esc(row.status)+"\nSale reference: "+(row.payment_reference?"attached":"not attached"));
+    }
+  }
   return aiReply(e, chat, t);
 }
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
+  if (data.startsWith("draft:")) {
+    if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Admin access only."});
+    const dm = data.match(/^draft:(preview|send|cancel):([0-9a-f-]{36})$/i);
+    if (!dm) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Unknown draft action."});
+    const draftAction=dm[1].toLowerCase(), draftId=dm[2];
+    const d=await e.DB.prepare("SELECT d.id,d.request_id,d.admin_telegram_id,d.checkout_code,d.message_text,d.media_kind,d.media_file_id,d.status,d.expires_at,r.telegram_chat_id,r.profile_id,r.status AS request_status,c.contact_value,c.sharing_enabled,c.consent_confirmed_at FROM delivery_drafts d JOIN contact_requests r ON r.id=d.request_id LEFT JOIN creator_contacts c ON c.profile_id=r.profile_id WHERE d.id=?").bind(draftId).first<any>();
+    if (!d || String(d.admin_telegram_id)!==actor) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft not found for this admin."});
+    if (draftAction==="cancel") {
+      if(d.status!=="draft") return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Only an unsent draft can be cancelled."});
+      await e.DB.prepare("UPDATE delivery_drafts SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(draftId).run();
+      await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(? ,'delivery_draft_cancelled',?,?,?)").bind(actor,d.request_id,d.profile_id,"Admin cancelled unsent draft").run();
+      await say(e,chat,"✖️ Draft cancelled. Nothing was sent.");
+      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft cancelled."});
+    }
+    if(d.status!=="draft" || !d.expires_at || Date.parse(String(d.expires_at).replace(" ","T")+"Z")<Date.now()) {
+      if(d.status==="draft") await e.DB.prepare("UPDATE delivery_drafts SET status='expired',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(draftId).run();
+      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft expired or is no longer active."});
+    }
+    if(d.request_status!=="payment_verified") return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Payment or request state changed. Nothing was sent."});
+    if(d.sharing_enabled!==1 || !d.consent_confirmed_at || !String(d.contact_value||"").trim()) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Creator sharing consent is missing or revoked."});
+    const body=String(d.message_text||"").trim();
+    if(draftAction==="preview") {
+      const preview="👀 <b>Delivery preview</b>\nRequest: <code>"+d.request_id+"</code>\nCheckout code: <code>"+esc(d.checkout_code||"")+"</code>\nProfile: <code>"+esc(d.profile_id)+"</code>\n\n🎉 Congratulations! Your payment has been verified and your request approved.\n\n"+(body?esc(body):"<i>No custom message added.</i>")+"\n\nCreator contact: <b>"+esc(d.contact_value)+"</b>\n\n"+(d.media_kind?"📎 One "+esc(d.media_kind)+" attached.":"No media attached.")+"\n\n<i>Preview only — nothing has been sent.</i>";
+      return say(e,chat,preview,{inline_keyboard:[[ {text:"✅ Send to customer",callback_data:"draft:send:"+draftId},{text:"✖️ Cancel",callback_data:"draft:cancel:"+draftId} ]]});
+    }
+    if(!body && !d.media_file_id) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Add a message or media before sending."});
+    const claimed=await e.DB.prepare("UPDATE delivery_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=? AND EXISTS (SELECT 1 FROM contact_requests r JOIN creator_contacts c ON c.profile_id=r.profile_id WHERE r.id=delivery_drafts.request_id AND r.status='payment_verified' AND c.sharing_enabled=1 AND c.consent_confirmed_at IS NOT NULL AND c.contact_value=?)").bind(draftId,actor,d.contact_value).run();
+    if(!claimed.meta?.changes) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft is already sending or inactive."});
+    const deliveryText="🎉 <b>Congratulations!</b> Your payment has been verified and your request approved.\n\n"+(body?esc(body)+"\n\n":"")+"Creator contact: <b>"+esc(d.contact_value)+"</b>\n\nPlease respect the creator boundaries.";
+    try {
+      if(d.media_file_id && d.media_kind==="photo") await tg(e,"sendPhoto",{chat_id:d.telegram_chat_id,photo:d.media_file_id,caption:deliveryText,parse_mode:"HTML"});
+      else if(d.media_file_id && d.media_kind==="document") await tg(e,"sendDocument",{chat_id:d.telegram_chat_id,document:d.media_file_id,caption:deliveryText,parse_mode:"HTML"});
+      else await say(e,d.telegram_chat_id,deliveryText);
+    } catch {
+      await notifyAdminIfConfigured(e,"⚠️ Delivery outcome is uncertain for request <code>"+d.request_id+"</code> / code <code>"+esc(d.checkout_code||"")+"</code>. Draft remains locked as sending to prevent duplicate disclosure. Inspect Telegram before any manual retry.");
+      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Delivery outcome uncertain. Draft locked to prevent duplicates."});
+    }
+    const finalStatus=await e.DB.prepare("UPDATE contact_requests SET status='approved',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='payment_verified'").bind(d.request_id).run();
+    await e.DB.prepare("UPDATE delivery_drafts SET status='sent',delivered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draftId).run();
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(? ,'delivery_sent',?,?,?)").bind(actor,d.request_id,d.profile_id,"Confirmed delivery draft sent through Telegram").run();
+    if(!finalStatus.meta?.changes) await notifyAdminIfConfigured(e,"Delivery sent for request <code>"+d.request_id+"</code>, but status changed concurrently. Inspect audit before retrying.");
+    return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Delivery sent once and recorded."});
+  }
+  if (data.startsWith("service-delivery:")) {
+    if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Admin access only."});
+    const match=data.match(/^service-delivery:(send|cancel):([0-9a-f-]{36})$/i);
+    if(!match) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Unknown service delivery action."});
+    const action=match[1].toLowerCase(), draftId=match[2];
+    const d=await e.DB.prepare("SELECT d.id,d.service_order_id,d.admin_telegram_id,d.message_text,d.status,d.expires_at,o.telegram_chat_id,o.status AS order_status,o.checkout_code FROM service_delivery_drafts d JOIN service_orders o ON o.id=d.service_order_id WHERE d.id=?").bind(draftId).first<any>();
+    if(!d || String(d.admin_telegram_id)!==actor) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft not found for this admin."});
+    if(action==="cancel") {
+      if(d.status!=="draft") return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Only an unsent draft can be cancelled."});
+      const cancelled=await e.DB.prepare("UPDATE service_delivery_drafts SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(draftId,actor).run();
+      if(!cancelled.meta?.changes) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft state changed; nothing was sent."});
+      await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_delivery_draft_cancelled',?,?)").bind(actor,d.service_order_id,"Admin cancelled unsent fulfilment draft").run();
+      await say(e,chat,"✖️ Service fulfilment draft cancelled. Nothing was sent.");
+      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft cancelled."});
+    }
+    if(d.status!=="draft" || !d.expires_at || Date.parse(String(d.expires_at).replace(" ","T")+"Z")<Date.now()) {
+      if(d.status==="draft") await e.DB.prepare("UPDATE service_delivery_drafts SET status='expired',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(draftId).run();
+      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft expired or is no longer active."});
+    }
+    if(d.order_status!=="payment_verified") return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Order is no longer awaiting fulfilment. Nothing was sent."});
+    const claimed=await e.DB.prepare("UPDATE service_delivery_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=? AND EXISTS(SELECT 1 FROM service_orders o WHERE o.id=service_delivery_drafts.service_order_id AND o.status='payment_verified')").bind(draftId,actor).run();
+    if(!claimed.meta?.changes) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft is already sending or inactive."});
+    try {
+      await tg(e,"sendMessage",{chat_id:d.telegram_chat_id,text:"Your service order is ready. Details from the provider:\n\n"+String(d.message_text),disable_web_page_preview:true});
+    } catch {
+      await notifyAdminIfConfigured(e,"⚠️ Service fulfilment outcome is uncertain for order <code>"+esc(d.service_order_id)+"</code>. Draft remains locked to prevent duplicate delivery. Inspect Telegram before any retry.");
+      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Delivery outcome uncertain. Draft locked to prevent duplicates."});
+    }
+    const fulfilled=await e.DB.prepare("UPDATE service_orders SET status='fulfilled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='payment_verified'").bind(d.service_order_id).run();
+    await e.DB.prepare("UPDATE service_delivery_drafts SET status='sent',delivered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draftId).run();
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_order_fulfilled',?,?)").bind(actor,d.service_order_id,"Admin confirmed and sent service fulfilment").run();
+    if(!fulfilled.meta?.changes) await notifyAdminIfConfigured(e,"Service fulfilment was sent but order status changed concurrently. Inspect audit before retrying: <code>"+esc(d.service_order_id)+"</code>");
+    await say(e,chat,"Fulfilment sent to customer for order <code>"+esc(String(d.checkout_code||d.service_order_id))+"</code>.");
+    return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Fulfilment sent once and recorded."});
+  }
   if (data.startsWith("done:") || data.startsWith("paid:")) {
     if (!u.message || String(u.message.chat.id) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Open the bot chat to continue." });
     const id = data.slice(data.indexOf(":") + 1);
@@ -879,6 +1023,47 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       await say(e, chat, "<b>Contact requests needing attention</b>\nChoose a request to review its saved status. A sale notification is not payment verification.", { inline_keyboard: [...buttons, [{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Contact requests loaded." });
     }
+    if (action === "consent") {
+      const cat = await catalogue(e);
+      const rows = await e.DB.prepare("SELECT profile_id,contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts").all<any>();
+      const saved = new Map((rows.results || []).map((r:any) => [String(r.profile_id),r]));
+      const buttons = cat.slice(0,20).map((p:any) => { const c:any=saved.get(p.id); const state=c && c.sharing_enabled===1 && c.consent_confirmed_at && c.contact_value ? "enabled" : c && c.contact_value ? "disabled" : "no contact"; return [{text:(p.name+" · "+state).slice(0,60),callback_data:"admin:creator:"+p.id}]; });
+      await say(e,chat,"<b>Creator sharing permissions</b>\nChoose a current public profile. Missing contact or consent is never treated as permission.",{inline_keyboard:[...buttons,[{text:"↩️ Admin Desk",callback_data:"admin:home"}]]});
+      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Creator permissions loaded."});
+    }
+    if (action.startsWith("creator:")) {
+      const profileId=action.slice("creator:".length);
+      if(!/^[A-Za-z0-9._-]{1,50}$/.test(profileId)) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Invalid profile."});
+      const cat=await catalogue(e), profile=cat.find((p:any)=>p.id===profileId);
+      if(!profile) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Profile not found in the current catalogue."});
+      const c=await e.DB.prepare("SELECT contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts WHERE profile_id=?").bind(profileId).first<any>();
+      const enabled=Boolean(c && c.sharing_enabled===1 && c.consent_confirmed_at && c.contact_value);
+      await say(e,chat,"<b>Creator sharing permission</b>\nProfile: "+esc(profile.name)+" (<code>"+esc(profileId)+"</code>)\nContact: "+(c?.contact_value?esc(c.contact_value):"not saved")+"\nSharing: "+(enabled?"enabled with recorded admin attestation":"disabled / not confirmed")+"\n\nOnly enable sharing after the creator has explicitly authorised release of this contact.",{inline_keyboard:[[ {text:"➕ Save/update contact",callback_data:"admin:contacthelp:"+profileId} ],[ {text:"🔐 Confirm creator authorization",callback_data:"admin:consentprompt:"+profileId} ],[ {text:"🚫 Revoke sharing",callback_data:"admin:consentrevoke:"+profileId} ],[ {text:"↩️ Back to profiles",callback_data:"admin:consent"} ]]});
+      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Creator details opened."});
+    }
+    if(action.startsWith("contacthelp:")) { const profileId=action.slice("contacthelp:".length); return say(e,chat,"Save the authorized handle using:\n<code>/setcontact "+esc(profileId)+" @telegram_handle</code>\nThe contact is saved with sharing disabled.",{inline_keyboard:[[ {text:"↩️ Back",callback_data:"admin:creator:"+profileId} ]]}); }
+    if(action.startsWith("consentprompt:")) {
+      const profileId=action.slice("consentprompt:".length), c=await e.DB.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id=?").bind(profileId).first<any>();
+      if(!c || !String(c.contact_value||"").trim()) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Save the authorized contact first."});
+      await say(e,chat,"<b>Confirm creator authorization</b>\nProfile: <code>"+esc(profileId)+"</code>\nContact: "+esc(c.contact_value)+"\n\nConfirm only if the creator explicitly authorized sharing this contact.",{inline_keyboard:[[ {text:"✅ Yes, authorization exists",callback_data:"admin:consentconfirm:"+profileId} ],[ {text:"↩️ Cancel",callback_data:"admin:creator:"+profileId} ]]});
+      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Explicit confirmation required."});
+    }
+    if(action.startsWith("consentconfirm:")) {
+      const profileId=action.slice("consentconfirm:".length), c=await e.DB.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id=?").bind(profileId).first<any>();
+      if(!c || !String(c.contact_value||"").trim()) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"No contact saved; sharing remains disabled."});
+      await e.DB.prepare("UPDATE creator_contacts SET sharing_enabled=1,consent_confirmed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE profile_id=?").bind(profileId).run();
+      await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(? ,'creator_consent_confirmed',?,'Admin attested authorization through UI confirmation')").bind(actor,profileId).run();
+      await say(e,chat,"✅ Sharing authorization recorded for <code>"+esc(profileId)+"</code>. This is your attestation that the creator explicitly authorized sharing.",{inline_keyboard:[[ {text:"↩️ Back to creator",callback_data:"admin:creator:"+profileId} ]]});
+      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Authorization attestation recorded."});
+    }
+    if(action.startsWith("consentrevoke:")) {
+      const profileId=action.slice("consentrevoke:".length);
+      const result=await e.DB.prepare("UPDATE creator_contacts SET sharing_enabled=0,consent_confirmed_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE profile_id=?").bind(profileId).run();
+      if(!result.meta?.changes) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"No saved contact to revoke."});
+      await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(? ,'creator_consent_revoked',?,'Admin revoked authorization through UI')").bind(actor,profileId).run();
+      await say(e,chat,"🚫 Sharing disabled and consent revoked for <code>"+esc(profileId)+"</code>.");
+      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Sharing revoked."});
+    }
     if (action === "orders") {
       const rows = await e.DB.prepare("SELECT id,service_id,status,checkout_code,payment_reference FROM service_orders ORDER BY created_at DESC LIMIT 12").all<any>();
       const lines = (rows.results || []).map(r => "• <code>" + esc(r.checkout_code || r.id) + "</code> — " + esc(r.service_id || "service") + " — " + esc(r.status) + " — " + (r.payment_reference ? "sale reference attached" : "no sale reference"));
@@ -894,7 +1079,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin guide opened." });
     }
     if (action === "home") {
-      await say(e, chat, "<b>FansLeak Admin Desk</b>\nChoose an action:", { inline_keyboard: [[{ text: "📥 Review contact requests", callback_data: "admin:pending" }], [{ text: "🧾 Review service orders", callback_data: "admin:orders" }], [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }], [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]] });
+      await say(e, chat, "<b>FansLeak Admin Desk</b>\nChoose an action:", { inline_keyboard: [[{ text: "📥 Review contact requests", callback_data: "admin:pending" }], [{ text: "🧾 Review service orders", callback_data: "admin:orders" }], [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }], [{ text: "🛡️ Creator sharing permissions", callback_data: "admin:consent" }], [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin menu." });
     }
     const requestMatch = action.match(/^request:([0-9a-f-]{36})$/i);
@@ -903,13 +1088,15 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       if (!r) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request not found." });
       const actions: Record<string, unknown>[][] = [];
       if (r.status === "pending_payment" && r.payment_reference) actions.push([{ text: "✅ I checked Selar — confirm payment", callback_data: "selarverify:" + r.id }]);
-      if (r.status === "payment_verified") actions.push([{ text: "🔓 Approve & send authorised contact", callback_data: "approve:" + r.id }, { text: "❌ Reject request", callback_data: "reject:" + r.id }]);
+      if (r.status === "payment_verified") actions.push([{ text: "🔓 Prepare delivery", callback_data: "approve:" + r.id }, { text: "❌ Reject request", callback_data: "reject:" + r.id }]);
       actions.push([{ text: "💬 How to message this customer", callback_data: "admin:message_help" }], [{ text: "↩️ Back to requests", callback_data: "admin:pending" }], [{ text: "🏠 Admin Desk", callback_data: "admin:home" }]);
       await say(e, chat, "<b>Contact request details</b>\nCode: <code>" + esc(r.checkout_code || "") + "</code>\nProfile: " + esc(r.profile_id || "unknown") + "\nStatus: <b>" + esc(r.status) + "</b>\nSale reference: " + (r.payment_reference ? "<code>" + esc(r.payment_reference) + "</code>" : "none attached") + "\n\nUse payment confirmation only after checking the real sale in Selar. Approval remains separate and requires creator consent.", { inline_keyboard: actions });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request details opened." });
     }
     return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Unknown admin menu action." });
   }
+  // All payment-verification, approval, and rejection callbacks are admin-only.
+  if (actor !== e.ADMIN_TELEGRAM_ID) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin access only." });
   const m = data.match(/^(approve|reject|selarverify|serviceverify):([0-9a-f-]{36})$/i);
   if (!m) { await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Unknown action." }); return; }
   const action = m[1].toLowerCase(), id = m[2];
@@ -933,7 +1120,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     if (!updateRes.meta?.changes) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment was already verified." });
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,'selar_payment_admin_verified',?,?,?)").bind(actor, id, r.profile_id, `Admin reviewed webhook-backed Selar payment before approving; reference ${paid.payment_reference}`).run();
     await sayBestEffort(e, r.telegram_chat_id, "The admin reviewed your Selar payment notification. Your request is now waiting for final approval.");
-    await say(e, e.ADMIN_TELEGRAM_ID, "Selar payment verified by admin for <code>" + id + "</code>. Now decide whether to approve the contact request.", { inline_keyboard: [[{ text: "🔓 Approve & send authorised contact", callback_data: "approve:" + id }, { text: "Reject", callback_data: "reject:" + id }]] });
+    await say(e, e.ADMIN_TELEGRAM_ID, "Selar payment verified by admin for <code>" + id + "</code>. Next, prepare delivery for this exact customer. Contact release still requires confirmed creator consent.", { inline_keyboard: [[{ text: "🔓 Prepare delivery", callback_data: "approve:" + id }, { text: "Reject", callback_data: "reject:" + id }]] });
     return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment verified. Review the contact request next." });
   }
   if (action === "reject") {
@@ -947,27 +1134,23 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   if (r.status !== "payment_verified") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment is not verified." });
   const c = await e.DB.prepare("SELECT contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts WHERE profile_id=?").bind(r.profile_id).first<any>();
   if (!c || c.sharing_enabled !== 1 || !c.consent_confirmed_at || !String(c.contact_value || "").trim()) {
-    await notifyAdminIfConfigured(e, `Cannot approve request <code>${id}</code>: creator consent is not confirmed for <code>${esc(r.profile_id)}</code>. Use /enablecontact ${esc(r.profile_id)} first.`);
-    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "No authorised contact enabled." });
+    await notifyAdminIfConfigured(e, "Cannot prepare delivery for request <code>" + id + "</code>: sharing authorization is not confirmed for <code>" + esc(r.profile_id) + "</code>. Open /admin → Creator sharing permissions. No contact was sent.");
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Creator sharing permission is not confirmed." });
   }
-  const updateRes = await e.DB.prepare("UPDATE contact_requests SET status='approved',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='payment_verified'").bind(id).run();
-  if (!updateRes.meta?.changes) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request was already approved or status changed." });
-  // Re-verify consent for this exact creator and contact value immediately before
-  // disclosure, so a revocation that raced the approval still fails closed.
-  const recheck = await e.DB.prepare("SELECT contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts WHERE profile_id=?").bind(r.profile_id).first<any>();
-  if (!recheck || recheck.sharing_enabled !== 1 || !recheck.consent_confirmed_at || recheck.contact_value !== c.contact_value) {
-    await e.DB.prepare("UPDATE contact_requests SET status='payment_verified',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='approved'").bind(id).run();
-    await notifyAdminIfConfigured(e, `Approval aborted for request <code>${id}</code>: creator consent for <code>${esc(r.profile_id)}</code> changed before delivery. Nothing was sent.`);
-    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Creator consent changed. Nothing was sent." });
+  const otherDraft = await e.DB.prepare("SELECT id,checkout_code FROM delivery_drafts WHERE admin_telegram_id=? AND status='draft' AND request_id<>? ORDER BY updated_at DESC LIMIT 1").bind(actor,id).first<any>();
+  if (otherDraft) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Finish or cancel the existing contact delivery draft (code " + String(otherDraft.checkout_code || "unknown") + ") before preparing another." });
+  const oldDraft = await e.DB.prepare("SELECT id,status FROM delivery_drafts WHERE request_id=?").bind(id).first<any>();
+  if (oldDraft && (oldDraft.status === "sent" || oldDraft.status === "sending")) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Delivery already sent or its outcome needs review." });
+  const draftId = oldDraft?.id || crypto.randomUUID();
+  if (oldDraft) {
+    await e.DB.prepare("UPDATE delivery_drafts SET status='draft',admin_telegram_id=?,message_text=NULL,media_kind=NULL,media_file_id=NULL,media_mime_type=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),expires_at=datetime('now','+30 minutes') WHERE id=? AND status IN('draft','cancelled','expired')").bind(actor,draftId).run();
+  } else {
+    await e.DB.prepare("INSERT INTO delivery_drafts(id,request_id,admin_telegram_id,checkout_code,status,expires_at) SELECT ?,id,?,checkout_code,'draft',datetime('now','+30 minutes') FROM contact_requests WHERE id=? AND status='payment_verified'").bind(draftId,actor,id).run();
   }
-  try {
-    await say(e, r.telegram_chat_id, `Request approved. Creator contact: <b>${esc(recheck.contact_value)}</b>\n\nPlease respect the creator's boundaries.`);
-  } catch (err) {
-    await e.DB.prepare("UPDATE contact_requests SET status='payment_verified',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='approved'").bind(id).run();
-    throw err;
-  }
-  await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id) VALUES(?,'approve_request',?,?)").bind(actor, id, r.profile_id).run();
-  return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Approved and sent." });
+  const draft = await e.DB.prepare("SELECT id,checkout_code FROM delivery_drafts WHERE id=? AND admin_telegram_id=? AND status='draft'").bind(draftId,actor).first<any>();
+  if (!draft) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Could not create a draft. Request state may have changed."});
+  await say(e,chat,"📝 <b>Delivery draft</b>\nRequest: <code>"+id+"</code>\nCheckout code: <code>"+esc(draft.checkout_code || "unknown")+"</code>\nProfile: <code>"+esc(r.profile_id)+"</code>\n\nSend the message you want the customer to receive (up to 700 characters). You may attach one photo or document. Then preview and confirm.\n\nExpires in 30 minutes. Nothing has been sent.",{inline_keyboard:[[ {text:"👀 Preview",callback_data:"draft:preview:"+draftId} ],[ {text:"✖️ Cancel",callback_data:"draft:cancel:"+draftId} ]]});
+  return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft opened. No customer message sent."});
 }
 type Sale = { reference: string; email: string; customerName: string; productId: string };
 function selarProductCode(o: Record<string, any>): string {

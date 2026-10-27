@@ -180,7 +180,20 @@ export function migrateRemote() {
     runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0007_front_desk_multi_requests')");
   }
 
-  // Release note: migration 0007 is included in the front-desk release rollout.
+  // Migration 8: request-bound creator-contact delivery drafts.
+  if (!applied.has('0008_delivery_drafts')) {
+    console.log('[migrate-d1] Applying 0008_delivery_drafts migration...');
+    runWranglerFile(path.join(ROOT, 'contact-bot', 'migrations', '0008_delivery_drafts.sql'));
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0008_delivery_drafts')");
+  }
+
+  // Migration 9: service fulfilment drafts requiring explicit confirmation.
+  if (!applied.has('0009_service_delivery_drafts')) {
+    console.log('[migrate-d1] Applying 0009_service_delivery_drafts migration...');
+    runWranglerFile(path.join(ROOT, 'contact-bot', 'migrations', '0009_service_delivery_drafts.sql'));
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0009_service_delivery_drafts')");
+  }
+
   // Final complete schema verification. These expectations are shared with the
   // local migration verifier to prevent the two definitions drifting apart.
   console.log('[migrate-d1] Verifying complete schema...');

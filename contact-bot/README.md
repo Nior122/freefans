@@ -15,7 +15,7 @@ Missing rows, failed queries, revoked consent, unknown statuses, and identity mi
 ### 1. FansLeak contact/assessment flow
 
 1. The customer opens a creator profile's **Message / Request contact** button on FansLeak (`/start contact_PROFILE_ID`). Profile IDs containing `.` are encoded as `_dot_` because Telegram start parameters only allow `A–Z a–z 0–9 _ -`; the bot resolves both forms against the live catalogue.
-2. The bot loads the public catalogue (see below), rejects unknown/malformed profile IDs, and refuses to create a second active request for the same Telegram user.
+2. The bot loads the public catalogue (see below), rejects unknown/malformed profile IDs, and permits up to three unpaid contact requests per Telegram user; contact and service purchases are independent.
 3. A unique `FL-XXXXXX` checkout code is generated, checked against both order tables, and stored on a `pending_payment` request. **No email is required to start checkout.**
 4. The customer taps **Pay with Selar**, opens the configured checkout, and enters their full name followed by the exact code in Selar's **customer name field** (e.g. `Joseph Unaogu FL-7K4P9A`).
 5. After checkout, the customer taps **Done** or **I've paid — check for my sale** (or sends `/paid` / “I have paid”). The bot first checks the existing backend records. If no sale is attached and the checkout name has not been recorded, it asks for the exact name + code; that only records `checkout_name` and never confirms payment.
@@ -36,7 +36,7 @@ Missing rows, failed queries, revoked consent, unknown statuses, and identity mi
 1. The customer opens `https://t.me/<BOT_USERNAME>?start=service_SERVICE_ID`.
 2. The bot creates a `service_orders` row (with its own `FL-XXXXXX` code) and the assistant chats to understand the request. The code is shown when the customer types `PAY` and receives the service checkout link.
 3. Checkout, **Done**, **I've paid**, fallback email, webhook reconciliation, receipt review, and manual verification (`serviceverify:` callback or `/verifyservice`) mirror the contact flow but only ever touch `service_orders`.
-4. After manual payment verification, the admin delivers with `/deliver ORDER_ID fulfilment text`. Delivery is a single status-claimed send; if Telegram delivery fails the order reverts to `payment_verified` so the admin can retry. Service orders never release creator contacts, and contact callbacks never mutate service orders (covered by tests).
+4. After manual payment verification, the admin enters `/deliver ORDER_ID fulfilment text`. This creates an expiring preview draft; the order remains `payment_verified` and no customer message is sent until the admin taps **Confirm and send**. Confirmed sends are status-claimed and audited. If Telegram's response is uncertain, the draft remains locked as `sending` to prevent a blind duplicate; inspect Telegram before taking any manual recovery action. Service orders never release creator contacts, and contact callbacks never mutate service orders (covered by tests).
 
 ### Paid-claim and Selar receipt-review fallback
 
@@ -173,8 +173,10 @@ Baseline `contact-bot/schema.sql` (`0001_baseline`) plus ordered migrations:
 | `0005_one_active_request_per_user` | `contact-bot/migrations/0005_one_active_request_per_user.sql` | Partial unique indexes: one active contact request / service order per Telegram user. Blocks with a clear error if duplicate active rows already exist; reconcile manually (keep the newest legitimate request, reject/cancel the rest), then re-run. |
 | `0006_receipt_review` | `contact-bot/migrations/0006_receipt_review.sql` | `receipt_review_prompts` and `payment_receipt_submissions` for the manual receipt fallback, including unique Telegram-message/file indexes for idempotent retries. It stores file identifiers and delivery state only, never receipt contents/captions. |
 | `0007_front_desk_multi_requests` | `contact-bot/migrations/0007_front_desk_multi_requests.sql` | Removes the one-active-contact-request unique index. The Worker allows up to three unpaid contact requests per Telegram account; service orders retain their separate one-active-order guard. |
+| `0008_delivery_drafts` | `contact-bot/migrations/0008_delivery_drafts.sql` | Expiring request-bound creator-contact delivery drafts, optional single media attachment, send-state lock, and delivery audit support. |
+| `0009_service_delivery_drafts` | `contact-bot/migrations/0009_service_delivery_drafts.sql` | Expiring service fulfilment drafts requiring a preview and explicit admin confirmation before sending. |
 
-Apply/inspect with `node scripts/migrate-d1.mjs --remote` (requires Wrangler auth; used by the deploy workflow *before* the Worker deploy, so a failed migration leaves the old Worker running). It tracks applied versions in `schema_migrations` and verifies all 9 tables, expected columns, and the unique indexes afterwards. Applied versions can be inspected read-only:
+Apply/inspect with `node scripts/migrate-d1.mjs --remote` (requires Wrangler auth; used by the deploy workflow *before* the Worker deploy, so a failed migration leaves the old Worker running). It tracks applied versions in `schema_migrations` and verifies all 11 application tables, expected columns, and the unique indexes afterwards. Applied versions can be inspected read-only:
 
 ```bash
 npx wrangler@4 d1 execute fansleak-contact-requests --remote \
@@ -210,8 +212,10 @@ CI (`.github/workflows/check-contact-bot.yml`) runs the test suite, `tsc`, and t
 
 ## Production rollout (performed separately by the owner — NOT done by code changes alone)
 
+Use [`PRODUCTION-RELEASE-CHECKLIST.md`](./PRODUCTION-RELEASE-CHECKLIST.md) for the release gate, deployment sequence, smoke tests, stop conditions, and rollback guidance. It is a preparation document; it does not authorize or trigger production changes.
+
 1. Merge the reviewed PR into `fan`.
-2. Run **Actions → Deploy FansLeak contact bot → Run workflow** *from `fan`*, entering both Selar checkout URLs and exact product codes. It preflights secrets, applies migrations (including `0005` and `0006`) with verification, deploys the Worker, writes Worker secrets, and reconnects the Telegram webhook. If the `0005` pre-check reports duplicate active rows, reconcile them as described above and re-run.
+2. Run **Actions → Deploy FansLeak contact bot → Run workflow** *from `fan`*, entering both Selar checkout URLs and exact product codes. It preflights secrets, applies all pending migrations (including `0008` and `0009`) with verification, deploys the Worker, writes Worker secrets, and reconnects the Telegram webhook. If the `0005` pre-check reports duplicate active rows, reconcile them as described above and re-run.
 3. Preserve the existing production Zapier configuration. The receipt fallback requires no Zapier change; only use the fresh-environment POST notes above when provisioning a genuinely new environment.
 4. Confirm Cloudflare Pages serves the rebuilt site (fresh `contact-catalogue.json`, Message buttons) and that `VITE_TELEGRAM_BOT_USERNAME` matches the live bot if it ever changes.
 5. Smoke-test with the owner's own Telegram account: start a contact request from a profile (including a dotted-ID profile), confirm the code/instructions, and verify no creator handle appears anywhere before admin approval. Only store/enable a creator contact (`/setcontact`, then `/enablecontact`) after that creator has explicitly authorised sharing.

@@ -19,6 +19,8 @@ function createTestDb() {
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0005_one_active_request_per_user.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0006_receipt_review.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0007_front_desk_multi_requests.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0008_delivery_drafts.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0009_service_delivery_drafts.sql'), 'utf8'));
 
   return {
     raw: db,
@@ -497,42 +499,38 @@ test('Admin authorization, payment verification, explicit consent, and fulfilmen
     assert.equal(contact.sharing_enabled, 1);
     assert.ok(contact.consent_confirmed_at !== null);
 
-    // 7. Now all 3 conditions are satisfied: Payment verified + Creator consent confirmed + Admin approved!
-    sentTelegramMessages.length = 0; // clear message logs
-    const adminApprove = {
-      callback_query: {
-        id: 'cb-4',
-        from: { id: 10001 },
-        message: { chat: { id: 10001 } },
-        data: `approve:${reqId}`
-      }
-    };
-    await worker.fetch(new Request('https://worker.local/telegram/webhook', {
-      method: 'POST',
-      headers: { 'x-telegram-bot-api-secret-token': env.TELEGRAM_WEBHOOK_SECRET },
-      body: JSON.stringify(adminApprove)
-    }), env);
-
-    order = await db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(reqId) as any;
-    assert.equal(order.status, 'approved', 'Request status transitions to approved');
-
-    // Contact release message must be sent to customer chat 5007
-    const releaseMsg = sentTelegramMessages.find(m => m.method === 'sendMessage' && m.data.chat_id === '5007');
-    assert.ok(releaseMsg, 'Customer must receive contact release message');
-    assert.ok(String(releaseMsg.data.text).includes('@anaimiya_real'), 'Release message must contain creator handle');
-
-    // 8. Test idempotency: repeated approve callback does NOT send contact again
+    // 7. Payment and consent are ready, but approval waits for the draft confirmation.
     sentTelegramMessages.length = 0;
-    await worker.fetch(new Request('https://worker.local/telegram/webhook', {
-      method: 'POST',
-      headers: { 'x-telegram-bot-api-secret-token': env.TELEGRAM_WEBHOOK_SECRET },
-      body: JSON.stringify(adminApprove)
-    }), env);
-    const repeatOrder = await db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(reqId) as any;
-    assert.equal(repeatOrder.status, 'approved', 'Repeated approve must not change the final status');
-    const repeatRelease = sentTelegramMessages.find(m => m.method === 'sendMessage' && m.data.chat_id === '5007' && String(m.data.text).includes('@anaimiya_real'));
-    assert.equal(repeatRelease, undefined, 'Repeated approve must not re-send creator contact details');
+    const adminApprove = { callback_query: { id: "cb-4", from: { id: 10001 }, message: { chat: { id: 10001 } }, data: "approve:" + reqId } };
+    await worker.fetch(new Request("https://worker.local/telegram/webhook", { method: "POST", headers: { "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET }, body: JSON.stringify(adminApprove) }), env);
+    order = await db.raw.prepare("SELECT status FROM contact_requests WHERE id=?").get(reqId) as any;
+    assert.equal(order.status, "payment_verified", "Opening a draft must not approve or deliver");
+    const draft = db.raw.prepare("SELECT id,status FROM delivery_drafts WHERE request_id=?").get(reqId) as any;
+    assert.ok(draft);
+    assert.equal(draft.status, "draft");
 
+    // A second request must not create a concurrent editable draft that could
+    // receive the wrong customer's custom message or attachment.
+    const secondReqId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests (id, telegram_user_id, telegram_chat_id, profile_id, status, checkout_code)
+      VALUES (?, '5008', '5008', 'anaimiya', 'payment_verified', 'FL-SECOND1')`).run(secondReqId);
+    await worker.fetch(new Request("https://worker.local/telegram/webhook", { method: "POST", headers: { "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET }, body: JSON.stringify({ callback_query: { id: "cb-second-draft", from: { id: 10001 }, message: { chat: { id: 10001 } }, data: "approve:" + secondReqId } }) }), env);
+    assert.equal(db.raw.prepare("SELECT id FROM delivery_drafts WHERE request_id=?").get(secondReqId), undefined, "Overlapping contact draft is blocked");
+
+    await worker.fetch(new Request("https://worker.local/telegram/webhook", { method: "POST", headers: { "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET }, body: JSON.stringify({ message: { chat: { id: 10001 }, from: { id: 10001 }, text: "Your approved creator contact is ready." } }) }), env);
+    await worker.fetch(new Request("https://worker.local/telegram/webhook", { method: "POST", headers: { "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET }, body: JSON.stringify({ callback_query: { id: "cb-preview", from: { id: 10001 }, message: { chat: { id: 10001 } }, data: "draft:preview:" + draft.id } }) }), env);
+    assert.ok(sentTelegramMessages.some(m => String(m.data.text || "").includes("Preview only")));
+    await worker.fetch(new Request("https://worker.local/telegram/webhook", { method: "POST", headers: { "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET }, body: JSON.stringify({ callback_query: { id: "cb-send", from: { id: 10001 }, message: { chat: { id: 10001 } }, data: "draft:send:" + draft.id } }) }), env);
+    order = await db.raw.prepare("SELECT status FROM contact_requests WHERE id=?").get(reqId) as any;
+    assert.equal(order.status, "approved", "Confirmed draft transitions request to approved");
+    const releaseMsg = sentTelegramMessages.find(m => m.method === "sendMessage" && String(m.data.chat_id) === "5007");
+    assert.ok(releaseMsg, "Customer receives the confirmed delivery");
+    assert.ok(String(releaseMsg.data.text).includes("@anaimiya_real"));
+    sentTelegramMessages.length = 0;
+    await worker.fetch(new Request("https://worker.local/telegram/webhook", { method: "POST", headers: { "x-telegram-bot-api-secret-token": env.TELEGRAM_WEBHOOK_SECRET }, body: JSON.stringify(adminApprove) }), env);
+    const repeatOrder = await db.raw.prepare("SELECT status FROM contact_requests WHERE id=?").get(reqId) as any;
+    assert.equal(repeatOrder.status, "approved");
+    assert.equal(sentTelegramMessages.some(m => String(m.data.chat_id) === "5007" && String(m.data.text || "").includes("@anaimiya_real")), false, "Repeated approval cannot re-send contact details");
     // 9. Test consent revocation via /disablecontact
     await worker.fetch(new Request('https://worker.local/telegram/webhook', {
       method: 'POST',
@@ -645,7 +643,7 @@ test('Service order delivery safeguards and fulfilment flow', async () => {
     order = await db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any;
     assert.equal(order.status, 'payment_verified');
 
-    // 5. Admin delivers fulfilment
+    // 5. Admin creates a draft; creating it must not send or fulfil automatically.
     sentTelegramMessages.length = 0;
     await worker.fetch(new Request('https://worker.local/telegram/webhook', {
       method: 'POST',
@@ -656,11 +654,22 @@ test('Service order delivery safeguards and fulfilment flow', async () => {
     }), env);
 
     order = await db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any;
-    assert.equal(order.status, 'fulfilled');
+    assert.equal(order.status, 'payment_verified', 'Draft creation must not mark an order fulfilled');
+    assert.equal(sentTelegramMessages.some(m => m.method === 'sendMessage' && m.data.chat_id === '7001'), false, 'Customer receives nothing before explicit confirmation');
+    const preview = sentTelegramMessages.find(m => m.method === 'sendMessage' && String(m.data.chat_id) === '10001' && String(m.data.text).includes('Service fulfilment preview'));
+    assert.ok(preview, 'Admin receives a preview');
+    assert.ok(String(preview.data.text).includes('https://files.example.com/asset.zip'));
+    const sendButton = (preview.data.reply_markup as any).inline_keyboard.flat().find((b: any) => String(b.callback_data).startsWith('service-delivery:send:'));
+    assert.ok(sendButton, 'Preview has explicit send confirmation button');
+    await tgPost(env, callbackFrom(10001, sendButton.callback_data, 'cb-service-send'));
 
-    const customerDeliveryMsg = sentTelegramMessages.find(m => m.method === 'sendMessage' && m.data.chat_id === '7001');
-    assert.ok(customerDeliveryMsg, 'Customer must receive fulfilment');
+    order = await db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any;
+    assert.equal(order.status, 'fulfilled');
+    const customerDeliveryMsg = sentTelegramMessages.find(m => m.method === 'sendMessage' && String(m.data.chat_id) === '7001');
+    assert.ok(customerDeliveryMsg, 'Customer must receive fulfilment only after confirmation');
     assert.ok(String(customerDeliveryMsg.data.text).includes('https://files.example.com/asset.zip'));
+    const draft = db.raw.prepare('SELECT status FROM service_delivery_drafts WHERE service_order_id=?').get(serviceOrderId) as any;
+    assert.equal(draft.status, 'sent');
   } finally {
     cleanup();
   }
@@ -828,10 +837,9 @@ test('Checkout code collision exhaust fails safely without returning unchecked c
   }
 });
 
-test('Telegram delivery failure reverts status allowing administrative retry', async () => {
+test('Uncertain service delivery outcome locks the draft against duplicate sending', async () => {
   const db = createTestDb();
   let failNextTgSend = false;
-
   const sentTelegramMessages: any[] = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url: any, init?: any) => {
@@ -846,7 +854,6 @@ test('Telegram delivery failure reverts status allowing administrative retry', a
     }
     return originalFetch(url, init);
   };
-
   const env: any = {
     DB: db,
     TELEGRAM_BOT_TOKEN: 'test-token',
@@ -855,7 +862,6 @@ test('Telegram delivery failure reverts status allowing administrative retry', a
     SERVICE_CHECKOUT_URL: 'https://selar.com/x19128f988',
     SERVICE_PRODUCT_ID: 'x19128f988'
   };
-
   try {
     const serviceOrderId = '11111111-2222-3333-4444-555555555555';
     db.raw.prepare(`
@@ -863,31 +869,22 @@ test('Telegram delivery failure reverts status allowing administrative retry', a
       VALUES (?, 'custom-work', '9401', '9401', 'payment_verified', 'FL-DELIV1')
     `).run(serviceOrderId);
 
-    // 1. Deliver with failed Telegram send
+    await tgPost(env, adminMsg(`/deliver ${serviceOrderId} Fulfilment package contents`));
+    const preview = sentTelegramMessages.find(m => m.method === 'sendMessage' && String(m.data.chat_id) === '10001' && String(m.data.text).includes('Service fulfilment preview'));
+    assert.ok(preview, 'Admin must receive a draft preview');
+    const sendButton = (preview.data.reply_markup as any).inline_keyboard.flat().find((b: any) => String(b.callback_data).startsWith('service-delivery:send:'));
+    assert.ok(sendButton);
+
     failNextTgSend = true;
-    await worker.fetch(new Request('https://worker.local/telegram/webhook', {
-      method: 'POST',
-      headers: { 'x-telegram-bot-api-secret-token': env.TELEGRAM_WEBHOOK_SECRET },
-      body: JSON.stringify({
-        message: { chat: { id: 10001 }, from: { id: 10001 }, text: `/deliver ${serviceOrderId} Fulfilment package contents` }
-      })
-    }), env);
+    await tgPost(env, callbackFrom(10001, sendButton.callback_data, 'cb-service-fail'));
+    const order = db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any;
+    assert.equal(order.status, 'payment_verified', 'Uncertain send must not mark the order fulfilled');
+    const draft = db.raw.prepare('SELECT status FROM service_delivery_drafts WHERE service_order_id=?').get(serviceOrderId) as any;
+    assert.equal(draft.status, 'sending', 'Uncertain send remains locked to avoid duplicate delivery');
+    assert.equal(sentTelegramMessages.some(m => m.method === 'sendMessage' && String(m.data.chat_id) === '9401'), false, 'Failed send must not be treated as delivered');
 
-    // Order status should be reverted back to payment_verified so admin can retry
-    let order = db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any;
-    assert.equal(order.status, 'payment_verified');
-
-    // 2. Retry delivery (succeeds)
-    await worker.fetch(new Request('https://worker.local/telegram/webhook', {
-      method: 'POST',
-      headers: { 'x-telegram-bot-api-secret-token': env.TELEGRAM_WEBHOOK_SECRET },
-      body: JSON.stringify({
-        message: { chat: { id: 10001 }, from: { id: 10001 }, text: `/deliver ${serviceOrderId} Fulfilment package contents` }
-      })
-    }), env);
-
-    order = db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any;
-    assert.equal(order.status, 'fulfilled');
+    await tgPost(env, adminMsg(`/deliver ${serviceOrderId} Fulfilment package contents`));
+    assert.equal(sentTelegramMessages.filter(m => m.method === 'sendMessage' && String(m.data.chat_id) === '9401').length, 0, 'A locked uncertain delivery cannot be retried blindly');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -1015,6 +1012,22 @@ function messagesTo(sent: any[], chatId: string) {
   return sent.filter(m => m.method === 'sendMessage' && String(m.data.chat_id) === chatId);
 }
 
+test('Admin natural-language queries are allowlisted and command suffixes are normalized', async () => {
+  const db=createTestDb();
+  const {env,cleanup,sentTelegramMessages}=createTestEnv(db);
+  try {
+    const id=crypto.randomUUID();
+    db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,?,?,?,?,?)").run(id,'6000','6000','anaimiya','pending_payment','FL-AI0001');
+    await tgPost(env,adminMsg('show pending contact requests'));
+    assert.ok(sentTelegramMessages.some(m=>String(m.data.text||'').includes('FL-AI0001')),'allowlisted read-only query returns actual database data');
+    await tgPost(env,adminMsg('/setcontact@KasiQueenbot anaimiya @anaimiya_real'));
+    const contact=db.raw.prepare("SELECT contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts WHERE profile_id='anaimiya'").get() as any;
+    assert.equal(contact.contact_value,'@anaimiya_real');
+    assert.equal(contact.sharing_enabled,0,'saving a contact must not imply consent');
+    await tgPost(env,callbackFrom(9999,'admin:consent'));
+    assert.equal(db.raw.prepare("SELECT COUNT(*) AS n FROM admin_audit WHERE action='creator_consent_confirmed'").get() && (db.raw.prepare("SELECT COUNT(*) AS n FROM admin_audit WHERE action='creator_consent_confirmed'").get() as any).n,0,'non-admin cannot record consent');
+  } finally { cleanup(); }
+});
 test('Dotted profile IDs resolve via the Telegram-safe start parameter; malformed IDs fail closed', async () => {
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
@@ -1033,6 +1046,25 @@ test('Dotted profile IDs resolve via the Telegram-safe start parameter; malforme
 
     await tgPost(env, userMsg(5103, '/start contact_'));
     assert.equal(db.raw.prepare('SELECT * FROM contact_requests WHERE telegram_user_id = ?').get('5103'), undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test('An open contact request does not block a service purchase, and an open service order does not block a contact request', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    await tgPost(env, userMsg(5191, '/start contact_anaimiya'));
+    await tgPost(env, userMsg(5191, '/start service_website'));
+    assert.equal((db.raw.prepare("SELECT COUNT(*) AS n FROM contact_requests WHERE telegram_user_id='5191'").get() as any).n, 1);
+    assert.equal((db.raw.prepare("SELECT COUNT(*) AS n FROM service_orders WHERE telegram_user_id='5191'").get() as any).n, 1);
+    assert.ok(messagesTo(sentTelegramMessages, '5191').some(m => String(m.data.text).includes('Tell me what you need')));
+
+    await tgPost(env, userMsg(5192, '/start service_website'));
+    await tgPost(env, userMsg(5192, '/start contact_rosebeck'));
+    assert.equal((db.raw.prepare("SELECT COUNT(*) AS n FROM service_orders WHERE telegram_user_id='5192'").get() as any).n, 1);
+    assert.equal((db.raw.prepare("SELECT COUNT(*) AS n FROM contact_requests WHERE telegram_user_id='5192'").get() as any).n, 1);
   } finally {
     cleanup();
   }
@@ -1224,8 +1256,14 @@ test('Approval fails closed for unverified payment, another creator consent, and
     assert.equal(messagesTo(sentTelegramMessages, '5162').filter(m => String(m.data.text).includes('@anaimiya_real')).length, 0);
 
     await tgPost(env, callbackFrom(10001, `approve:${okId}`));
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(okId) as any).status, 'payment_verified', 'Preparing a draft does not approve the request');
+    assert.equal(messagesTo(sentTelegramMessages, '5162').filter(m => String(m.data.text).includes('@anaimiya_real')).length, 0, 'No contact is disclosed before send confirmation');
+    const draft = db.raw.prepare('SELECT id FROM delivery_drafts WHERE request_id=?').get(okId) as any;
+    assert.ok(draft);
+    await tgPost(env, adminMsg('Here is your authorized creator contact.'));
+    await tgPost(env, callbackFrom(10001, `draft:send:${draft.id}`));
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(okId) as any).status, 'approved');
-    assert.equal(messagesTo(sentTelegramMessages, '5162').filter(m => String(m.data.text).includes('@anaimiya_real')).length, 1, 'Handle is sent exactly once, after all gates pass');
+    assert.equal(messagesTo(sentTelegramMessages, '5162').filter(m => String(m.data.text).includes('@anaimiya_real')).length, 1, 'Handle is sent exactly once after explicit confirmation');
   } finally {
     cleanup();
   }
