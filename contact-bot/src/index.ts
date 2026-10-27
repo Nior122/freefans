@@ -1041,10 +1041,17 @@ async function message(e: Env, m: Msg) {
   if (user === e.ADMIN_TELEGRAM_ID) {
     if (/^(?:list|show|view)\s+(?:all\s+)?profiles$/i.test(t)) t = "/profiles";
     else if (/^(?:list|show|view)\s+(?:recent\s+)?orders$/i.test(t)) t = "/orders";
-    else if (/^delete\s+profile\s+([A-Za-z0-9._-]{1,50})$/i.test(t)) t = "/deleteprofile " + t.match(/^delete\s+profile\s+([A-Za-z0-9._-]{1,50})$/i)[1];
+    else if (/^delete\s+profile\s+(.+)$/i.test(t)) {
+      const requested = t.match(/^delete\s+profile\s+(.+)$/i)[1].trim();
+      const cat = await catalogue(e);
+      const profile = cat.find(p => p.id.toLowerCase() === requested.toLowerCase() || p.name.toLowerCase() === requested.toLowerCase());
+      if (!profile) return say(e, chat, "I couldn't match that name to a visible profile. Send the exact profile name or ID from /profiles.");
+      t = "/deleteprofile " + profile.id;
+    }
     else if (/^restore\s+profile\s+([A-Za-z0-9._-]{1,50})$/i.test(t)) t = "/restoreprofile " + t.match(/^restore\s+profile\s+([A-Za-z0-9._-]{1,50})$/i)[1];
     else if (/^(?:reject|decline)\s+(?:order\s+)?FL-[A-Z0-9]{6}$/i.test(t)) t = "/reject " + t.match(/FL-[A-Z0-9]{6}/i)[0];
     else if (/^(?:approve|deliver|fulfil|fulfill)\s+(?:order\s+)?FL-[A-Z0-9]{6}$/i.test(t)) t = "deliver " + t.match(/FL-[A-Z0-9]{6}/i)[0];
+    else if (/^(?:send\s+)?broadcast(?:\s+to\s+(?:all\s+)?clients)?$/i.test(t) || /^send\s+(?:mass\s+)?messages?\s+to\s+clients$/i.test(t) || /^send\s+(?:photo|video|media)\s+to\s+clients$/i.test(t)) t = "/broadcast";
     else if (/^(?:send\s+)?broadcast\s*[:\-]?\s+[\s\S]+$/i.test(t)) t = "/broadcast " + t.replace(/^(?:send\s+)?broadcast\s*[:\-]?\s+/i, "");
     else if (/^message\s+customer\s+FL-[A-Z0-9]{6}\s*[:\-]\s*[\s\S]+$/i.test(t)) t = "/message " + t.replace(/^message\s+customer\s+(FL-[A-Z0-9]{6})\s*[:\-]\s*/i, "$1 ");
     else if (/^(?:delete|close|cancel)\s+all\s+pending\s+orders$/i.test(t)) t = "/expirepending";
