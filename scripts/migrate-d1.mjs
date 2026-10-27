@@ -231,6 +231,38 @@ export function migrateRemote() {
     runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0014_remove_creator_sharing_permissions')");
   }
 
+  // Migration 15: optional media on service fulfilment drafts. Column checks
+  // make a retry after a partially applied remote ALTER safe and idempotent.
+  if (!applied.has('0015_service_delivery_draft_media')) {
+    console.log('[migrate-d1] Applying 0015_service_delivery_draft_media migration...');
+    const serviceDraftCols = runWranglerCommand('PRAGMA table_info(service_delivery_drafts)').map(r => r.name);
+    if (!serviceDraftCols.includes('media_kind')) {
+      runWranglerCommand("ALTER TABLE service_delivery_drafts ADD COLUMN media_kind TEXT CHECK(media_kind IS NULL OR media_kind IN ('photo','document'))");
+    }
+    if (!serviceDraftCols.includes('media_file_id')) {
+      runWranglerCommand('ALTER TABLE service_delivery_drafts ADD COLUMN media_file_id TEXT');
+    }
+    if (!serviceDraftCols.includes('media_mime_type')) {
+      runWranglerCommand('ALTER TABLE service_delivery_drafts ADD COLUMN media_mime_type TEXT');
+    }
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0015_service_delivery_draft_media')");
+  }
+
+  // Migration 16: allow durable audited recovery of a stale locked draft.
+  // Inspect the existing table definition so an already-rebuilt table is not
+  // rebuilt again if a prior run stopped before recording the version.
+  if (!applied.has('0016_admin_draft_recovery_actions')) {
+    console.log('[migrate-d1] Applying 0016_admin_draft_recovery_actions migration...');
+    const pendingActionSchema = runWranglerCommand("SELECT sql FROM sqlite_master WHERE type='table' AND name='admin_pending_actions' LIMIT 1");
+    const pendingActionSql = String(pendingActionSchema[0]?.sql || '');
+    if (!pendingActionSql.includes("'recover_draft'")) {
+      runWranglerFile(path.join(ROOT, 'contact-bot', 'migrations', '0016_admin_draft_recovery_actions.sql'));
+    } else {
+      runWranglerCommand("CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_pending_actions_one_pending_per_admin ON admin_pending_actions(admin_telegram_id) WHERE status='pending'");
+    }
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0016_admin_draft_recovery_actions')");
+  }
+
   // Final complete schema verification. These expectations are shared with the
   // local migration verifier to prevent the two definitions drifting apart.
   console.log('[migrate-d1] Verifying complete schema...');

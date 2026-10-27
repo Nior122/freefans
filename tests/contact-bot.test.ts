@@ -26,6 +26,8 @@ function createTestDb() {
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0012_hidden_profiles.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0013_admin_pending_actions.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0014_remove_creator_sharing_permissions.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0015_service_delivery_draft_media.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0016_admin_draft_recovery_actions.sql'), 'utf8'));
 
   return {
     raw: db,
@@ -531,7 +533,7 @@ test('Service order delivery safeguards and fulfilment flow', async () => {
     order = await db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any;
     assert.equal(order.status, 'payment_verified', 'Draft creation must not mark an order fulfilled');
     assert.equal(sentTelegramMessages.some(m => m.method === 'sendMessage' && m.data.chat_id === '7001'), false, 'Customer receives nothing before explicit confirmation');
-    const preview = sentTelegramMessages.find(m => m.method === 'sendMessage' && String(m.data.chat_id) === '10001' && String(m.data.text).includes('Service fulfilment preview'));
+    const preview = sentTelegramMessages.find(m => m.method === 'sendMessage' && String(m.data.chat_id) === '10001' && String(m.data.text).includes('Service fulfilment draft'));
     assert.ok(preview, 'Admin receives a preview');
     assert.ok(String(preview.data.text).includes('https://files.example.com/asset.zip'));
     const sendButton = (preview.data.reply_markup as any).inline_keyboard.flat().find((b: any) => String(b.callback_data).startsWith('service-delivery:send:'));
@@ -745,7 +747,7 @@ test('Uncertain service delivery outcome locks the draft against duplicate sendi
     `).run(serviceOrderId);
 
     await tgPost(env, adminMsg(`/deliver ${serviceOrderId} Fulfilment package contents`));
-    const preview = sentTelegramMessages.find(m => m.method === 'sendMessage' && String(m.data.chat_id) === '10001' && String(m.data.text).includes('Service fulfilment preview'));
+    const preview = sentTelegramMessages.find(m => m.method === 'sendMessage' && String(m.data.chat_id) === '10001' && String(m.data.text).includes('Service fulfilment draft'));
     assert.ok(preview, 'Admin must receive a draft preview');
     const sendButton = (preview.data.reply_markup as any).inline_keyboard.flat().find((b: any) => String(b.callback_data).startsWith('service-delivery:send:'));
     assert.ok(sendButton);
@@ -1949,6 +1951,341 @@ test('Request delivery can send one admin-attached video after explicit confirma
     assert.equal(calls[0].method, 'sendVideo');
     assert.equal(calls[0].data.video, 'delivery-video-file');
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(requestId) as any).status, 'approved');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Release 2: one admin composer spans all draft workflows and YES cannot become service fulfilment text', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const serviceOrderId = crypto.randomUUID();
+    const contactRequestId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO service_orders
+      (id,service_id,telegram_user_id,telegram_chat_id,telegram_username,request_text,status,payment_method,payment_reference,checkout_code)
+      VALUES (?, 'custom_service', '7401', '7401', 'service_customer', 'Customer: Please prepare the synthetic package.', 'payment_verified', 'selar', 'synthetic-service-ref', 'FL-R2SVC1')`).run(serviceOrderId);
+    db.raw.prepare(`INSERT INTO contact_requests
+      (id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '7402', '7402', 'anaimiya', 'payment_verified', 'FL-R2REQ1')`).run(contactRequestId);
+
+    await tgPost(env, adminMsg('/deliver FL-R2SVC1'));
+    const serviceDraft = db.raw.prepare('SELECT * FROM service_delivery_drafts WHERE service_order_id=?').get(serviceOrderId) as any;
+    assert.ok(serviceDraft, 'FL code must open the service fulfilment composer');
+    assert.equal(serviceDraft.status, 'draft');
+    assert.equal(String(serviceDraft.message_text || ''), '');
+
+    await tgPost(env, adminMsg('/message FL-R2REQ1 This support draft must not open'));
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM admin_message_drafts').get().cnt, 0);
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text || '').includes('Another composer is already open') && String(m.data.text || '').includes('service fulfilment')));
+
+    await tgPost(env, adminMsg('/broadcast This broadcast must not open'));
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM admin_broadcast_drafts').get().cnt, 0);
+
+    await tgPost(env, callbackFrom(10001, `approve:${contactRequestId}`, 'cb-r2-approve-conflict'));
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM delivery_drafts').get().cnt, 0);
+
+    await tgPost(env, adminMsg('YES'));
+    assert.equal(String((db.raw.prepare('SELECT message_text FROM service_delivery_drafts WHERE id=?').get(serviceDraft.id) as any).message_text || ''), '', 'YES must not be captured as service fulfilment text');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7401').length, 0, 'YES must not send service fulfilment');
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text || '').includes('YES was') && String(m.data.text || '').includes('not') && String(m.data.text || '').includes('added as delivery text')));
+
+    await tgPost(env, adminMsg('Your synthetic service package is ready.'));
+    assert.equal((db.raw.prepare('SELECT message_text FROM service_delivery_drafts WHERE id=?').get(serviceDraft.id) as any).message_text, 'Your synthetic service package is ready.');
+
+    await tgPost(env, {
+      message: {
+        chat: { id: 10001, type: 'private' },
+        from: { id: 10001 },
+        video: { file_id: 'service-r2-video', file_unique_id: 'service-r2-video-unique', mime_type: 'video/mp4', file_size: 14000, duration: 5 }
+      }
+    });
+    const withMedia = db.raw.prepare('SELECT media_kind,media_file_id,media_mime_type FROM service_delivery_drafts WHERE id=?').get(serviceDraft.id) as any;
+    assert.equal(withMedia.media_kind, 'document');
+    assert.equal(withMedia.media_file_id, 'service-r2-video');
+    assert.equal(withMedia.media_mime_type, 'video/mp4');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7401').length, 0);
+
+    await tgPost(env, adminMsg('x'.repeat(1100)));
+    sentTelegramMessages.length = 0;
+    await tgPost(env, callbackFrom(10001, `service-delivery:send:${serviceDraft.id}`, 'cb-r2-service-caption-too-long'));
+    assert.ok(sentTelegramMessages.some(m => m.method === 'answerCallbackQuery' && String(m.data.text || '').includes('media caption')), 'Over-limit media caption is rejected before claiming the send');
+    assert.equal((db.raw.prepare('SELECT status FROM service_delivery_drafts WHERE id=?').get(serviceDraft.id) as any).status, 'draft');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7401').length, 0);
+
+    await tgPost(env, adminMsg('Short synthetic fulfilment note.'));
+    sentTelegramMessages.length = 0;
+    await tgPost(env, callbackFrom(10001, `service-delivery:preview:${serviceDraft.id}`, 'cb-r2-service-preview'));
+    assert.ok(sentTelegramMessages.some(m => m.method === 'sendVideo' && String(m.data.chat_id) === '10001'), 'Admin preview sends media to the Admin Desk only');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7401').length, 0);
+
+    await tgPost(env, callbackFrom(10001, `service-delivery:send:${serviceDraft.id}`, 'cb-r2-service-send'));
+    const customerCalls = customerTelegramCalls(sentTelegramMessages, '7401');
+    assert.equal(customerCalls.length, 1);
+    assert.equal(customerCalls[0].method, 'sendVideo');
+    assert.equal(customerCalls[0].data.video, 'service-r2-video');
+    assert.ok(String(customerCalls[0].data.caption || '').includes('Short synthetic fulfilment note.'));
+    assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any).status, 'fulfilled');
+    assert.equal((db.raw.prepare('SELECT status FROM service_delivery_drafts WHERE id=?').get(serviceDraft.id) as any).status, 'sent');
+
+    sentTelegramMessages.length = 0;
+    await tgPost(env, callbackFrom(10001, `service-delivery:send:${serviceDraft.id}`, 'cb-r2-service-send-repeat'));
+    const repeatText = sentTelegramMessages.filter(m => m.method === 'answerCallbackQuery').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(repeatText.includes('was already sent'), 'A stale service Send button identifies the sent state');
+    assert.ok(!repeatText.includes('expired or is no longer active'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7401').length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('Release 2: stale request-delivery buttons distinguish sent, cancelled, and expired; Prepare preserves draft content', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  const callbackTexts = () => sentTelegramMessages.filter(m => m.method === 'answerCallbackQuery').map(m => String(m.data.text || '')).join('\n');
+  try {
+    const firstRequestId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '7501', '7501', 'anaimiya', 'payment_verified', 'FL-R2STA1')`).run(firstRequestId);
+
+    await tgPost(env, callbackFrom(10001, `approve:${firstRequestId}`, 'cb-r2-first-open'));
+    const firstDraft = db.raw.prepare('SELECT * FROM delivery_drafts WHERE request_id=?').get(firstRequestId) as any;
+    assert.ok(firstDraft);
+    await tgPost(env, adminMsg('Keep this exact admin-composed fulfilment.'));
+    assert.equal((db.raw.prepare('SELECT message_text FROM delivery_drafts WHERE id=?').get(firstDraft.id) as any).message_text, 'Keep this exact admin-composed fulfilment.');
+
+    await tgPost(env, callbackFrom(10001, `approve:${firstRequestId}`, 'cb-r2-first-reopen'));
+    assert.equal((db.raw.prepare('SELECT message_text FROM delivery_drafts WHERE id=?').get(firstDraft.id) as any).message_text, 'Keep this exact admin-composed fulfilment.', 'A stale Prepare button must not erase the existing draft');
+
+    sentTelegramMessages.length = 0;
+    await tgPost(env, callbackFrom(10001, `draft:preview:${firstDraft.id}`, 'cb-r2-first-preview'));
+    assert.ok(callbackTexts().includes('Preview only'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7501').length, 0);
+
+    await tgPost(env, callbackFrom(10001, `draft:send:${firstDraft.id}`, 'cb-r2-first-send'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7501').length, 1);
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(firstRequestId) as any).status, 'approved');
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text || '').includes('Delivery sent once')));
+
+    sentTelegramMessages.length = 0;
+    await tgPost(env, callbackFrom(10001, `draft:send:${firstDraft.id}`, 'cb-r2-first-send-repeat'));
+    assert.ok(callbackTexts().includes('was already sent'));
+    assert.ok(!callbackTexts().includes('expired or is no longer active'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7501').length, 0);
+
+    const secondRequestId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '7502', '7502', 'rosebeck', 'payment_verified', 'FL-R2STA2')`).run(secondRequestId);
+    await tgPost(env, callbackFrom(10001, `approve:${secondRequestId}`, 'cb-r2-second-open'));
+    const secondDraft = db.raw.prepare('SELECT * FROM delivery_drafts WHERE request_id=?').get(secondRequestId) as any;
+    await tgPost(env, callbackFrom(10001, `draft:cancel:${secondDraft.id}`, 'cb-r2-second-cancel'));
+    sentTelegramMessages.length = 0;
+    await tgPost(env, callbackFrom(10001, `draft:send:${secondDraft.id}`, 'cb-r2-second-cancelled-send'));
+    assert.ok(callbackTexts().includes('was already cancelled'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7502').length, 0);
+
+    const thirdRequestId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '7503', '7503', 'sweet_creator', 'payment_verified', 'FL-R2STA3')`).run(thirdRequestId);
+    await tgPost(env, callbackFrom(10001, `approve:${thirdRequestId}`, 'cb-r2-third-open'));
+    const thirdDraft = db.raw.prepare('SELECT * FROM delivery_drafts WHERE request_id=?').get(thirdRequestId) as any;
+    db.raw.prepare("UPDATE delivery_drafts SET expires_at='2000-01-01 00:00:00' WHERE id=?").run(thirdDraft.id);
+    sentTelegramMessages.length = 0;
+    await tgPost(env, callbackFrom(10001, `draft:send:${thirdDraft.id}`, 'cb-r2-third-expired-send'));
+    assert.ok(callbackTexts().includes('draft expired'));
+    assert.equal((db.raw.prepare('SELECT status FROM delivery_drafts WHERE id=?').get(thirdDraft.id) as any).status, 'expired');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7503').length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('Release 2: legacy multiple editable drafts fail closed for ordinary text, media, and YES', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const contactRequestId = crypto.randomUUID();
+    const serviceOrderId = crypto.randomUUID();
+    const deliveryDraftId = crypto.randomUUID();
+    const serviceDraftId = crypto.randomUUID();
+    const broadcastDraftId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '7601', '7601', 'anaimiya', 'payment_verified', 'FL-R2AMB1')`).run(contactRequestId);
+    db.raw.prepare(`INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,status,checkout_code)
+      VALUES (?, 'custom_service', '7602', '7602', 'payment_verified', 'FL-R2AMB2')`).run(serviceOrderId);
+    db.raw.prepare(`INSERT INTO delivery_drafts(id,request_id,admin_telegram_id,checkout_code,message_text,status,expires_at)
+      VALUES (?, ?, '10001', 'FL-R2AMB1', 'Original request text', 'draft', datetime('now','+30 minutes'))`).run(deliveryDraftId, contactRequestId);
+    db.raw.prepare(`INSERT INTO service_delivery_drafts(id,service_order_id,admin_telegram_id,message_text,status,expires_at)
+      VALUES (?, ?, '10001', 'Original service text', 'draft', datetime('now','+30 minutes'))`).run(serviceDraftId, serviceOrderId);
+    db.raw.prepare(`INSERT INTO admin_broadcast_drafts(id,admin_telegram_id,message_text,status,expires_at)
+      VALUES (?, '10001', 'Original broadcast text', 'draft', datetime('now','+30 minutes'))`).run(broadcastDraftId);
+
+    await tgPost(env, adminMsg('Ambiguous replacement text'));
+    await tgPost(env, {
+      message: {
+        chat: { id: 10001, type: 'private' },
+        from: { id: 10001 },
+        photo: [{ file_id: 'ambiguous-photo', file_unique_id: 'ambiguous-photo-unique', file_size: 1200, width: 100, height: 100 }]
+      }
+    });
+    await tgPost(env, adminMsg('YES'));
+
+    assert.equal((db.raw.prepare('SELECT message_text FROM delivery_drafts WHERE id=?').get(deliveryDraftId) as any).message_text, 'Original request text');
+    assert.equal((db.raw.prepare('SELECT message_text FROM service_delivery_drafts WHERE id=?').get(serviceDraftId) as any).message_text, 'Original service text');
+    assert.equal((db.raw.prepare('SELECT message_text FROM admin_broadcast_drafts WHERE id=?').get(broadcastDraftId) as any).message_text, 'Original broadcast text');
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM delivery_drafts WHERE media_file_id='ambiguous-photo'").get().cnt, 0);
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM service_delivery_drafts WHERE media_file_id='ambiguous-photo'").get().cnt, 0);
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_broadcast_drafts WHERE media_file_id='ambiguous-photo'").get().cnt, 0);
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7601').length, 0);
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7602').length, 0);
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text || '').includes('Another composer is already open')));
+  } finally {
+    cleanup();
+  }
+});
+
+test('Release 2: deterministic order and profile inspection exposes the right records without changing state', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const serviceOrderId = crypto.randomUUID();
+    const pendingServiceOrderId = crypto.randomUUID();
+    const contactRequestId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO service_orders
+      (id,service_id,telegram_user_id,telegram_chat_id,telegram_username,request_text,status,payment_method,payment_reference,checkout_code,checkout_name,buyer_email)
+      VALUES (?, 'custom_service', '7701', '7701', 'inspection_customer', 'Customer: Build the synthetic inspection package with blue accents.', 'payment_verified', 'selar', 'synthetic-inspection-ref', 'FL-R2ORD1', 'Inspection Customer FL-R2ORD1', 'inspection@example.test')`).run(serviceOrderId);
+    db.raw.prepare(`INSERT INTO service_orders
+      (id,service_id,telegram_user_id,telegram_chat_id,request_text,status,checkout_code)
+      VALUES (?, 'custom_service', '7702', '7702', 'Customer: Pending synthetic request text must stay hidden.', 'pending_payment', 'FL-R2ORD2')`).run(pendingServiceOrderId);
+    db.raw.prepare(`INSERT INTO contact_requests
+      (id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '7703', '7703', 'anaimiya', 'pending_payment', 'FL-R2ORD3')`).run(contactRequestId);
+    db.raw.prepare("INSERT INTO hidden_profiles(profile_id,hidden_by_admin,reason) VALUES ('rosebeck','10001','Synthetic inspection hide')").run();
+    db.raw.prepare("INSERT INTO hidden_profiles(profile_id,hidden_by_admin,reason) VALUES ('ghost_profile','10001','Synthetic stale override')").run();
+
+    sentTelegramMessages.length = 0;
+    await tgPost(env, adminMsg('/orders custom_service'));
+    let adminText = messagesTo(sentTelegramMessages, '10001').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(adminText.includes('FL-R2ORD1'));
+    assert.ok(adminText.includes('/order FL-R2ORD1'));
+    assert.ok(!adminText.includes('FL-R2ORD3'), 'Order search must filter deterministically');
+
+    sentTelegramMessages.length = 0;
+    await tgPost(env, adminMsg('/order FL-R2ORD1'));
+    adminText = messagesTo(sentTelegramMessages, '10001').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(adminText.includes('Service order inspection'));
+    assert.ok(adminText.includes('Build the synthetic inspection package'));
+    assert.ok(adminText.includes('synthetic-inspection-ref'));
+    assert.ok(adminText.includes('email never matches or verifies payment'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7701').length, 0);
+    assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any).status, 'payment_verified');
+
+    sentTelegramMessages.length = 0;
+    await tgPost(env, callbackFrom(10001, `admin:service:${serviceOrderId}`, 'cb-r2-service-inspect'));
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text || '').includes('Saved service request')));
+
+    sentTelegramMessages.length = 0;
+    await tgPost(env, adminMsg('/order FL-R2ORD2'));
+    adminText = messagesTo(sentTelegramMessages, '10001').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(adminText.includes('stays hidden until'));
+    assert.ok(!adminText.includes('Pending synthetic request text must stay hidden'));
+
+    sentTelegramMessages.length = 0;
+    await tgPost(env, userMsg(9999, '/order FL-R2ORD1'));
+    const nonAdminText = messagesTo(sentTelegramMessages, '9999').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(!nonAdminText.includes('Build the synthetic inspection package'));
+    assert.ok(!nonAdminText.includes('synthetic-inspection-ref'));
+
+    sentTelegramMessages.length = 0;
+    await tgPost(env, adminMsg('/profile anaimiya'));
+    adminText = messagesTo(sentTelegramMessages, '10001').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(adminText.includes('Profile inspection'));
+    assert.ok(adminText.includes('Current visibility'));
+    assert.ok(adminText.includes('pending_payment'));
+
+    sentTelegramMessages.length = 0;
+    await tgPost(env, adminMsg('/profiles hidden'));
+    adminText = messagesTo(sentTelegramMessages, '10001').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(adminText.includes('Hidden website profiles'));
+    assert.ok(adminText.includes('rosebeck'));
+    assert.ok(adminText.includes('ghost_profile'));
+    assert.ok(adminText.includes('source missing'));
+
+    sentTelegramMessages.length = 0;
+    await tgPost(env, adminMsg('/profile ghost_profile'));
+    adminText = messagesTo(sentTelegramMessages, '10001').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(adminText.includes('without a live source profile'));
+
+    await tgPost(env, adminMsg('/hideprofile anaimiya'));
+    adminText = messagesTo(sentTelegramMessages, '10001').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(adminText.includes('reversible hide'));
+    assert.ok(adminText.includes('not physical deletion'));
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM hidden_profiles WHERE profile_id='anaimiya'").get().cnt, 0, 'Hide preview alone must not change visibility');
+
+    await tgPost(env, adminMsg('YES'));
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM hidden_profiles WHERE profile_id='anaimiya'").get().cnt, 1);
+    await tgPost(env, adminMsg('/restoreprofile anaimiya'));
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM hidden_profiles WHERE profile_id='anaimiya'").get().cnt, 0);
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM contact_requests WHERE id=?').get(contactRequestId).cnt, 1, 'Visibility changes retain order records');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Release 2: stale sending draft recovery requires a separate confirmation and never resends', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const serviceOrderId = crypto.randomUUID();
+    const serviceDraftId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,status,checkout_code)
+      VALUES (?, 'custom_service', '7801', '7801', 'payment_verified', 'FL-R2REC1')`).run(serviceOrderId);
+    db.raw.prepare(`INSERT INTO service_delivery_drafts(id,service_order_id,admin_telegram_id,message_text,status,expires_at,updated_at)
+      VALUES (?, ?, '10001', 'Synthetic locked fulfilment', 'sending', datetime('now','+30 minutes'), datetime('now','-10 minutes'))`).run(serviceDraftId, serviceOrderId);
+
+    await tgPost(env, adminMsg('/drafts'));
+    let adminText = messagesTo(sentTelegramMessages, '10001').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(adminText.includes(`/recoverdraft service ${serviceDraftId}`));
+
+    await tgPost(env, adminMsg(`/recoverdraft service ${serviceDraftId}`));
+    const pending = db.raw.prepare("SELECT * FROM admin_pending_actions WHERE action='recover_draft' AND status='pending'").get() as any;
+    assert.ok(pending);
+    assert.equal((db.raw.prepare('SELECT status FROM service_delivery_drafts WHERE id=?').get(serviceDraftId) as any).status, 'sending', 'Recovery preview alone must not unlock the draft');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7801').length, 0);
+
+    await tgPost(env, adminMsg('YES'));
+    assert.equal((db.raw.prepare('SELECT status FROM service_delivery_drafts WHERE id=?').get(serviceDraftId) as any).status, 'cancelled');
+    assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any).status, 'payment_verified', 'Recovery must not fulfil or otherwise change the order');
+    assert.equal((db.raw.prepare('SELECT status FROM admin_pending_actions WHERE id=?').get(pending.id) as any).status, 'completed');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7801').length, 0, 'Recovery must never resend');
+    assert.ok((db.raw.prepare("SELECT action FROM admin_audit WHERE action='admin_draft_recovered_cancelled'").get() as any)?.action === 'admin_draft_recovered_cancelled');
+
+    await tgPost(env, adminMsg('/deliver FL-R2REC1 Fresh synthetic replacement'));
+    const reopened = db.raw.prepare('SELECT status,message_text,media_file_id FROM service_delivery_drafts WHERE id=?').get(serviceDraftId) as any;
+    assert.equal(reopened.status, 'draft');
+    assert.equal(reopened.message_text, 'Fresh synthetic replacement');
+    assert.equal(reopened.media_file_id, null);
+
+    const contactRequestId = crypto.randomUUID();
+    const supportDraftId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '7802', '7802', 'anaimiya', 'pending_payment', 'FL-R2REC2')`).run(contactRequestId);
+    db.raw.prepare(`INSERT INTO admin_message_drafts(id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,message_text,status,expires_at,updated_at)
+      VALUES (?, ?, 'contact', '10001', '7802', '7802', 'FL-R2REC2', 'Recent locked support', 'sending', datetime('now','+30 minutes'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))`).run(supportDraftId, contactRequestId);
+
+    sentTelegramMessages.length = 0;
+    await tgPost(env, adminMsg(`/recoverdraft support ${supportDraftId}`));
+    adminText = messagesTo(sentTelegramMessages, '10001').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(adminText.includes('not old enough for recovery'));
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_pending_actions WHERE status='pending'").get().cnt, 0);
+    assert.equal((db.raw.prepare('SELECT status FROM admin_message_drafts WHERE id=?').get(supportDraftId) as any).status, 'sending');
+
+    db.raw.prepare("UPDATE service_delivery_drafts SET status='sent' WHERE id=?").run(serviceDraftId);
+    sentTelegramMessages.length = 0;
+    await tgPost(env, adminMsg(`/recoverdraft service ${serviceDraftId}`));
+    adminText = messagesTo(sentTelegramMessages, '10001').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(adminText.includes('was already sent'));
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_pending_actions WHERE status='pending'").get().cnt, 0);
   } finally {
     cleanup();
   }

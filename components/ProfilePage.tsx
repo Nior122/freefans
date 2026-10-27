@@ -16,12 +16,34 @@ import {
 } from 'lucide-react';
 import { useMockData } from '../services/mockData';
 import { Lightbox } from './Lightbox';
-import { MediaType } from '../types';
+import { MediaType, Profile } from '../types';
 
 export const ProfilePage = () => {
   const { id } = useParams<{ id: string }>();
+  const { profiles, hiddenProfileIds, profileVisibilityStatus } = useMockData();
+
+  if (id && hiddenProfileIds.has(id)) return <Navigate to="/" replace />;
+
+  if (profileVisibilityStatus === 'loading') {
+    return (
+      <div className="min-h-screen bg-[#0f1014] text-white flex items-center justify-center px-6">
+        <div className="flex items-center gap-3 text-gray-300" role="status" aria-live="polite">
+          <Loader2 className="w-6 h-6 animate-spin" aria-hidden="true" />
+          <span>Loading profile…</span>
+        </div>
+      </div>
+    );
+  }
+
+  const profile = profiles.find(p => p.id === id);
+  if (!profile) return <Navigate to="/" replace />;
+
+  return <ProfilePageContent profile={profile} />;
+};
+
+const ProfilePageContent = ({ profile }: { profile: Profile }) => {
   const navigate = useNavigate();
-  const { profiles, user, toggleFavorite, isFavorite } = useMockData();
+  const { user, toggleFavorite, isFavorite } = useMockData();
   const [activeTab, setActiveTab] = useState<'all' | 'image' | 'video' | 'tags'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
@@ -74,9 +96,6 @@ export const ProfilePage = () => {
 
   const ITEMS_PER_PAGE = 20;
   const REQUIRED_WAIT_MS = 4000; // 4 seconds
-
-  const profile = profiles.find(p => p.id === id);
-  if (!profile) return <Navigate to="/" replace />;
 
   const isFav = isFavorite(profile.id);
 

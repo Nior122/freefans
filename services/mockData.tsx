@@ -12014,6 +12014,8 @@ const PROFILES: Profile[] = [
 
 interface MockDataContextType {
   profiles: Profile[];
+  hiddenProfileIds: Set<string>;
+  profileVisibilityStatus: 'loading' | 'ready' | 'unavailable';
   user: User | null;
   login: (email: string, role: UserRole) => void;
   logout: () => void;
@@ -12029,6 +12031,8 @@ const MockDataContext = createContext<MockDataContextType | undefined>(undefined
 export const MockDataProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>(PROFILES);
+  const [hiddenProfileIds, setHiddenProfileIds] = useState<Set<string>>(new Set());
+  const [profileVisibilityStatus, setProfileVisibilityStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading');
 
   // Admin-hidden profiles are stored in the Cloudflare Worker D1 database so
   // visibility changes apply across browsers instead of only changing local React state.
@@ -12040,12 +12044,20 @@ export const MockDataProvider = ({ children }: { children: ReactNode }) => {
         return response.json() as Promise<{ hiddenProfileIds?: unknown }>;
       })
       .then(data => {
-        if (!active || !Array.isArray(data.hiddenProfileIds)) return;
+        if (!active) return;
+        if (!Array.isArray(data.hiddenProfileIds)) {
+          setProfileVisibilityStatus('unavailable');
+          return;
+        }
         const hidden = new Set(data.hiddenProfileIds.filter((id): id is string => typeof id === 'string'));
+        setHiddenProfileIds(hidden);
         setProfiles(current => current.filter(profile => !hidden.has(profile.id)));
+        setProfileVisibilityStatus('ready');
       })
       .catch(() => {
+        if (!active) return;
         // A visibility API outage must not blank the site; existing profile data stays available.
+        setProfileVisibilityStatus('unavailable');
       });
     return () => { active = false; };
   }, []);
@@ -12096,6 +12108,8 @@ export const MockDataProvider = ({ children }: { children: ReactNode }) => {
   return (
     <MockDataContext.Provider value={{
       profiles,
+      hiddenProfileIds,
+      profileVisibilityStatus,
       user,
       login,
       logout,
