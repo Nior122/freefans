@@ -113,6 +113,14 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0010_admin_message_drafts.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0011_admin_broadcast_drafts',
+    description: 'Expiring admin-confirmed broadcast drafts with optional media',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0011_admin_broadcast_drafts.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
@@ -258,6 +266,10 @@ export const EXPECTED_SCHEMA = {
     'telegram_chat_id', 'checkout_code', 'message_text', 'media_kind',
     'media_file_id', 'media_mime_type', 'status', 'expires_at',
     'delivered_at', 'created_at', 'updated_at'
+  ],
+  admin_broadcast_drafts: [
+    'id', 'admin_telegram_id', 'message_text', 'media_kind', 'media_file_id',
+    'media_mime_type', 'status', 'expires_at', 'created_at', 'updated_at'
   ]
 };
 
@@ -267,7 +279,8 @@ export const EXPECTED_UNIQUE_INDEXES = [
   { table: 'service_orders', name: 'idx_service_orders_one_active_per_user' },
   { table: 'payment_receipt_submissions', name: 'idx_payment_receipt_submissions_telegram_message' },
   { table: 'payment_receipt_submissions', name: 'idx_payment_receipt_submissions_order_file' },
-  { table: 'admin_message_drafts', name: 'idx_admin_message_drafts_one_editable_per_admin' }
+  { table: 'admin_message_drafts', name: 'idx_admin_message_drafts_one_editable_per_admin' },
+  { table: 'admin_broadcast_drafts', name: 'idx_admin_broadcast_one_editable_per_admin' }
 ];
 
 /**
