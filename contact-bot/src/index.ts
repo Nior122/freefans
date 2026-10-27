@@ -67,6 +67,7 @@ type ReceiptSubmission = {
   order_id: string;
   status: string;
 };
+type AdminBroadcastDraft = { id: string; admin_telegram_id: string; message_text?: string | null; media_kind?: "photo" | "document" | null; media_file_id?: string | null; media_mime_type?: string | null; status: string; expires_at: string };
 type AdminMessageDraft = {
   id: string;
   order_id: string;
@@ -483,6 +484,9 @@ async function expireAdminMessageDraftIfNeeded(e: Env, draft: AdminMessageDraft)
   return true;
 }
 
+async function activeBroadcastDraft(e: Env, adminTelegramId: string): Promise<AdminBroadcastDraft | null> {
+  return e.DB.prepare("SELECT id,admin_telegram_id,message_text,media_kind,media_file_id,media_mime_type,status,expires_at FROM admin_broadcast_drafts WHERE admin_telegram_id=? AND status IN ('draft','sending') ORDER BY created_at DESC LIMIT 1").bind(adminTelegramId).first<AdminBroadcastDraft>();
+}
 async function activeAdminMessageDraft(e: Env, adminTelegramId: string): Promise<AdminMessageDraft | null> {
   const draft = await e.DB.prepare("SELECT id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,message_text,media_kind,media_file_id,media_mime_type,status,expires_at,delivered_at,created_at,updated_at FROM admin_message_drafts WHERE admin_telegram_id=? AND status='draft' ORDER BY updated_at DESC LIMIT 1").bind(adminTelegramId).first<AdminMessageDraft>();
   if (!draft) return null;
