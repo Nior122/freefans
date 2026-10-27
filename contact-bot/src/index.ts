@@ -239,10 +239,13 @@ async function catalogue(e: Env): Promise<Profile[]> {
   if (!r.ok) throw new Error("profile catalogue unavailable");
   const j = await r.json() as { profiles?: Profile[] };
   if (!Array.isArray(j.profiles)) throw new Error("invalid catalogue");
+  const hidden = await e.DB.prepare("SELECT profile_id FROM hidden_profiles").all<any>();
+  const hiddenIds = new Set((hidden.results || []).map((row:any) => String(row.profile_id)));
   // Defence in depth: only the two public fields are ever carried into bot logic,
   // even if a future catalogue regression added restricted fields.
   return j.profiles
     .filter(p => p && typeof p.id === "string" && /^[A-Za-z0-9._-]{1,50}$/.test(p.id) && typeof p.name === "string" && p.name.trim().length > 0)
+    .filter(p => !hiddenIds.has(p.id))
     .map(p => ({ id: p.id, name: p.name.slice(0, 120) }));
 }
 function paymentKeyboard(e: Env, id: string) {
@@ -1071,6 +1074,24 @@ async function message(e: Env, m: Msg) {
     await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(draft.id).run();
     return say(e, chat, "✖️ Broadcast draft cancelled. Nothing was sent.");
   }
+  if (user === e.ADMIN_TELEGRAM_ID && /^\/deleteprofile\s+/i.test(t)) {
+    const match = t.match(/^\/deleteprofile\s+([A-Za-z0-9._-]{1,50})$/i);
+    if (!match) return say(e, chat, "Usage: /deleteprofile PROFILE_ID — removes the profile from the live site catalogue after confirmation.");
+    const cat = await catalogue(e);
+    const profile = cat.find(p => p.id === match[1]);
+    if (!profile) return say(e, chat, "That profile is not currently visible. Check /profiles or use /restoreprofile PROFILE_ID.");
+    return say(e, chat, "⚠️ <b>Remove website profile?</b>\n" + esc(profile.name) + " (<code>" + esc(profile.id) + "</code>) will be hidden from the live profile listings and Telegram request catalogue. The source profile files will remain in GitHub.", {
+      inline_keyboard: [[{ text: "🗑️ Confirm hide profile", callback_data: "profiledelete:confirm:" + profile.id }], [{ text: "Cancel", callback_data: "profiledelete:cancel:" + profile.id }]]
+    });
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && /^\/restoreprofile\s+/i.test(t)) {
+    const match = t.match(/^\/restoreprofile\s+([A-Za-z0-9._-]{1,50})$/i);
+    if (!match) return say(e, chat, "Usage: /restoreprofile PROFILE_ID");
+    const result = await e.DB.prepare("DELETE FROM hidden_profiles WHERE profile_id=?").bind(match[1]).run();
+    if (!result.meta?.changes) return say(e, chat, "That profile was not hidden, or the ID is invalid.");
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(?,'profile_restored',?,'Admin restored profile visibility')").bind(user, match[1]).run();
+    return say(e, chat, "✅ Profile visibility restored for <code>" + esc(match[1]) + "</code>. Refresh the website to see it again.");
+  }
   if (user === e.ADMIN_TELEGRAM_ID && /^\/authorizecontact\s+/i.test(t)) {
     const match = t.match(/^\/authorizecontact\s+([A-Za-z0-9._-]{1,50})$/i);
     if (!match) return say(e, chat, "Usage: /authorizecontact PROFILE_ID — use only after the creator explicitly authorised sharing this contact.");
@@ -1379,6 +1400,23 @@ async function message(e: Env, m: Msg) {
 }
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
+  if (data.startsWith("profiledelete:")) {
+    if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin private chat only." });
+    const match = data.match(/^profiledelete:(confirm|cancel):([A-Za-z0-9._-]{1,50})$/i);
+    if (!match) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Invalid profile action." });
+    const action = match[1].toLowerCase(), profileId = match[2];
+    if (action === "cancel") {
+      await say(e, chat, "Profile removal cancelled. The website was not changed.");
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Cancelled." });
+    }
+    const cat = await catalogue(e);
+    const profile = cat.find(p => p.id === profileId);
+    if (!profile) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Profile is already hidden or unavailable." });
+    await e.DB.prepare("INSERT OR IGNORE INTO hidden_profiles(profile_id,hidden_by_admin,reason) VALUES(?,?,?)").bind(profileId, actor, "Hidden by admin from Telegram Admin Desk").run();
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(?,'profile_hidden',?,'Admin hid profile from public site listings and Telegram catalogue')").bind(actor, profileId).run();
+    await say(e, chat, "🗑️ Profile <b>" + esc(profile.name) + "</b> is now hidden from the website listings and Telegram request catalogue. Refresh the website to see the change. The source files remain recoverable in GitHub.");
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Profile hidden." });
+  }
   if (data.startsWith("broadcast:")) {
     if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin private chat only." });
     const match = data.match(/^broadcast:(preview|send|cancel):([0-9a-f-]{36})$/i);
@@ -1909,6 +1947,12 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const u = new URL(request.url);
     if (request.method === "GET" && u.pathname === "/health") return json({ ok: true, service: "fansleak-contact-bot", provider: provider(env), methods: enabledMethods(env) });
+    if (request.method === "OPTIONS" && u.pathname === "/public/hidden-profiles") return new Response(null, { status: 204, headers: { "access-control-allow-origin": "https://fansleak.pages.dev", "access-control-allow-methods": "GET,OPTIONS", "access-control-allow-headers": "content-type", "access-control-max-age": "86400" } });
+    if (request.method === "GET" && u.pathname === "/public/hidden-profiles") {
+      const rows = await env.DB.prepare("SELECT profile_id FROM hidden_profiles").all<any>();
+      return new Response(JSON.stringify({ hiddenProfileIds: (rows.results || []).map((row:any) => String(row.profile_id)) }), { status: 200, headers: { "content-type": "application/json; charset=utf-8", "access-control-allow-origin": "https://fansleak.pages.dev", "cache-control": "no-store" } });
+    }
+
     if (request.method === "POST" && u.pathname === "/telegram/webhook") {
       if (!env.TELEGRAM_WEBHOOK_SECRET || !safeEq(request.headers.get("x-telegram-bot-api-secret-token") || "", env.TELEGRAM_WEBHOOK_SECRET)) return json({ error: "unauthorised" }, 401);
       let update: Update;
