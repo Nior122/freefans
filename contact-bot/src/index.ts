@@ -26,6 +26,7 @@ type TelegramPhotoSize = { file_id?: string; file_unique_id?: string; file_size?
 type TelegramDocument = { file_id?: string; file_unique_id?: string; file_name?: string; mime_type?: string; file_size?: number };
 type TelegramVoice = { file_id?: string; file_unique_id?: string; file_size?: number; duration?: number; mime_type?: string };
 type TelegramAudio = { file_id?: string; file_unique_id?: string; file_size?: number; duration?: number; mime_type?: string; file_name?: string };
+type TelegramVideo = { file_id?: string; file_unique_id?: string; file_size?: number; mime_type?: string; duration?: number };
 type Msg = {
   message_id?: number;
   chat: { id: number; type?: string };
@@ -36,6 +37,7 @@ type Msg = {
   document?: TelegramDocument;
   voice?: TelegramVoice;
   audio?: TelegramAudio;
+  video?: TelegramVideo;
 };
 type Update = { message?: Msg; callback_query?: { id: string; from: { id: number }; message?: Msg; data?: string } };
 type Profile = { id: string; name: string };
@@ -882,7 +884,7 @@ async function startService(e: Env, m: Msg, serviceId: string) {
 async function message(e: Env, m: Msg) {
   let t = (m.text || "").trim();
   const caption = (m.caption || "").trim(), chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
-  const hasReceiptCandidateMedia = Boolean((Array.isArray(m.photo) && m.photo.length > 0) || m.document);
+  const hasReceiptCandidateMedia = Boolean((Array.isArray(m.photo) && m.photo.length > 0) || m.document || m.video);
   if (hasReceiptCandidateMedia && user === e.ADMIN_TELEGRAM_ID) {
     const normalizedCaption = caption.replace(/^(\/[A-Za-z0-9_]+)@[A-Za-z0-9_]+(?=\s|$)/, "$1");
     if (normalizedCaption === "/message" || normalizedCaption.startsWith("/message ")) {
@@ -895,7 +897,9 @@ async function message(e: Env, m: Msg) {
 
     const broadcastDraft = await activeBroadcastDraft(e, user);
     if (broadcastDraft && broadcastDraft.status === "draft") {
-      const extracted = extractReceiptMedia(m);
+      const extracted = m.video?.file_id
+        ? { media: { kind: "document" as const, fileId: m.video.file_id, fileUniqueId: m.video.file_unique_id || null, mimeType: m.video.mime_type || "video/mp4", fileSize: m.video.file_size || null } }
+        : extractReceiptMedia(m);
       if (!extracted.media) return say(e, chat, extracted.unsupported || "Attach one photo or document under 20 MB.");
       const updated = await e.DB.prepare("UPDATE admin_broadcast_drafts SET media_kind=?,media_file_id=?,media_mime_type=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(extracted.media.kind, extracted.media.fileId, extracted.media.mimeType, broadcastDraft.id, user).run();
       if (!updated.meta?.changes) return say(e, chat, "Broadcast draft changed; media was not attached.");
@@ -1375,6 +1379,55 @@ async function message(e: Env, m: Msg) {
 }
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
+  if (data.startsWith("broadcast:")) {
+    if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin private chat only." });
+    const match = data.match(/^broadcast:(preview|send|cancel):([0-9a-f-]{36})$/i);
+    if (!match) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Invalid broadcast action." });
+    const action = match[1].toLowerCase(), id = match[2];
+    const draft = await e.DB.prepare("SELECT id,admin_telegram_id,message_text,media_kind,media_file_id,media_mime_type,status,expires_at FROM admin_broadcast_drafts WHERE id=?").bind(id).first<AdminBroadcastDraft>();
+    if (!draft || draft.admin_telegram_id !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast draft not found." });
+    if (draft.status !== "draft") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast draft is no longer editable." });
+    if (Date.parse(draft.expires_at.replace(" ", "T") + (draft.expires_at.endsWith("Z") ? "" : "Z")) < Date.now()) {
+      await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='expired',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(id).run();
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast draft expired." });
+    }
+    if (action === "cancel") {
+      await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(id).run();
+      await say(e, chat, "✖️ Broadcast cancelled. Nothing was sent.");
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast cancelled." });
+    }
+    const audience = await e.DB.prepare("SELECT telegram_chat_id FROM contact_requests WHERE status IN ('pending_payment','payment_verified','approved') UNION SELECT telegram_chat_id FROM service_orders WHERE status IN ('pending_payment','payment_verified','fulfilled')").all<any>();
+    const recipients = [...new Set((audience.results || []).map((r:any) => String(r.telegram_chat_id)).filter(Boolean))].slice(0, 100);
+    if (action === "preview") {
+      await say(e, chat, "👀 <b>Broadcast preview</b>\nRecipients: " + recipients.length + " (maximum 100 per broadcast)\nMessage: " + (draft.message_text ? esc(draft.message_text) : "—") + "\nMedia: " + (draft.media_kind ? esc(draft.media_mime_type || draft.media_kind) : "none") + "\n\nNo messages sent.", { inline_keyboard: [[{ text: "✅ Confirm and send", callback_data: "broadcast:send:" + id }], [{ text: "✖️ Cancel", callback_data: "broadcast:cancel:" + id }]] });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Preview only." });
+    }
+    if (!draft.message_text?.trim() && !draft.media_file_id) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Add message text or media before sending." });
+    if (!recipients.length) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "No customers in the current order audience." });
+    const claimed = await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(id, actor).run();
+    if (!claimed.meta?.changes) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast state changed; nothing sent." });
+    let sent = 0, failed = 0;
+    for (const recipient of recipients) {
+      try {
+        const body = String(draft.message_text || "");
+        if (draft.media_file_id && draft.media_kind === "photo") {
+          await tg(e, "sendPhoto", { chat_id: recipient, photo: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
+        } else if (draft.media_file_id && draft.media_kind === "document" && /^video\//i.test(draft.media_mime_type || "")) {
+          await tg(e, "sendVideo", { chat_id: recipient, video: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
+        } else if (draft.media_file_id && draft.media_kind === "document") {
+          await tg(e, "sendDocument", { chat_id: recipient, document: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
+        } else {
+          await say(e, recipient, esc(body));
+        }
+        sent++;
+      } catch { failed++; }
+    }
+    const status = failed === 0 ? "sent" : "partial";
+    await e.DB.prepare("UPDATE admin_broadcast_drafts SET status=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(status, id).run();
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,details) VALUES(?,?,?)").bind(actor, "admin_broadcast_" + status, "Broadcast draft " + id + ": sent=" + sent + ", failed=" + failed + ", recipients=" + recipients.length).run();
+    await say(e, chat, (failed ? "⚠️" : "✅") + " Broadcast finished. Sent: <b>" + sent + "</b>; failed: <b>" + failed + "</b>. The draft is locked against duplicate sends.");
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast complete." });
+  }
   if (data.startsWith("draft:")) {
     if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Admin access only."});
     const dm = data.match(/^draft:(preview|send|cancel):([0-9a-f-]{36})$/i);
