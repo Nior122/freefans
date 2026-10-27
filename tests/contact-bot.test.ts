@@ -633,7 +633,7 @@ test('Service order delivery safeguards and fulfilment flow', async () => {
     order = await db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any;
     assert.equal(order.status, 'payment_verified');
 
-    // 5. Admin delivers fulfilment
+    // 5. Admin creates a draft; creating it must not send or fulfil automatically.
     sentTelegramMessages.length = 0;
     await worker.fetch(new Request('https://worker.local/telegram/webhook', {
       method: 'POST',
@@ -644,11 +644,22 @@ test('Service order delivery safeguards and fulfilment flow', async () => {
     }), env);
 
     order = await db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any;
-    assert.equal(order.status, 'fulfilled');
+    assert.equal(order.status, 'payment_verified', 'Draft creation must not mark an order fulfilled');
+    assert.equal(sentTelegramMessages.some(m => m.method === 'sendMessage' && m.data.chat_id === '7001'), false, 'Customer receives nothing before explicit confirmation');
+    const preview = sentTelegramMessages.find(m => m.method === 'sendMessage' && String(m.data.chat_id) === '10001' && String(m.data.text).includes('Service fulfilment preview'));
+    assert.ok(preview, 'Admin receives a preview');
+    assert.ok(String(preview.data.text).includes('https://files.example.com/asset.zip'));
+    const sendButton = (preview.data.reply_markup as any).inline_keyboard.flat().find((b: any) => String(b.callback_data).startsWith('service-delivery:send:'));
+    assert.ok(sendButton, 'Preview has explicit send confirmation button');
+    await tgPost(env, callbackFrom(10001, sendButton.callback_data, 'cb-service-send'));
 
-    const customerDeliveryMsg = sentTelegramMessages.find(m => m.method === 'sendMessage' && m.data.chat_id === '7001');
-    assert.ok(customerDeliveryMsg, 'Customer must receive fulfilment');
+    order = await db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any;
+    assert.equal(order.status, 'fulfilled');
+    const customerDeliveryMsg = sentTelegramMessages.find(m => m.method === 'sendMessage' && String(m.data.chat_id) === '7001');
+    assert.ok(customerDeliveryMsg, 'Customer must receive fulfilment only after confirmation');
     assert.ok(String(customerDeliveryMsg.data.text).includes('https://files.example.com/asset.zip'));
+    const draft = db.raw.prepare('SELECT status FROM service_delivery_drafts WHERE service_order_id=?').get(serviceOrderId) as any;
+    assert.equal(draft.status, 'sent');
   } finally {
     cleanup();
   }
