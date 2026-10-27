@@ -1051,6 +1051,40 @@ async function message(e: Env, m: Msg) {
       ]
     });
   }
+  if (user === e.ADMIN_TELEGRAM_ID && (t === "/profiles" || /^list profiles$/i.test(t))) {
+    const cat = await catalogue(e);
+    const lines = cat.map((p, i) => String(i + 1) + ". <b>" + esc(p.name) + "</b> · <code>" + esc(p.id) + "</code>");
+    return say(e, chat, "<b>📚 Current website profiles (" + cat.length + ")</b>\n" + (lines.join("\n") || "No profiles found."));
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && (t === "/orders" || /^show orders$/i.test(t))) {
+    const contacts = await e.DB.prepare("SELECT checkout_code,status,profile_id AS target,created_at,'contact' AS kind FROM contact_requests ORDER BY created_at DESC LIMIT 15").all<any>();
+    const services = await e.DB.prepare("SELECT checkout_code,status,service_id AS target,created_at,'service' AS kind FROM service_orders ORDER BY created_at DESC LIMIT 15").all<any>();
+    const rows = [...(contacts.results || []), ...(services.results || [])].sort((a:any,b:any) => String(b.created_at || "").localeCompare(String(a.created_at || ""))).slice(0,20);
+    const lines = rows.map((r:any) => "• <code>" + esc(String(r.checkout_code || "no code")) + "</code> · " + esc(String(r.kind)) + " · " + esc(String(r.target || "")) + " · " + esc(String(r.status)));
+    return say(e, chat, "<b>🧾 Recent orders (" + rows.length + ")</b>\n" + (lines.join("\n") || "No orders found."));
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && /^\/reject\s+/i.test(t)) {
+    const match = t.match(/^\/reject\s+(FL-[A-Z0-9]{6})$/i);
+    if (!match) return say(e, chat, "Usage: /reject FL-ABC123 — rejects the selected order and notifies its customer.");
+    const code = match[1].toUpperCase();
+    const contact = await e.DB.prepare("SELECT id,telegram_chat_id,status FROM contact_requests WHERE checkout_code=?").bind(code).first<any>();
+    if (contact) {
+      if (["approved","rejected","expired"].includes(String(contact.status))) return say(e, chat, "Request " + esc(code) + " is already " + esc(String(contact.status)) + ". No change made.");
+      const changed = await e.DB.prepare("UPDATE contact_requests SET status='rejected',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status IN ('awaiting_email','pending_payment','awaiting_bank_reference','pending_manual_payment','payment_verified')").bind(contact.id).run();
+      if (!changed.meta?.changes) return say(e, chat, "Request state changed before rejection. Refresh /orders; no success was reported.");
+      await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'admin_request_rejected',?,?)").bind(user, contact.id, "Admin rejected request " + code).run();
+      await sayBestEffort(e, contact.telegram_chat_id, "Your FansLeak request " + code + " was rejected by support. If you think this is a mistake, reply here to contact support.");
+      return say(e, chat, "🚫 Request " + esc(code) + " rejected and customer notified.");
+    }
+    const service = await e.DB.prepare("SELECT id,telegram_chat_id,status FROM service_orders WHERE checkout_code=?").bind(code).first<any>();
+    if (!service) return say(e, chat, "No contact request or service order found for " + esc(code) + ".");
+    if (["fulfilled","cancelled"].includes(String(service.status))) return say(e, chat, "Service order " + esc(code) + " is already " + esc(String(service.status)) + ". No change made.");
+    const changed = await e.DB.prepare("UPDATE service_orders SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status IN ('awaiting_request','awaiting_email','pending_payment','payment_verified','payment_review')").bind(service.id).run();
+    if (!changed.meta?.changes) return say(e, chat, "Service order state changed before cancellation. Refresh /orders; no success was reported.");
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'admin_service_order_cancelled',?,?)").bind(user, service.id, "Admin cancelled service order " + code).run();
+    await sayBestEffort(e, service.telegram_chat_id, "Your FansLeak service order " + code + " was cancelled by support. Reply here if you need help.");
+    return say(e, chat, "🚫 Service order " + esc(code) + " cancelled and customer notified.");
+  }
   if (user === e.ADMIN_TELEGRAM_ID && (t === "/message" || t.startsWith("/message "))) {
     const match = t.match(/^\/message\s+([^\s]+)(?:\s+([\s\S]+))?$/i);
     if (!match) return say(e, chat, "Format: /message FL-ABC123 Your message here\nYou may also use /message FL-ABC123 on its own, then send text and/or one photo or document. This opens a draft only; it does not send.");
