@@ -354,7 +354,7 @@ test('Unknown code can reconcile only by exact full checkout name, never partial
     `).run();
 
     const partial = await selarPost(env, { reference: 'ref-partial-name', product_code: env.SELAR_PRODUCT_ID, customer_full_name: 'Joseph FL-UNKNWN' });
-    assert.deepEqual(await partial.json(), { ok: true, matched: false, reason: 'no_unique_code_or_full_name_match' });
+    assert.deepEqual(await partial.json(), { ok: true, matched: false, reason: 'no_unique_code_name_or_email_match' });
     assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).length, 0, 'partial name must not notify admin');
 
     const exact = await selarPost(env, { reference: 'ref-full-name', product_code: env.SELAR_PRODUCT_ID, customer_full_name: 'Joseph Simon Unaogu FL-UNKNWN' });
@@ -931,7 +931,7 @@ test('Selar webhook negative cases never mutate payment state', async () => {
 
     const noCode = await selarPost(env, { reference: 'ref-neg-4', product_code: env.SELAR_PRODUCT_ID, customer_full_name: 'No Code Here', email: 'nobody@example.com' });
     assert.equal(noCode.status, 200);
-    assert.deepEqual(await noCode.json(), { ok: true, matched: false, reason: 'no_unique_code_or_full_name_match' });
+    assert.deepEqual(await noCode.json(), { ok: true, matched: false, reason: 'no_unique_code_name_or_email_match' });
 
     const codeMatchNameMismatch = await selarPost(env, { ...validSale, reference: 'ref-neg-5', customer_full_name: 'Other Person FL-NEG001' });
     const codeMatchJson = await codeMatchNameMismatch.json() as any;
