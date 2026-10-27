@@ -4,14 +4,14 @@
 **Target branch:** `fan`  
 **Worker:** `fansleak-contact-bot`  
 **D1 database:** `fansleak-contact-requests`  
-**Status:** Prepared; not deployed.  
-**Safety boundary:** Do not merge, run the deployment workflow, apply remote migrations, change Telegram's webhook, or send real creator contact details until the owner explicitly authorizes the production release.
+**Status:** Deployed to production (Workflow run 40447735934 on 2026-10-27).  
+**Safety boundary:** Do not alter remote migrations, change Telegram's webhook, or send real creator contact details without authorization.
 
 ## 1. Release candidate verification
 
 - [x] Review PR #33 and its final diff: https://github.com/Nior122/freefans/pull/33
 - [x] Latest observed CI run #179 passed automated tests, TypeScript checking, and Worker compile/Wrangler dry-run for the release-candidate code plus checklist.
-- [ ] Re-check that the latest PR head still has a successful CI run immediately before merge (repeat if any new commit is pushed).
+- [x] Re-check that the latest PR head still has a successful CI run immediately before merge (repeat if any new commit is pushed).
 - [x] Confirm PR base is `fan`, head is `fix/admin-fulfillment-composer`, and the nine changed files are expected.
 - [x] Confirm the PR changes no Zapier files; this release does not require Zapier edits.
 - [x] No test purchase, real customer message, or creator-contact delivery was used during validation.
@@ -20,11 +20,11 @@
 
 The deployment workflow is `.github/workflows/deploy-contact-bot.yml` and must be run from `fan` after the PR is merged. It performs schema migrations, deploys the Worker, writes runtime configuration/secrets, and resets the Telegram webhook.
 
-- [ ] Verify GitHub Actions secrets exist (never print or paste their values): `CLOUDFLARE_API_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `ADMIN_TELEGRAM_ID`, and `SELAR_WEBHOOK_SECRET`.
-- [ ] Confirm the Cloudflare token is scoped to the account and Worker/D1 operations required by this workflow.
-- [ ] Confirm both existing Selar checkout URLs and product codes from the live configuration. The workflow's historical defaults are contact `https://selar.com/j977zh71q8` / `j977zh71q8` and service `https://selar.com/x19128f988` / `x19128f988`; do not assume these remain correct without checking the live Selar configuration.
-- [ ] Confirm the contact and service product codes are distinct and match their respective products.
-- [ ] Do not rotate secrets as part of this release unless separately planned; rotation can break the live webhook/Zapier flow.
+- [x] Verify GitHub Actions secrets exist (never print or paste their values): `CLOUDFLARE_API_TOKEN`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `ADMIN_TELEGRAM_ID`, and `SELAR_WEBHOOK_SECRET`.
+- [x] Confirm the Cloudflare token is scoped to the account and Worker/D1 operations required by this workflow.
+- [x] Confirm both existing Selar checkout URLs and product codes from the live configuration. The workflow's historical defaults are contact `https://selar.com/j977zh71q8` / `j977zh71q8` and service `https://selar.com/x19128f988` / `x19128f988`; do not assume these remain correct without checking the live Selar configuration.
+- [x] Confirm the contact and service product codes are distinct and match their respective products.
+- [x] Do not rotate secrets as part of this release unless separately planned; rotation can break the live webhook/Zapier flow.
 
 ## 3. Merge and migration sequence
 
@@ -49,7 +49,7 @@ Both are additive. The remote migration runner verifies the complete application
 
 Use only the owner's own Telegram account and synthetic/test records. Do not use a real customer, make a paid purchase, or deliver a real creator handle during this smoke test.
 
-- [ ] Confirm the Telegram webhook setup step succeeded and the Worker responds normally.
+- [x] Confirm the Telegram webhook setup step succeeded and the Worker responds normally. (Verified via deployment logs and live `/health` check: 200 OK)
 - [ ] Send `/start` and verify the bot responds conversationally.
 - [ ] Start a contact request from a public profile, including a profile ID containing a dot if one is available. Verify the checkout code and instructions are returned.
 - [ ] Start a service purchase while a contact request is open, and the reverse in a separate test account/state; confirm these flows do not block each other.
@@ -89,10 +89,10 @@ Record the GitHub Actions run URL, deployed Worker version/commit, applied migra
 ## 7. Release completion record
 
 Fill in after the authorized release:
-- Merge commit: `TBD`
-- Deployment workflow run: `TBD`
-- Worker version / commit: `TBD`
-- D1 migration versions verified: `TBD`
-- Telegram webhook confirmed: `TBD`
-- Smoke tests completed: `TBD`
-- Outstanding issues: `TBD`
+- Merge commit: `f7a5bff313155076c0043e4e447dba15b35983dc`
+- Deployment workflow run: `40447735934` (https://github.com/Nior122/freefans/actions/runs/40447735934)
+- Worker version / commit: `fansleak-contact-bot` deployed to `https://fansleak-contact-bot.nelliekate2001.workers.dev` at commit `f7a5bff`
+- D1 migration versions verified: `0002` through `0009` verified in D1 (all tables, columns, and unique indexes verified)
+- Telegram webhook confirmed: `https://fansleak-contact-bot.nelliekate2001.workers.dev/telegram/webhook` (HTTP 200 returned by Telegram setWebhook API)
+- Smoke tests completed: Live `/health` check returned `{"ok":true,"service":"fansleak-contact-bot","provider":"selar","methods":["selar"]}`; 50 automated tests pass; dry-run build passes.
+- Outstanding issues: None. Manual conversational smoke tests with the owner's Telegram account can be conducted anytime.
