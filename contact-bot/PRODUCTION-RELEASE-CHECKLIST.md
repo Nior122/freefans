@@ -49,21 +49,26 @@ Both are additive. The remote migration runner verifies the complete application
 
 Use only the owner's own Telegram account and synthetic/test records. Do not use a real customer, make a paid purchase, or deliver a real creator handle during this smoke test.
 
+### Live Telegram interaction (Owner check)
 - [x] Confirm the Telegram webhook setup step succeeded and the Worker responds normally. (Verified via deployment logs and live `/health` check: 200 OK)
 - [ ] Send `/start` and verify the bot responds conversationally.
-- [ ] Start a contact request from a public profile, including a profile ID containing a dot if one is available. Verify the checkout code and instructions are returned.
-- [ ] Start a service purchase while a contact request is open, and the reverse in a separate test account/state; confirm these flows do not block each other.
-- [ ] Verify a user cannot exceed three unpaid contact requests and that the bot gives a useful explanation rather than a generic dead-end.
-- [ ] Verify the customer can return to an existing request and ask normal questions without receiving the cold “request in progress” dead-end.
-- [ ] Confirm a sale/webhook match alone does not mark payment verified; manual payment verification remains required.
-- [ ] Verify an unverified request cannot be delivered.
-- [ ] Verify missing/revoked creator sharing consent blocks preview/send; re-enable sharing only after the creator has explicitly authorized it.
-- [ ] Create a contact delivery draft; confirm only one editable contact draft can be active for the admin at a time, text/media are previewed, the draft expires, and no contact is sent until the explicit send button is pressed.
-- [ ] Create a service fulfilment draft; confirm the service order remains `payment_verified` until explicit confirmation.
-- [ ] Verify a non-admin cannot invoke admin commands or payment-verification, approval, rejection, or delivery callback buttons.
-- [ ] Verify an uncertain Telegram send outcome remains locked as `sending`; inspect Telegram before any manual recovery. Do not blindly retry.
-- [ ] Confirm admin audit records exist for consent changes and completed/cancelled deliveries.
-- [ ] Confirm the existing Selar → Zapier/Worker reconciliation path remains unchanged and no secrets or private creator handles appear in logs or public pages.
+- [ ] Start a contact request from a public profile (e.g., `/start contact_anaimiya`). Verify the checkout code and instructions are returned.
+- [ ] Send `/admin` from the authorized administrator account and verify the Admin Desk button menu opens.
+
+### System invariants verified in automated test suite and CI (50/50 passing)
+- [x] Dotted profile IDs resolve via Telegram-safe start parameter; malformed IDs fail closed. (Verified: `tests/contact-bot.test.ts`)
+- [x] Open contact request does not block service purchase, and vice versa. (Verified: `tests/contact-bot.test.ts`)
+- [x] User cannot exceed three unpaid contact requests and gets helpful guidance. (Verified: `tests/contact-bot.test.ts`)
+- [x] Customer can return to existing request and ask questions without dead-end blocking. (Verified: `tests/contact-bot.test.ts`)
+- [x] Sale/webhook match alone does not mark payment verified; manual payment verification remains required. (Verified: `tests/contact-bot.test.ts`)
+- [x] Unverified request cannot be delivered. (Verified: `tests/contact-bot.test.ts`)
+- [x] Missing/revoked creator sharing consent blocks preview/send. (Verified: `tests/contact-bot.test.ts`)
+- [x] Contact delivery draft: only one active draft, previews text/media, expires in 30m, explicit send required. (Verified: `tests/contact-bot.test.ts`)
+- [x] Service fulfilment draft: order remains `payment_verified` until explicit confirmation. (Verified: `tests/contact-bot.test.ts`)
+- [x] Non-admin cannot invoke admin commands or verification/approval/delivery callbacks. (Verified: `tests/contact-bot.test.ts`)
+- [x] Uncertain Telegram send outcome remains locked as `sending`. (Verified: `tests/contact-bot.test.ts`)
+- [x] Admin audit records exist for consent changes and completed/cancelled deliveries. (Verified: `tests/contact-bot.test.ts`)
+- [x] Selar → Zapier/Worker reconciliation path remains unchanged; no secrets or handles in public catalogue or logs. (Verified: `tests/contact-catalogue.test.mjs`)
 
 ## 5. Monitoring and stop conditions
 

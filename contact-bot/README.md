@@ -111,7 +111,7 @@ Accepted field aliases (Zapier should pass the Selar values through under any on
 | Exact product code (required, single product only) | `product_code`, `productCode`, `all_product_codes`, `allProductCodes` |
 | Buyer email (optional clue) | `email`, `buyer_email`, `customer_email`, `customerEmail`, `customer.email` |
 
-Processing: route by exact product code → extract code with `/\bFL-[A-Z0-9]{6}\b/i` → match the unique `pending_payment` order (name must also match if the customer confirmed a checkout name) → otherwise try a **unique** fallback-email match. Ambiguous, missing, or mismatched matches return `200 { matched: false, reason }`, alert the admin, and change nothing. A matched sale attaches `payment_reference` (status stays `pending_payment`), records `processed_sales` with `INSERT OR IGNORE` (duplicate deliveries return `{ duplicate: true }` with no repeated alerts), and sends the admin a **Confirm payment manually** prompt. If processing fails after the dedup marker is written, the marker is removed so a sender retry can reprocess, and the admin is alerted.
+Processing: route by exact product code → extract code with `/\bFL-[A-Z0-9]{6}\b/i` → match the unique `pending_payment` order by code (a unique code match does not require the customer name to match) → otherwise if no code match, match by exact normalized full customer name if uniquely matched against a saved checkout name. Email and price are never used as matching criteria. Ambiguous or unmatched events return `200 { matched: false, reason }` without an unsolicited admin notification, and change nothing. A matched sale attaches `payment_reference` (status stays `pending_payment`), records `processed_sales` with `INSERT OR IGNORE` (duplicate deliveries return `{ duplicate: true }` with no repeated alerts), and sends the admin a **Confirm payment manually** prompt. If processing fails after the dedup marker is written, the marker is removed so a sender retry can reprocess, and the admin is alerted.
 
 ### `POST /webhooks/selar-abandoned-cart`
 
@@ -157,7 +157,7 @@ Open `/admin` in the private bot chat for the button-based Admin Desk. The dashb
 
 Every verification, approval, rejection, consent change, and fulfilment writes an `admin_audit` row (admin ID, action, request/order + profile IDs, details incl. payment reference where relevant, timestamp).
 
-Reviewing ambiguous sales: the admin alert states the reason (`name_mismatch`, `ambiguous_match`, `ambiguous_email_match`, `missing_order_code`, `no_matching_pending_order`, wrong product, non-paid status). Confirm the real payment in Selar, find the intended request via `/pending` / `/orders` (match the `FL-XXXXXX` code, never the amount), then `/verify …` with the exact Selar reference. Emails shown in alerts are customer-provided clues, never proof.
+Reviewing ambiguous sales: the admin alert states the reason (wrong product, non-paid status, or no unique code/name match). Confirm the real payment in Selar, find the intended request via `/pending` / `/orders` (match the `FL-XXXXXX` code, never the amount), then `/verify …` with the exact Selar reference. Emails shown in alerts are customer-provided clues, never proof.
 
 ---
 
