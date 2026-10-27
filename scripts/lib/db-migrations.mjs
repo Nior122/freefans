@@ -121,6 +121,14 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0011_admin_broadcast_drafts.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0012_hidden_profiles',
+    description: 'Persistent admin-controlled profile visibility overrides',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0012_hidden_profiles.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
@@ -270,7 +278,8 @@ export const EXPECTED_SCHEMA = {
   admin_broadcast_drafts: [
     'id', 'admin_telegram_id', 'message_text', 'media_kind', 'media_file_id',
     'media_mime_type', 'status', 'expires_at', 'created_at', 'updated_at'
-  ]
+  ],
+  hidden_profiles: ['profile_id', 'hidden_by_admin', 'reason', 'hidden_at']
 };
 
 export const EXPECTED_UNIQUE_INDEXES = [
