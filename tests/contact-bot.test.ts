@@ -344,7 +344,7 @@ test('Selar webhook authentication, product routing, and idempotent reconciliati
   }
 });
 
-test('Unknown code can reconcile only by exact full checkout name, never partial name', async () => {
+test('Exact saved full checkout name reconciles only when no conflicting FL code is supplied', async () => {
   const db = createTestDb();
   const { env, cleanup, sentTelegramMessages } = createTestEnv(db);
   try {
@@ -354,10 +354,15 @@ test('Unknown code can reconcile only by exact full checkout name, never partial
     `).run();
 
     const partial = await selarPost(env, { reference: 'ref-partial-name', product_code: env.SELAR_PRODUCT_ID, customer_full_name: 'Joseph FL-UNKNWN' });
-    assert.deepEqual(await partial.json(), { ok: true, matched: false, reason: 'no_unique_code_name_or_email_match' });
+    assert.deepEqual(await partial.json(), { ok: true, matched: false, reason: 'no_unique_code_or_name_match' });
     assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).length, 0, 'partial name must not notify admin');
 
-    const exact = await selarPost(env, { reference: 'ref-full-name', product_code: env.SELAR_PRODUCT_ID, customer_full_name: 'Joseph Simon Unaogu FL-UNKNWN' });
+    const conflictingCode = await selarPost(env, { reference: 'ref-full-name-conflicting-code', product_code: env.SELAR_PRODUCT_ID, customer_full_name: 'Joseph Simon Unaogu FL-UNKNWN' });
+    assert.deepEqual(await conflictingCode.json(), { ok: true, matched: false, reason: 'no_unique_code_or_name_match' }, 'a supplied FL code that does not belong to the name-matched order is conflicting evidence and must block name-only attachment');
+    assert.equal((db.raw.prepare('SELECT payment_reference FROM contact_requests WHERE id=?').get('full-name-match') as any).payment_reference, null);
+    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).length, 0, 'conflicting code/name evidence must not notify admin as an attached sale');
+
+    const exact = await selarPost(env, { reference: 'ref-full-name', product_code: env.SELAR_PRODUCT_ID, customer_full_name: 'Joseph Simon Unaogu' });
     const exactJson = await exact.json() as any;
     assert.equal(exactJson.matched, true);
     assert.equal(exactJson.reconciled_by, 'exact_full_name');
@@ -370,7 +375,7 @@ test('Unknown code can reconcile only by exact full checkout name, never partial
   }
 });
 
-test('A sale uses a unique email only after checkout-code and exact-name matching fail', async () => {
+test('A unique email never attaches a Selar sale when code and exact-name evidence do not match', async () => {
   const db = createTestDb();
   const { env, cleanup, sentTelegramMessages } = createTestEnv(db);
   try {
@@ -391,17 +396,18 @@ test('A sale uses a unique email only after checkout-code and exact-name matchin
     }), { ...env, SELAR_WEBHOOK_SECRET: 'selar-secret-123' });
 
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { ok: true, matched: true, reconciled_by: 'email_fallback' });
+    assert.deepEqual(await res.json(), { ok: true, matched: false, reason: 'no_unique_code_or_name_match' });
     const order = db.raw.prepare('SELECT status, payment_reference FROM contact_requests WHERE id = ?').get('req-uuid-2') as any;
-    assert.equal(order.status, 'pending_payment', 'email fallback attaches a reconciliation clue only; it never verifies payment');
-    assert.equal(order.payment_reference, 'selar_ref_email_clue');
-    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).filter(m => String(m.data.text).includes('Selar sale received')).length, 1, 'unique email fallback must alert the admin for manual verification');
+    assert.equal(order.status, 'pending_payment', 'email evidence must never verify payment');
+    assert.equal(order.payment_reference, null, 'email evidence must never attach a payment reference');
+    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).filter(m => String(m.data.text).includes('Selar sale received')).length, 0, 'an email-only sale must not be presented as attached');
+    assert.equal((db.raw.prepare('SELECT count(*) AS cnt FROM processed_sales').get() as any).cnt, 0, 'an unmatched email-only event is not consumed');
   } finally {
     cleanup();
   }
 });
 
-test('Contact delivery no longer has a separate creator-sharing permission workflow', async () => {
+test('Verified request delivery sends only admin-composed fulfilment, with no stored creator contact', async () => {
   const db = createTestDb();
   const { env, cleanup, sentTelegramMessages } = createTestEnv(db);
   try {
@@ -410,27 +416,32 @@ test('Contact delivery no longer has a separate creator-sharing permission workf
       (id, telegram_user_id, telegram_chat_id, profile_id, status, payment_method, payment_reference, checkout_code)
       VALUES (?, '9501', '9501', 'anaimiya', 'payment_verified', 'selar', 'ref-approved', 'FL-READY1')`).run(requestId);
 
-    await tgPost(env, adminMsg('/setcontact anaimiya @anaimiya_real'));
-    const contact = db.raw.prepare('SELECT contact_value FROM creator_contacts WHERE profile_id=?').get('anaimiya') as any;
-    assert.equal(contact.contact_value, '@anaimiya_real');
+    await tgPost(env, adminMsg('/setcontact anaimiya @synthetic_retired_handle'));
+    assert.equal(db.raw.prepare('SELECT contact_value FROM creator_contacts WHERE profile_id=?').get('anaimiya'), undefined, 'the retired command must not save a creator contact');
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text || '').includes('does not store or share a creator contact')));
+    db.raw.prepare("INSERT INTO creator_contacts(profile_id,contact_value) VALUES('anaimiya','@synthetic_legacy_contact')").run();
 
     sentTelegramMessages.length = 0;
     await tgPost(env, callbackFrom(10001, `approve:${requestId}`));
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(requestId) as any).status, 'payment_verified');
-    assert.equal(messagesTo(sentTelegramMessages, '9501').filter(m => String(m.data.text || '').includes('@anaimiya_real')).length, 0, 'Opening a draft must not disclose the contact');
+    assert.equal(messagesTo(sentTelegramMessages, '9501').filter(m => String(m.data.text || '').includes('@synthetic_retired_handle')).length, 0, 'Opening a draft must not send any stored creator contact');
 
     const draft = db.raw.prepare('SELECT id FROM delivery_drafts WHERE request_id=?').get(requestId) as any;
-    assert.ok(draft, 'A verified request with a saved contact can open the delivery draft without enable/authorize commands');
-    await tgPost(env, adminMsg('Here is your contact delivery message.'));
+    assert.ok(draft, 'A verified request can open the delivery draft with no saved creator contact or retired permission commands');
+    await tgPost(env, adminMsg('Here is the admin-prepared fulfilment for your request.'));
     await tgPost(env, callbackFrom(10001, `draft:send:${draft.id}`));
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(requestId) as any).status, 'approved');
-    assert.equal(messagesTo(sentTelegramMessages, '9501').filter(m => String(m.data.text || '').includes('@anaimiya_real')).length, 1, 'Contact is delivered once only after admin confirmation');
+    assert.equal(messagesTo(sentTelegramMessages, '9501').filter(m => String(m.data.text || '').includes('Here is the admin-prepared fulfilment for your request.')).length, 1, 'Only the admin-composed fulfilment is delivered after confirmation');
+    assert.equal(messagesTo(sentTelegramMessages, '9501').filter(m => String(m.data.text || '').includes('@synthetic_retired_handle')).length, 0, 'No creator contact is appended to delivery');
+    assert.equal(messagesTo(sentTelegramMessages, '9501').filter(m => String(m.data.text || '').includes('@synthetic_legacy_contact')).length, 0, 'A pre-existing legacy creator_contacts row is ignored by delivery');
 
     await tgPost(env, adminMsg('/help'));
     const help = messagesTo(sentTelegramMessages, '10001').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(!help.includes('/setcontact'));
     assert.ok(!help.includes('/enablecontact'));
     assert.ok(!help.includes('/disablecontact'));
     assert.ok(!help.includes('/authorizecontact'));
+    assert.ok(help.includes('no stored creator contact to share'));
   } finally {
     cleanup();
   }
@@ -592,7 +603,7 @@ test('Selar abandoned-cart webhook authentication and deduplication', async () =
   }
 });
 
-test('Service order email can reconcile a sale only as a last-resort clue', async () => {
+test('Service order email is saved only as audit information and never reconciles a sale', async () => {
   const db = createTestDb();
   const { env, cleanup, sentTelegramMessages } = createTestEnv(db);
   try {
@@ -613,8 +624,8 @@ test('Service order email can reconcile a sale only as a last-resort clue', asyn
 
     const savedOrder = db.raw.prepare('SELECT buyer_email FROM service_orders WHERE id=?').get(serviceOrderId) as any;
     assert.equal(savedOrder.buyer_email, 'client@example.com');
-    const customerAck = sentTelegramMessages.find(m => m.data.chat_id === '9100' && String(m.data.text).includes('saved as a fallback reconciliation clue'));
-    assert.ok(customerAck, 'Customer should receive fallback clue confirmation');
+    const customerAck = sentTelegramMessages.find(m => m.data.chat_id === '9100' && String(m.data.text).includes('saved as order information') && String(m.data.text).includes('cannot match or verify payment'));
+    assert.ok(customerAck, 'Customer should be told the email is audit information only and cannot match payment');
 
     const saleRes = await worker.fetch(new Request('https://worker.local/webhooks/selar', {
       method: 'POST',
@@ -623,11 +634,11 @@ test('Service order email can reconcile a sale only as a last-resort clue', asyn
     }), { ...env, SELAR_WEBHOOK_SECRET: 'selar-secret-123' });
 
     assert.equal(saleRes.status, 200);
-    assert.deepEqual(await saleRes.json(), { ok: true, matched: true, reconciled_by: 'email_fallback' });
+    assert.deepEqual(await saleRes.json(), { ok: true, matched: false, reason: 'no_unique_code_or_name_match' });
     const updatedOrder = db.raw.prepare('SELECT status, payment_method, payment_reference FROM service_orders WHERE id=?').get(serviceOrderId) as any;
-    assert.equal(updatedOrder.status, 'pending_payment', 'email fallback is not payment verification');
-    assert.equal(updatedOrder.payment_reference, 'selar-srv-email-ref-1');
-    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).filter(m => String(m.data.text).includes('Selar sale received')).length, 1);
+    assert.equal(updatedOrder.status, 'pending_payment', 'email evidence is not payment verification');
+    assert.equal(updatedOrder.payment_reference, null, 'email evidence must not attach the sale');
+    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).filter(m => String(m.data.text).includes('Selar sale received')).length, 0);
   } finally {
     cleanup();
   }
@@ -655,7 +666,7 @@ test('Ambiguous shared email is not enough to reconcile a sale', async () => {
     }), { ...env, SELAR_WEBHOOK_SECRET: 'selar-secret-123' });
 
     assert.equal(saleRes.status, 200);
-    assert.deepEqual(await saleRes.json(), { ok: true, matched: false, reason: 'ambiguous_email_fallback' });
+    assert.deepEqual(await saleRes.json(), { ok: true, matched: false, reason: 'no_unique_code_or_name_match' });
     assert.equal((db.raw.prepare('SELECT count(*) AS cnt FROM processed_sales').get() as any).cnt, 0);
     assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).length, 0);
   } finally {
@@ -754,11 +765,11 @@ test('Uncertain service delivery outcome locks the draft against duplicate sendi
   }
 });
 
-test('Non-admin users cannot save or alter contact records', async () => {
+test('Non-admin users cannot use retired creator-contact commands to create records', async () => {
   const db = createTestDb();
   const { env, cleanup } = createTestEnv(db);
   try {
-    await tgPost(env, userMsg(9999, '/setcontact anaimiya @secret_handle'));
+    await tgPost(env, userMsg(9999, '/setcontact anaimiya @synthetic_attacker_handle'));
     assert.equal(db.raw.prepare("SELECT * FROM creator_contacts WHERE profile_id='anaimiya'").get(), undefined);
     await tgPost(env, userMsg(9999, '/enablecontact anaimiya'));
     await tgPost(env, userMsg(9999, '/disablecontact anaimiya'));
@@ -807,9 +818,11 @@ test('Admin natural-language queries are allowlisted and command suffixes are no
     db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,?,?,?,?,?)").run(id,'6000','6000','anaimiya','pending_payment','FL-AI0001');
     await tgPost(env,adminMsg('show pending contact requests'));
     assert.ok(sentTelegramMessages.some(m=>String(m.data.text||'').includes('FL-AI0001')),'allowlisted read-only query returns actual database data');
-    await tgPost(env,adminMsg('/setcontact@KasiQueenbot anaimiya @anaimiya_real'));
-    const contact=db.raw.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id='anaimiya'").get() as any;
-    assert.equal(contact.contact_value,'@anaimiya_real');
+    sentTelegramMessages.length=0;
+    await tgPost(env,adminMsg('/pending@KasiQueenbot'));
+    assert.ok(sentTelegramMessages.some(m=>String(m.data.text||'').includes(id)),'Telegram @BotName suffixes are normalized for supported admin commands');
+    await tgPost(env,adminMsg('/setcontact@KasiQueenbot anaimiya @synthetic_retired_handle'));
+    assert.equal(db.raw.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id='anaimiya'").get(),undefined,'the retired creator-contact command cannot save a contact even with a bot suffix');
     await tgPost(env,callbackFrom(9999,'admin:consentconfirm:anaimiya'));
     assert.equal(db.raw.prepare("SELECT COUNT(*) AS n FROM admin_audit WHERE action='creator_consent_confirmed'").get() && (db.raw.prepare("SELECT COUNT(*) AS n FROM admin_audit WHERE action='creator_consent_confirmed'").get() as any).n,0,'the removed permission workflow cannot be invoked by non-admin users');
   } finally { cleanup(); }
@@ -890,9 +903,9 @@ test('Non-admin users cannot invoke admin callbacks or commands', async () => {
       VALUES (?, '5120', '5120', 'anaimiya', 'pending_payment', 'selar', 'ref-attack-1', 'FL-ATK001')`).run(reqId);
     db.raw.prepare(`INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status, payment_method, payment_reference, checkout_code)
       VALUES (?, 'svc', '5121', '5121', 'pending_payment', 'selar', 'ref-attack-2', 'FL-ATK002')`).run(svcId);
-    // A saved contact must still be protected by admin-only delivery callbacks.
+    // A pre-existing legacy contact row must never be disclosed by delivery callbacks.
     db.raw.prepare(`INSERT INTO creator_contacts (profile_id, contact_value)
-      VALUES ('anaimiya', '@anaimiya_real')`).run();
+      VALUES ('anaimiya', '@synthetic_legacy_handle')`).run();
 
     const attacker = 9999;
     for (const data of [`selarverify:${reqId}`, `approve:${reqId}`, `reject:${reqId}`, `serviceverify:${svcId}`]) {
@@ -904,12 +917,12 @@ test('Non-admin users cannot invoke admin callbacks or commands', async () => {
 
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(reqId) as any).status, 'pending_payment');
     assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(svcId) as any).status, 'pending_payment');
-    assert.equal((db.raw.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id='anaimiya'").get() as any).contact_value, '@anaimiya_real', 'legacy permission commands must not alter the saved contact');
+    assert.equal((db.raw.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id='anaimiya'").get() as any).contact_value, '@synthetic_legacy_handle', 'retired commands must not alter a legacy contact row');
     assert.equal(db.raw.prepare("SELECT * FROM creator_contacts WHERE profile_id='rosebeck'").get(), undefined, 'Attacker /setcontact must not store a contact');
     for (const chat of ['5120', '5121']) {
-      assert.equal(messagesTo(sentTelegramMessages, chat).filter(m => String(m.data.text).includes('@anaimiya_real') || String(m.data.text).includes('pwned')).length, 0);
+      assert.equal(messagesTo(sentTelegramMessages, chat).filter(m => String(m.data.text).includes('@synthetic_legacy_handle') || String(m.data.text).includes('pwned')).length, 0);
     }
-    assert.equal(messagesTo(sentTelegramMessages, '9999').filter(m => String(m.data.text).includes(reqId) || String(m.data.text).includes('@anaimiya_real')).length, 0, 'Admin listings must not leak to non-admins');
+    assert.equal(messagesTo(sentTelegramMessages, '9999').filter(m => String(m.data.text).includes(reqId) || String(m.data.text).includes('@synthetic_legacy_handle')).length, 0, 'Admin listings must not leak to non-admins');
   } finally {
     cleanup();
   }
@@ -931,12 +944,12 @@ test('Selar webhook negative cases and mismatched code/name never mutate payment
 
     const noCode = await selarPost(env, { reference: 'ref-neg-4', product_code: env.SELAR_PRODUCT_ID, customer_full_name: 'No Code Here', email: 'nobody@example.com' });
     assert.equal(noCode.status, 200);
-    assert.deepEqual(await noCode.json(), { ok: true, matched: false, reason: 'no_unique_code_name_or_email_match' });
+    assert.deepEqual(await noCode.json(), { ok: true, matched: false, reason: 'no_unique_code_or_name_match' });
 
     const codeMatchNameMismatch = await selarPost(env, { ...validSale, reference: 'ref-neg-5', customer_full_name: 'Other Person FL-NEG001' });
     const codeMatchJson = await codeMatchNameMismatch.json() as any;
-    assert.equal(codeMatchJson.matched, false, 'a saved checkout name must agree with the code; email fallback is unavailable when the order has no matching saved email');
-    assert.equal(codeMatchJson.reason, 'no_unique_code_name_or_email_match');
+    assert.equal(codeMatchJson.matched, false, 'a saved checkout name must agree with the code, and email is never a fallback');
+    assert.equal(codeMatchJson.reason, 'no_unique_code_or_name_match');
     assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).filter(m => String(m.data.text).includes('Selar sale received')).length, 0, 'mismatched identity clues must not attach a sale');
 
     assert.equal((await selarPost(env, { ...validSale, reference: 'ref-neg-6', status: 'failed' })).status, 422, 'explicitly non-paid events are rejected');
@@ -970,7 +983,7 @@ test('Duplicate Selar webhook delivery records one sale and one admin notificati
   }
 });
 
-test('Contact fallback email and checkout-name confirmation never verify payment', async () => {
+test('Saved email is audit information only and checkout-name confirmation never verifies payment', async () => {
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
@@ -980,9 +993,9 @@ test('Contact fallback email and checkout-name confirmation never verify payment
     await tgPost(env, userMsg(5150, 'buyer5150@example.com'));
     order = db.raw.prepare('SELECT * FROM contact_requests WHERE id=?').get(order.id) as any;
     assert.equal(order.buyer_email, 'buyer5150@example.com');
-    assert.equal(order.status, 'pending_payment', 'Saving an email clue must not verify payment');
-    assert.ok(messagesTo(sentTelegramMessages, '5150').some(m => String(m.data.text).includes('does not verify payment')));
-    assert.ok(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).some(m => String(m.data.text).includes('reconciliation clue for contact request')));
+    assert.equal(order.status, 'pending_payment', 'Saving email audit information must not verify payment');
+    assert.ok(messagesTo(sentTelegramMessages, '5150').some(m => String(m.data.text).includes('cannot match or verify payment')));
+    assert.ok(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).some(m => String(m.data.text).includes('email for audit context') && String(m.data.text).includes('cannot match, attach, verify, or approve')));
 
     await tgPost(env, callbackFrom(5150, `pay_selar:${order.id}`));
     await tgPost(env, callbackFrom(5150, `done:${order.id}`));
@@ -992,7 +1005,7 @@ test('Contact fallback email and checkout-name confirmation never verify payment
     assert.equal(order.status, 'pending_payment', 'Checkout completion taps must not verify payment');
     assert.equal(order.payment_reference, null);
 
-    // An email sent while the name prompt is open is still saved as a clue.
+    // An email sent while the name prompt is open is still saved only as audit information.
     await tgPost(env, userMsg(5151, '/start contact_rosebeck'));
     const second = db.raw.prepare("SELECT * FROM contact_requests WHERE telegram_user_id='5151'").get() as any;
     await tgPost(env, callbackFrom(5151, `done:${second.id}`));
@@ -1003,11 +1016,10 @@ test('Contact fallback email and checkout-name confirmation never verify payment
   }
 });
 
-test('Contact delivery still requires manual payment verification and explicit send confirmation', async () => {
+test('Request delivery still requires manual payment verification and explicit send confirmation', async () => {
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
-    await tgPost(env, adminMsg('/setcontact anaimiya @anaimiya_real'));
     const unverifiedId = crypto.randomUUID();
     db.raw.prepare(`INSERT INTO contact_requests (id, telegram_user_id, telegram_chat_id, profile_id, status, payment_method, payment_reference, checkout_code)
       VALUES (?, '5160', '5160', 'anaimiya', 'pending_payment', 'selar', 'ref-unverified', 'FL-UNV001')`).run(unverifiedId);
@@ -1021,13 +1033,13 @@ test('Contact delivery still requires manual payment verification and explicit s
     sentTelegramMessages.length = 0;
     await tgPost(env, callbackFrom(10001, `approve:${okId}`));
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(okId) as any).status, 'payment_verified');
-    assert.equal(messagesTo(sentTelegramMessages, '5162').filter(m => String(m.data.text || '').includes('@anaimiya_real')).length, 0);
+    assert.equal(messagesTo(sentTelegramMessages, '5162').length, 0, 'opening a delivery draft sends nothing');
     const draft = db.raw.prepare('SELECT id FROM delivery_drafts WHERE request_id=?').get(okId) as any;
     assert.ok(draft);
-    await tgPost(env, adminMsg('Your contact delivery is ready.'));
+    await tgPost(env, adminMsg('Your admin-prepared request fulfilment is ready.'));
     await tgPost(env, callbackFrom(10001, `draft:send:${draft.id}`));
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(okId) as any).status, 'approved');
-    assert.equal(messagesTo(sentTelegramMessages, '5162').filter(m => String(m.data.text || '').includes('@anaimiya_real')).length, 1);
+    assert.equal(messagesTo(sentTelegramMessages, '5162').filter(m => String(m.data.text || '').includes('Your admin-prepared request fulfilment is ready.')).length, 1);
   } finally {
     cleanup();
   }
@@ -1351,7 +1363,7 @@ test('Receipt delivery failure is recorded and the same submission can be retrie
 });
 
 function customerTelegramCalls(sent: any[], chatId: string) {
-  return sent.filter(m => ['sendMessage', 'sendPhoto', 'sendDocument'].includes(m.method) && String(m.data.chat_id) === chatId);
+  return sent.filter(m => ['sendMessage', 'sendPhoto', 'sendDocument', 'sendVideo'].includes(m.method) && String(m.data.chat_id) === chatId);
 }
 
 function latestSupportDraft(db: any, orderId: string) {
@@ -1520,12 +1532,12 @@ test('Admin Desk support drafts can attach and send a video file', async () => {
     assert.equal(customerTelegramCalls(sentTelegramMessages, '8304').length, 0);
 
     await tgPost(env, callbackFrom(10001, `support-message:preview:${draft.id}`, 'cb-support-video-preview'));
-    assert.ok(sentTelegramMessages.some(m => m.method === 'sendDocument' && String(m.data.chat_id) === '10001'));
+    assert.ok(sentTelegramMessages.some(m => m.method === 'sendVideo' && String(m.data.chat_id) === '10001'), 'admin preview must use the Telegram video method for a video file_id');
     await tgPost(env, callbackFrom(10001, `support-message:send:${draft.id}`, 'cb-support-video-send'));
     const customerCalls = customerTelegramCalls(sentTelegramMessages, '8304');
     assert.equal(customerCalls.length, 1);
-    assert.equal(customerCalls[0].method, 'sendDocument');
-    assert.equal(customerCalls[0].data.document, 'video-file-9301');
+    assert.equal(customerCalls[0].method, 'sendVideo');
+    assert.equal(customerCalls[0].data.video, 'video-file-9301');
   } finally {
     cleanup();
   }
@@ -1649,7 +1661,7 @@ test('Uncertain Admin Desk support send locks the draft and blocks blind retries
   }
 });
 
-test('General support drafts and protected contact-delivery drafts cannot overlap', async () => {
+test('General support drafts and protected request-delivery drafts cannot overlap', async () => {
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
@@ -1657,10 +1669,6 @@ test('General support drafts and protected contact-delivery drafts cannot overla
     db.raw.prepare(`INSERT INTO contact_requests
       (id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
       VALUES (?, '8909', '8909', 'anaimiya', 'payment_verified', 'FL-ISO001')`).run(orderId);
-    db.raw.prepare(`INSERT INTO creator_contacts
-      (profile_id,contact_value)
-      VALUES ('anaimiya', '@synthetic_contact')`).run();
-
     await tgPost(env, adminMsg('/message FL-ISO001 General support only'));
     const supportDraft = latestSupportDraft(db, orderId);
     await tgPost(env, callbackFrom(10001, `approve:${orderId}`, 'cb-delivery-blocked-by-support'));
@@ -1748,6 +1756,199 @@ test('Admin broadcast requires explicit confirmation and sends to recent-order c
     assert.equal(customerTelegramCalls(sentTelegramMessages, '8102').length, 1);
     await tgPost(env, adminMsg('yes'));
     assert.equal(customerTelegramCalls(sentTelegramMessages, '8102').length, 1, 'A completed broadcast cannot be resent by a second yes');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Clients cannot list creators in the bot, while the private admin can view and search profiles', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    await tgPost(env, userMsg(6200, '/creators'));
+    await tgPost(env, userMsg(6200, '/profiles rose'));
+    const clientText = messagesTo(sentTelegramMessages, '6200').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(clientText.includes('only listed on the FansLeak website'));
+    assert.ok(!clientText.includes('Anaimiya'));
+    assert.ok(!clientText.includes('RoseBeck'));
+    assert.ok(!clientText.includes('emanuela.ebony'));
+
+    await tgPost(env, adminMsg('/profiles'));
+    const adminText = messagesTo(sentTelegramMessages, '10001').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(adminText.includes('Current website profiles (4)'));
+    assert.ok(adminText.includes('Anaimiya'));
+    assert.ok(adminText.includes('RoseBeck'));
+    assert.ok(adminText.includes('Emanuela Ebony'));
+
+    sentTelegramMessages.length = 0;
+    await tgPost(env, adminMsg('/profiles rose'));
+    const searchText = messagesTo(sentTelegramMessages, '10001').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(searchText.includes('RoseBeck'));
+    assert.ok(!searchText.includes('Anaimiya'));
+
+    sentTelegramMessages.length = 0;
+    await tgPost(env, { message: { chat: { id: -1006200 }, from: { id: 10001 }, text: '/profiles' } });
+    const groupText = messagesTo(sentTelegramMessages, '-1006200').map(m => String(m.data.text || '')).join('\n');
+    assert.ok(groupText.includes('private Admin Desk'));
+    assert.ok(!groupText.includes('Anaimiya'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('Bulk pending closure is snapshot-bound and excludes verified and payment-review orders', async () => {
+  const db = createTestDb();
+  const { env, cleanup } = createTestEnv(db);
+  try {
+    const contactPending = crypto.randomUUID();
+    const contactChangedAfterPreview = crypto.randomUUID();
+    const contactVerified = crypto.randomUUID();
+    const contactCreatedAfterPreview = crypto.randomUUID();
+    const servicePending = crypto.randomUUID();
+    const serviceAwaiting = crypto.randomUUID();
+    const serviceVerified = crypto.randomUUID();
+    const serviceReview = crypto.randomUUID();
+
+    const insertContact = db.raw.prepare(`INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,?,?,?,?,?)`);
+    insertContact.run(contactPending, '7001', '7001', 'anaimiya', 'pending_payment', 'FL-CLS001');
+    insertContact.run(contactChangedAfterPreview, '7002', '7002', 'anaimiya', 'pending_manual_payment', 'FL-CLS002');
+    insertContact.run(contactVerified, '7003', '7003', 'anaimiya', 'payment_verified', 'FL-CLS003');
+    const insertService = db.raw.prepare(`INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,status,checkout_code) VALUES(?,?,?,?,?,?)`);
+    insertService.run(servicePending, 'svc', '7101', '7101', 'pending_payment', 'FL-CLS101');
+    insertService.run(serviceAwaiting, 'svc', '7102', '7102', 'awaiting_request', 'FL-CLS102');
+    insertService.run(serviceVerified, 'svc', '7103', '7103', 'payment_verified', 'FL-CLS103');
+    insertService.run(serviceReview, 'svc', '7104', '7104', 'payment_review', 'FL-CLS104');
+
+    await tgPost(env, adminMsg('/expirepending'));
+    const pending = db.raw.prepare("SELECT id,payload,status FROM admin_pending_actions WHERE action='close_pending_orders'").get() as any;
+    assert.ok(pending);
+    assert.equal(pending.status, 'pending');
+    const snapshot = JSON.parse(pending.payload);
+    assert.deepEqual(snapshot.contacts.map((x: any) => x.id).sort(), [contactPending, contactChangedAfterPreview].sort());
+    assert.deepEqual(snapshot.services.map((x: any) => x.id).sort(), [servicePending, serviceAwaiting].sort());
+    assert.ok(!pending.payload.includes(contactVerified));
+    assert.ok(!pending.payload.includes(serviceVerified));
+    assert.ok(!pending.payload.includes(serviceReview));
+
+    insertContact.run(contactCreatedAfterPreview, '7004', '7004', 'anaimiya', 'pending_payment', 'FL-CLS004');
+    db.raw.prepare("UPDATE contact_requests SET status='payment_verified' WHERE id=?").run(contactChangedAfterPreview);
+
+    await tgPost(env, adminMsg('yes'));
+    const status = (table: string, id: string) => (db.raw.prepare(`SELECT status FROM ${table} WHERE id=?`).get(id) as any).status;
+    assert.equal(status('contact_requests', contactPending), 'expired');
+    assert.equal(status('contact_requests', contactChangedAfterPreview), 'payment_verified', 'an order whose status changed after preview must be skipped');
+    assert.equal(status('contact_requests', contactVerified), 'payment_verified');
+    assert.equal(status('contact_requests', contactCreatedAfterPreview), 'pending_payment', 'an order created after preview must not be swept into the old confirmation');
+    assert.equal(status('service_orders', servicePending), 'cancelled');
+    assert.equal(status('service_orders', serviceAwaiting), 'cancelled');
+    assert.equal(status('service_orders', serviceVerified), 'payment_verified');
+    assert.equal(status('service_orders', serviceReview), 'payment_review');
+    assert.equal(status('admin_pending_actions', pending.id), 'completed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Admin callbacks fail closed outside the private Admin Desk chat', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const requestId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '7201', '7201', 'anaimiya', 'payment_verified', 'FL-GRP001')`).run(requestId);
+
+    await tgPost(env, {
+      callback_query: {
+        id: 'cb-admin-group',
+        from: { id: 10001 },
+        message: { chat: { id: -1007201 } },
+        data: `approve:${requestId}`
+      }
+    });
+
+    assert.equal((db.raw.prepare('SELECT count(*) AS cnt FROM delivery_drafts WHERE request_id=?').get(requestId) as any).cnt, 0);
+    assert.ok(sentTelegramMessages.some(m => m.method === 'answerCallbackQuery' && String(m.data.text || '').includes('Admin private chat only')));
+  } finally {
+    cleanup();
+  }
+});
+
+test('A voice-transcribed YES cannot execute a pending consequential admin action', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  const baseFetch = globalThis.fetch;
+  try {
+    const pendingId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO admin_pending_actions(id,admin_telegram_id,action,payload,status,expires_at)
+      VALUES (?, '10001', 'hide_profile', 'anaimiya', 'pending', datetime('now','+10 minutes'))`).run(pendingId);
+
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const urlText = String(url);
+      if (urlText.includes('/getFile?')) {
+        return new Response(JSON.stringify({ ok: true, result: { file_path: 'voice/test.ogg', file_size: 3 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (urlText.includes('/file/bot')) return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      return (baseFetch as any)(url, init);
+    }) as any;
+    const voiceEnv = {
+      ...env,
+      AI: {
+        run: async (model: string) => model === '@cf/openai/whisper' ? { text: 'yes' } : { response: 'unused' }
+      }
+    };
+
+    await tgPost(voiceEnv, {
+      message: {
+        chat: { id: 10001 },
+        from: { id: 10001 },
+        voice: { file_id: 'voice-yes-test', file_unique_id: 'voice-yes-unique', file_size: 3, duration: 1 }
+      }
+    });
+
+    assert.equal((db.raw.prepare('SELECT status FROM admin_pending_actions WHERE id=?').get(pendingId) as any).status, 'pending');
+    assert.equal((db.raw.prepare("SELECT count(*) AS cnt FROM hidden_profiles WHERE profile_id='anaimiya'").get() as any).cnt, 0);
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text || '').includes('will not run that consequential admin action from a voice transcript')));
+
+    globalThis.fetch = baseFetch;
+    await tgPost(env, adminMsg('yes'));
+    assert.equal((db.raw.prepare('SELECT status FROM admin_pending_actions WHERE id=?').get(pendingId) as any).status, 'completed', 'an explicitly typed YES remains valid for the same pending action');
+    assert.equal((db.raw.prepare("SELECT count(*) AS cnt FROM hidden_profiles WHERE profile_id='anaimiya'").get() as any).cnt, 1);
+  } finally {
+    globalThis.fetch = baseFetch;
+    cleanup();
+  }
+});
+
+test('Request delivery can send one admin-attached video after explicit confirmation', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const requestId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '7301', '7301', 'anaimiya', 'payment_verified', 'FL-DVID01')`).run(requestId);
+
+    await tgPost(env, callbackFrom(10001, `approve:${requestId}`, 'cb-delivery-video-open'));
+    const draft = db.raw.prepare('SELECT id FROM delivery_drafts WHERE request_id=?').get(requestId) as any;
+    assert.ok(draft);
+    await tgPost(env, {
+      message: {
+        chat: { id: 10001, type: 'private' },
+        from: { id: 10001 },
+        video: { file_id: 'delivery-video-file', file_unique_id: 'delivery-video-unique', mime_type: 'video/mp4', file_size: 12000, duration: 4 }
+      }
+    });
+    const saved = db.raw.prepare('SELECT media_kind,media_file_id,media_mime_type FROM delivery_drafts WHERE id=?').get(draft.id) as any;
+    assert.equal(saved.media_kind, 'document');
+    assert.equal(saved.media_file_id, 'delivery-video-file');
+    assert.equal(saved.media_mime_type, 'video/mp4');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '7301').length, 0);
+
+    await tgPost(env, callbackFrom(10001, `draft:send:${draft.id}`, 'cb-delivery-video-send'));
+    const calls = customerTelegramCalls(sentTelegramMessages, '7301');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].method, 'sendVideo');
+    assert.equal(calls[0].data.video, 'delivery-video-file');
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(requestId) as any).status, 'approved');
   } finally {
     cleanup();
   }

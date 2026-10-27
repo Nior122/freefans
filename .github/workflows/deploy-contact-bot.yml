@@ -1,9 +1,6 @@
 name: Deploy FansLeak contact bot
 
 on:
-  push:
-    branches:
-      - fan
   workflow_dispatch:
     inputs:
       contact_selar_checkout_url:
@@ -44,6 +41,18 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+
+      - name: Install dependencies for release checks
+        run: npm ci
+
+      - name: Run automated test suite before production changes
+        run: npm test
+
+      - name: Type-check the website and contact bot before production changes
+        run: npx tsc --noEmit
+
+      - name: Compile Worker and validate Wrangler configuration without deploying
+        run: npx --yes wrangler@4 deploy --dry-run --outdir /tmp/fansleak-contact-bot-build --config contact-bot/wrangler.toml
 
       - name: Validate both Selar product settings before any changes
         env:
