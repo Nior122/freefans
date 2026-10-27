@@ -1857,8 +1857,8 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   if (r.status !== "payment_verified") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment is not verified." });
   const c = await e.DB.prepare("SELECT contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts WHERE profile_id=?").bind(r.profile_id).first<any>();
   if (!c || c.sharing_enabled !== 1 || !c.consent_confirmed_at || !String(c.contact_value || "").trim()) {
-    await notifyAdminIfConfigured(e, "Cannot prepare delivery for request <code>" + id + "</code>: sharing authorization is not confirmed for <code>" + esc(r.profile_id) + "</code>. Open /admin → Creator sharing permissions. No contact was sent.");
-    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Creator sharing permission is not confirmed." });
+    await notifyAdminIfConfigured(e, "Cannot prepare delivery for request <code>" + id + "</code>: sharing authorization is not confirmed for <code>" + esc(r.profile_id) + "</code>. Use /authorizecontact PROFILE_ID after confirming the creator explicitly authorised sharing. No contact was sent.");
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Creator authorisation is not recorded yet." });
   }
   const otherDraft = await e.DB.prepare("SELECT id,checkout_code FROM delivery_drafts WHERE admin_telegram_id=? AND status='draft' AND request_id<>? ORDER BY updated_at DESC LIMIT 1").bind(actor,id).first<any>();
   if (otherDraft) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Finish or cancel the existing contact delivery draft (code " + String(otherDraft.checkout_code || "unknown") + ") before preparing another." });
