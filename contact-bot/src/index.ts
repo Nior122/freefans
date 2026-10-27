@@ -1894,21 +1894,26 @@ async function selar(request: Request, e: Env) {
   let target: any = null;
   let matchedBy: "unique_code" | "exact_full_name" | "email_fallback" | null = null;
 
-  // Match strongest evidence first: unique checkout code, then exact full name.
-  // Email is a last-resort reconciliation clue only and never verifies payment.
+  // Match strongest evidence first: unique checkout code + saved full name, then
+  // exact full name alone. Email is a last-resort reconciliation clue only.
+  const saleName = s.customerName.replace(new RegExp("\\s*" + (code || "") + "\\s*$", "i"), "").trim();
+  const fullName = normName(saleName);
   if (code) {
     const codeRows = kind === "contact"
       ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE checkout_code=? AND status='pending_payment' AND payment_method='selar' LIMIT 2").bind(code).all<any>()
       : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name,buyer_email FROM service_orders WHERE checkout_code=? AND status='pending_payment' LIMIT 2").bind(code).all<any>();
     if (codeRows.results.length === 1) {
-      target = codeRows.results[0];
-      matchedBy = "unique_code";
+      const candidate = codeRows.results[0];
+      // If the customer already supplied their checkout name, require both the
+      // code and the normalized full name to agree before attaching this sale.
+      if (!candidate.checkout_name || normName(String(candidate.checkout_name)) === fullName) {
+        target = candidate;
+        matchedBy = "unique_code";
+      }
     }
   }
 
   if (!target) {
-    const saleName = s.customerName.replace(new RegExp("\\s*" + (code || "") + "\\s*$", "i"), "").trim();
-    const fullName = normName(saleName);
     if (fullName.length >= 5 && fullName.includes(" ")) {
       const nameRows = kind === "contact"
         ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE status='pending_payment' AND payment_method='selar' AND checkout_name IS NOT NULL").all<any>()
