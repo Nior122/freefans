@@ -828,10 +828,9 @@ test('Checkout code collision exhaust fails safely without returning unchecked c
   }
 });
 
-test('Telegram delivery failure reverts status allowing administrative retry', async () => {
+test('Uncertain service delivery outcome locks the draft against duplicate sending', async () => {
   const db = createTestDb();
   let failNextTgSend = false;
-
   const sentTelegramMessages: any[] = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url: any, init?: any) => {
@@ -846,7 +845,6 @@ test('Telegram delivery failure reverts status allowing administrative retry', a
     }
     return originalFetch(url, init);
   };
-
   const env: any = {
     DB: db,
     TELEGRAM_BOT_TOKEN: 'test-token',
@@ -855,7 +853,6 @@ test('Telegram delivery failure reverts status allowing administrative retry', a
     SERVICE_CHECKOUT_URL: 'https://selar.com/x19128f988',
     SERVICE_PRODUCT_ID: 'x19128f988'
   };
-
   try {
     const serviceOrderId = '11111111-2222-3333-4444-555555555555';
     db.raw.prepare(`
@@ -863,31 +860,22 @@ test('Telegram delivery failure reverts status allowing administrative retry', a
       VALUES (?, 'custom-work', '9401', '9401', 'payment_verified', 'FL-DELIV1')
     `).run(serviceOrderId);
 
-    // 1. Deliver with failed Telegram send
+    await tgPost(env, adminMsg(`/deliver ${serviceOrderId} Fulfilment package contents`));
+    const preview = sentTelegramMessages.find(m => m.method === 'sendMessage' && String(m.data.chat_id) === '10001' && String(m.data.text).includes('Service fulfilment preview'));
+    assert.ok(preview, 'Admin must receive a draft preview');
+    const sendButton = (preview.data.reply_markup as any).inline_keyboard.flat().find((b: any) => String(b.callback_data).startsWith('service-delivery:send:'));
+    assert.ok(sendButton);
+
     failNextTgSend = true;
-    await worker.fetch(new Request('https://worker.local/telegram/webhook', {
-      method: 'POST',
-      headers: { 'x-telegram-bot-api-secret-token': env.TELEGRAM_WEBHOOK_SECRET },
-      body: JSON.stringify({
-        message: { chat: { id: 10001 }, from: { id: 10001 }, text: `/deliver ${serviceOrderId} Fulfilment package contents` }
-      })
-    }), env);
+    await tgPost(env, callbackFrom(10001, sendButton.callback_data, 'cb-service-fail'));
+    const order = db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any;
+    assert.equal(order.status, 'payment_verified', 'Uncertain send must not mark the order fulfilled');
+    const draft = db.raw.prepare('SELECT status FROM service_delivery_drafts WHERE service_order_id=?').get(serviceOrderId) as any;
+    assert.equal(draft.status, 'sending', 'Uncertain send remains locked to avoid duplicate delivery');
+    assert.equal(sentTelegramMessages.some(m => m.method === 'sendMessage' && String(m.data.chat_id) === '9401'), false, 'Failed send must not be treated as delivered');
 
-    // Order status should be reverted back to payment_verified so admin can retry
-    let order = db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any;
-    assert.equal(order.status, 'payment_verified');
-
-    // 2. Retry delivery (succeeds)
-    await worker.fetch(new Request('https://worker.local/telegram/webhook', {
-      method: 'POST',
-      headers: { 'x-telegram-bot-api-secret-token': env.TELEGRAM_WEBHOOK_SECRET },
-      body: JSON.stringify({
-        message: { chat: { id: 10001 }, from: { id: 10001 }, text: `/deliver ${serviceOrderId} Fulfilment package contents` }
-      })
-    }), env);
-
-    order = db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any;
-    assert.equal(order.status, 'fulfilled');
+    await tgPost(env, adminMsg(`/deliver ${serviceOrderId} Fulfilment package contents`));
+    assert.equal(sentTelegramMessages.filter(m => m.method === 'sendMessage' && String(m.data.chat_id) === '9401').length, 0, 'A locked uncertain delivery cannot be retried blindly');
   } finally {
     globalThis.fetch = originalFetch;
   }
