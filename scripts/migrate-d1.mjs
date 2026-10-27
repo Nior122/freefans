@@ -216,6 +216,13 @@ export function migrateRemote() {
     runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0012_hidden_profiles')");
   }
 
+  // Migration 13: durable admin action confirmation state.
+  if (!applied.has('0013_admin_pending_actions')) {
+    console.log('[migrate-d1] Applying 0013_admin_pending_actions migration...');
+    runWranglerFile(path.join(ROOT, 'contact-bot', 'migrations', '0013_admin_pending_actions.sql'));
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0013_admin_pending_actions')");
+  }
+
   // Final complete schema verification. These expectations are shared with the
   // local migration verifier to prevent the two definitions drifting apart.
   console.log('[migrate-d1] Verifying complete schema...');
