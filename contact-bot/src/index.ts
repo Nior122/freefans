@@ -63,6 +63,24 @@ type ReceiptSubmission = {
   order_id: string;
   status: string;
 };
+type AdminMessageDraft = {
+  id: string;
+  order_id: string;
+  order_kind: OrderKind;
+  admin_telegram_id: string;
+  telegram_user_id: string;
+  telegram_chat_id: string;
+  checkout_code?: string | null;
+  message_text?: string | null;
+  media_kind?: "photo" | "document" | null;
+  media_file_id?: string | null;
+  media_mime_type?: string | null;
+  status: string;
+  expires_at: string;
+  delivered_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
+};
 type RequestRow = { id: string; telegram_chat_id: string; profile_id: string; status: string; buyer_email?: string; manual_payment_reference?: string; checkout_code?: string; checkout_name?: string };
 const CODE_CHARS = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 function checkoutCode(): string {
@@ -156,11 +174,17 @@ function paymentKeyboard(e: Env, id: string) {
   return { inline_keyboard: rows };
 }
 
-async function loadCustomerOrderById(e: Env, id: string): Promise<CustomerOrder | null> {
-  const contact = await e.DB.prepare("SELECT id,telegram_user_id,telegram_chat_id,telegram_username,profile_id AS target_id,buyer_email,status,payment_method,payment_reference,checkout_code,checkout_name,created_at FROM contact_requests WHERE id=?").bind(id).first<any>();
-  if (contact) return { kind: "contact", ...contact };
+async function loadCustomerOrderByKind(e: Env, kind: OrderKind, id: string): Promise<CustomerOrder | null> {
+  if (kind === "contact") {
+    const contact = await e.DB.prepare("SELECT id,telegram_user_id,telegram_chat_id,telegram_username,profile_id AS target_id,buyer_email,status,payment_method,payment_reference,checkout_code,checkout_name,created_at FROM contact_requests WHERE id=?").bind(id).first<any>();
+    return contact ? { kind: "contact", ...contact } : null;
+  }
   const service = await e.DB.prepare("SELECT id,telegram_user_id,telegram_chat_id,telegram_username,service_id AS target_id,buyer_email,status,payment_method,payment_reference,checkout_code,checkout_name,created_at FROM service_orders WHERE id=?").bind(id).first<any>();
   return service ? { kind: "service", ...service } : null;
+}
+
+async function loadCustomerOrderById(e: Env, id: string): Promise<CustomerOrder | null> {
+  return (await loadCustomerOrderByKind(e, "contact", id)) || loadCustomerOrderByKind(e, "service", id);
 }
 
 async function findCustomerOrderForPaidClaim(e: Env, user: string): Promise<CustomerOrder | null> {
@@ -294,6 +318,225 @@ function extractReceiptMedia(m: Msg): { media?: ReceiptMedia; unsupported?: stri
     return { media: { kind: "document", fileId: doc.file_id, fileUniqueId: typeof doc.file_unique_id === "string" ? doc.file_unique_id.slice(0, 512) : null, mimeType: inferredMime, fileSize } };
   }
   return {};
+}
+
+const ADMIN_MESSAGE_TEXT_LIMIT = 2500;
+const ADMIN_MESSAGE_CAPTION_LIMIT = 1024;
+const ADMIN_MESSAGE_HEADER = "💬 <b>Message from FansLeak support</b>";
+
+function draftExpiryMs(value: unknown): number {
+  const raw = String(value || "").trim();
+  if (!raw) return NaN;
+  const iso = /Z$/i.test(raw) ? raw : raw.replace(" ", "T") + "Z";
+  return Date.parse(iso);
+}
+
+function isDraftExpired(expiresAt: unknown): boolean {
+  const expiry = draftExpiryMs(expiresAt);
+  return !Number.isFinite(expiry) || expiry <= Date.now();
+}
+
+function adminMessageCaption(body: string): string {
+  return ADMIN_MESSAGE_HEADER + "\n\n" + esc(body);
+}
+
+function adminMessageKeyboard(draftId: string) {
+  return {
+    inline_keyboard: [
+      [{ text: "👀 Preview", callback_data: "support-message:preview:" + draftId }],
+      [
+        { text: "✅ Send to customer", callback_data: "support-message:send:" + draftId },
+        { text: "✖️ Cancel", callback_data: "support-message:cancel:" + draftId }
+      ]
+    ]
+  };
+}
+
+function adminMessageBody(draft: AdminMessageDraft): string {
+  return String(draft.message_text || "").trim();
+}
+
+function adminMessageContentDetails(draft: AdminMessageDraft): string {
+  const body = adminMessageBody(draft);
+  return "media=" + (draft.media_file_id ? String(draft.media_kind || "file") : "none") + "; text_length=" + body.length;
+}
+
+function adminMessageSendProblem(draft: AdminMessageDraft): string {
+  const body = adminMessageBody(draft);
+  if (!body && !draft.media_file_id) return "Add a message or attach one photo/document before sending.";
+  if (body.length > ADMIN_MESSAGE_TEXT_LIMIT) return "Support message text is too long. Shorten it to " + ADMIN_MESSAGE_TEXT_LIMIT + " characters or fewer.";
+  if (draft.media_file_id && draft.media_kind !== "photo" && draft.media_kind !== "document") return "The attached media type is not supported. Nothing was sent.";
+  if (draft.media_file_id && body && adminMessageCaption(body).length > ADMIN_MESSAGE_CAPTION_LIMIT) {
+    return "The text is too long to use as a Telegram media caption (" + adminMessageCaption(body).length + "/" + ADMIN_MESSAGE_CAPTION_LIMIT + "). Shorten the text, then preview again.";
+  }
+  return "";
+}
+
+async function resolveCustomerOrderReference(e: Env, rawRef: string): Promise<{ order?: CustomerOrder; error?: "invalid" | "missing" | "ambiguous" }> {
+  const ref = String(rawRef || "").trim();
+  const isCheckoutCode = /^FL-[A-Z0-9]{6}$/i.test(ref);
+  const isOrderUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref);
+  if (!isCheckoutCode && !isOrderUuid) return { error: "invalid" };
+
+  const field = isCheckoutCode ? "checkout_code" : "id";
+  const value = isCheckoutCode ? ref.toUpperCase() : ref.toLowerCase();
+  const contactRows = await e.DB.prepare(`SELECT id,telegram_user_id,telegram_chat_id,telegram_username,profile_id AS target_id,buyer_email,status,payment_method,payment_reference,checkout_code,checkout_name,created_at FROM contact_requests WHERE ${field}=? ORDER BY created_at DESC LIMIT 2`).bind(value).all<any>();
+  const serviceRows = await e.DB.prepare(`SELECT id,telegram_user_id,telegram_chat_id,telegram_username,service_id AS target_id,buyer_email,status,payment_method,payment_reference,checkout_code,checkout_name,created_at FROM service_orders WHERE ${field}=? ORDER BY created_at DESC LIMIT 2`).bind(value).all<any>();
+  const candidates: CustomerOrder[] = [
+    ...(contactRows.results || []).map(row => ({ kind: "contact" as const, ...row })),
+    ...(serviceRows.results || []).map(row => ({ kind: "service" as const, ...row }))
+  ];
+  if (candidates.length === 0) return { error: "missing" };
+  if (candidates.length > 1) return { error: "ambiguous" };
+  return { order: candidates[0] };
+}
+
+async function loadAdminMessageDraft(e: Env, draftId: string): Promise<AdminMessageDraft | null> {
+  return e.DB.prepare("SELECT id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,message_text,media_kind,media_file_id,media_mime_type,status,expires_at,delivered_at,created_at,updated_at FROM admin_message_drafts WHERE id=?").bind(draftId).first<AdminMessageDraft>();
+}
+
+async function loadAdminMessageDraftContext(e: Env, draftId: string): Promise<{ draft: AdminMessageDraft; order: CustomerOrder | null } | null> {
+  const draft = await loadAdminMessageDraft(e, draftId);
+  if (!draft) return null;
+  const order = await loadCustomerOrderByKind(e, draft.order_kind, draft.order_id);
+  return { draft, order };
+}
+
+async function expireAdminMessageDraftIfNeeded(e: Env, draft: AdminMessageDraft): Promise<boolean> {
+  if (draft.status !== "draft" || !isDraftExpired(draft.expires_at)) return false;
+  await e.DB.prepare("UPDATE admin_message_drafts SET status='expired',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(draft.id).run();
+  return true;
+}
+
+async function activeAdminMessageDraft(e: Env, adminTelegramId: string): Promise<AdminMessageDraft | null> {
+  const draft = await e.DB.prepare("SELECT id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,message_text,media_kind,media_file_id,media_mime_type,status,expires_at,delivered_at,created_at,updated_at FROM admin_message_drafts WHERE admin_telegram_id=? AND status='draft' ORDER BY updated_at DESC LIMIT 1").bind(adminTelegramId).first<AdminMessageDraft>();
+  if (!draft) return null;
+  return (await expireAdminMessageDraftIfNeeded(e, draft)) ? null : draft;
+}
+
+async function activeDeliveryDraft(e: Env, adminTelegramId: string): Promise<any | null> {
+  const draft = await e.DB.prepare("SELECT id,request_id,checkout_code,status,expires_at FROM delivery_drafts WHERE admin_telegram_id=? AND status='draft' ORDER BY updated_at DESC LIMIT 1").bind(adminTelegramId).first<any>();
+  if (!draft) return null;
+  if (isDraftExpired(draft.expires_at)) {
+    await e.DB.prepare("UPDATE delivery_drafts SET status='expired',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(draft.id).run();
+    return null;
+  }
+  return draft;
+}
+
+async function auditAdminMessageDraft(e: Env, adminTelegramId: string, action: string, draft: AdminMessageDraft, order: CustomerOrder | null, details: string) {
+  await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,?,?,?,?)")
+    .bind(adminTelegramId, action, draft.order_id, order?.kind === "contact" ? (order.target_id || null) : null, details)
+    .run();
+}
+
+function adminMessageDraftSummary(draft: AdminMessageDraft, order: CustomerOrder, heading = "💬 <b>Customer support draft</b>"): string {
+  const body = adminMessageBody(draft);
+  const problem = adminMessageSendProblem(draft);
+  const mediaLabel = draft.media_file_id
+    ? "One " + esc(String(draft.media_kind || "file")) + " attached" + (draft.media_mime_type ? " (" + esc(String(draft.media_mime_type)) + ")" : "")
+    : "None";
+  const messageSection = body
+    ? esc(body)
+    : draft.media_file_id
+      ? "<i>Media only — no message text.</i>"
+      : "<i>No text or attachment yet. Send text and/or one photo/document in this private chat.</i>";
+  const lines = [
+    heading,
+    "Order type: <b>" + (order.kind === "contact" ? "Contact request" : "Service order") + "</b>",
+    "Order code: <code>" + esc(String(order.checkout_code || draft.checkout_code || "not recorded")) + "</code>",
+    "Order UUID: <code>" + esc(order.id) + "</code>",
+    (order.kind === "contact" ? "Creator profile: " : "Service: ") + "<code>" + esc(String(order.target_id || "unknown")) + "</code>",
+    "Current order status: <b>" + esc(order.status) + "</b>",
+    "Attachment: " + mediaLabel,
+    "",
+    "<b>Customer message</b>",
+    messageSection
+  ];
+  if (problem && (body || draft.media_file_id)) lines.push("", "⚠️ " + esc(problem));
+  lines.push("", "<i>Preview only — nothing has been sent. Draft expires at " + esc(String(draft.expires_at || "unknown")) + " UTC. Sending this support message will not change payment, approval, consent, delivery, or fulfilment status.</i>");
+  return lines.join("\n");
+}
+
+async function sendAdminMessageDraftSummary(
+  e: Env,
+  chat: string | number,
+  draft: AdminMessageDraft,
+  order: CustomerOrder,
+  options: { heading?: string; includeMediaPreview?: boolean; note?: string } = {}
+) {
+  if (options.includeMediaPreview && draft.media_file_id && (draft.media_kind === "photo" || draft.media_kind === "document")) {
+    try {
+      const previewCaption = "👀 Attachment preview for order " + String(order.checkout_code || order.id) + "\nPreview only — nothing has been sent to the customer.";
+      if (draft.media_kind === "photo") {
+        await tg(e, "sendPhoto", { chat_id: chat, photo: draft.media_file_id, caption: previewCaption });
+      } else {
+        await tg(e, "sendDocument", { chat_id: chat, document: draft.media_file_id, caption: previewCaption });
+      }
+    } catch {
+      await say(e, chat, "⚠️ Telegram could not preview the attachment. The draft remains unsent; check the attachment before using Send.");
+    }
+  }
+  const summary = adminMessageDraftSummary(draft, order, options.heading) + (options.note ? "\n\n" + esc(options.note) : "");
+  return say(e, chat, summary, adminMessageKeyboard(draft.id));
+}
+
+async function createOrReopenAdminMessageDraft(e: Env, m: Msg, rawRef: string, initialBody: string, media?: ReceiptMedia) {
+  const chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
+  if (user !== e.ADMIN_TELEGRAM_ID) return say(e, chat, "Admin access only. Nothing was sent.");
+  if (chat !== user) return say(e, chat, "Open the private Admin Desk chat to compose a customer support message. Nothing was sent.");
+
+  const body = String(initialBody || "").trim();
+  if (body.length > ADMIN_MESSAGE_TEXT_LIMIT) return say(e, chat, "Support message text is too long. Keep it to " + ADMIN_MESSAGE_TEXT_LIMIT + " characters or fewer. Nothing was sent.");
+
+  const deliveryDraft = await activeDeliveryDraft(e, user);
+  if (deliveryDraft) {
+    return say(e, chat, "Finish or cancel the creator-contact delivery draft for <code>" + esc(String(deliveryDraft.checkout_code || "the selected request")) + "</code> before composing a general support message. This prevents text or media being captured by the wrong workflow.");
+  }
+
+  const resolved = await resolveCustomerOrderReference(e, rawRef);
+  if (resolved.error === "invalid") return say(e, chat, "Use a full order UUID or an order code in the format <code>FL-ABC123</code>. Nothing was sent.");
+  if (resolved.error === "ambiguous") return say(e, chat, "That reference matches more than one order, so no draft was opened. Use the exact full order UUID after checking the records.");
+  if (resolved.error === "missing" || !resolved.order) return say(e, chat, "No contact request or service order matched that UUID or FL- order code. Nothing was sent.");
+  const order = resolved.order;
+
+  const uncertain = await e.DB.prepare("SELECT id FROM admin_message_drafts WHERE order_kind=? AND order_id=? AND status='sending' ORDER BY updated_at DESC LIMIT 1").bind(order.kind, order.id).first<any>();
+  if (uncertain) {
+    return say(e, chat, "A previous support message for this order has an uncertain Telegram outcome and is locked to prevent a duplicate. Inspect the customer conversation and audit before composing another message for this order.");
+  }
+
+  const existing = await activeAdminMessageDraft(e, user);
+  if (existing && (existing.order_kind !== order.kind || existing.order_id !== order.id)) {
+    return say(e, chat, "Finish or cancel the current customer support draft for <code>" + esc(String(existing.checkout_code || existing.order_id)) + "</code> before composing a message for another order.", adminMessageKeyboard(existing.id));
+  }
+  if (existing) {
+    if (String(existing.telegram_user_id) !== String(order.telegram_user_id) || String(existing.telegram_chat_id) !== String(order.telegram_chat_id)) {
+      return say(e, chat, "The customer destination saved on the existing support draft no longer matches this order. Cancel that draft and inspect the order before composing again.", adminMessageKeyboard(existing.id));
+    }
+    const updated = await e.DB.prepare("UPDATE admin_message_drafts SET checkout_code=?,message_text=?,media_kind=?,media_file_id=?,media_mime_type=?,expires_at=datetime('now','+30 minutes'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?")
+      .bind(order.checkout_code || null, body || existing.message_text || null, media?.kind || existing.media_kind || null, media?.fileId || existing.media_file_id || null, media?.mimeType || existing.media_mime_type || null, existing.id, user)
+      .run();
+    if (!updated.meta?.changes) return say(e, chat, "The support draft changed while it was being reopened. Nothing was sent.");
+    const context = await loadAdminMessageDraftContext(e, existing.id);
+    if (!context?.order) return say(e, chat, "The support draft could not be reloaded. Nothing was sent.");
+    return sendAdminMessageDraftSummary(e, chat, context.draft, context.order, { heading: "💬 <b>Customer support draft updated</b>" });
+  }
+
+  const draftId = crypto.randomUUID();
+  try {
+    await e.DB.prepare("INSERT INTO admin_message_drafts(id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,message_text,media_kind,media_file_id,media_mime_type,status,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'draft',datetime('now','+30 minutes'))")
+      .bind(draftId, order.id, order.kind, user, order.telegram_user_id, order.telegram_chat_id, order.checkout_code || null, body || null, media?.kind || null, media?.fileId || null, media?.mimeType || null)
+      .run();
+  } catch {
+    const raced = await activeAdminMessageDraft(e, user);
+    if (raced) return say(e, chat, "Another customer support draft was opened at the same time. Finish or cancel it before composing a different support message.", adminMessageKeyboard(raced.id));
+    throw new Error("admin_message_draft_create_failed");
+  }
+
+  const context = await loadAdminMessageDraftContext(e, draftId);
+  if (!context?.order) return say(e, chat, "The support draft could not be reloaded. Nothing was sent.");
+  await auditAdminMessageDraft(e, user, "admin_support_draft_created", context.draft, context.order, "Admin created customer support draft for " + order.kind + " order " + String(order.checkout_code || order.id) + "; " + adminMessageContentDetails(context.draft));
+  return sendAdminMessageDraftSummary(e, chat, context.draft, context.order);
 }
 
 function receiptContextValue(value: unknown, fallback: string, maxLength: number): string {
@@ -562,12 +805,55 @@ async function message(e: Env, m: Msg) {
   const caption = (m.caption || "").trim(), chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
   const hasReceiptCandidateMedia = Boolean((Array.isArray(m.photo) && m.photo.length > 0) || m.document);
   if (hasReceiptCandidateMedia && user === e.ADMIN_TELEGRAM_ID) {
-    const draft = await e.DB.prepare("SELECT id,checkout_code FROM delivery_drafts WHERE admin_telegram_id=? AND status='draft' ORDER BY updated_at DESC LIMIT 1").bind(user).first<any>();
-    if (draft) {
+    const normalizedCaption = caption.replace(/^(\/[A-Za-z0-9_]+)@[A-Za-z0-9_]+(?=\s|$)/, "$1");
+    if (normalizedCaption === "/message" || normalizedCaption.startsWith("/message ")) {
+      const command = normalizedCaption.match(/^\/message\s+([^\s]+)(?:\s+([\s\S]+))?$/i);
+      if (!command) return say(e, chat, "Caption format: /message FL-ABC123 Your message here. This opens a draft only; it does not send.");
+      const extracted = extractReceiptMedia(m);
+      if (!extracted.media) return say(e, chat, "Attach one Telegram photo or a PDF, JPG, PNG, or WebP document under 20 MB. No support draft was opened.");
+      return createOrReopenAdminMessageDraft(e, m, command[1], command[2] || "", extracted.media);
+    }
+
+    const deliveryDraft = await activeDeliveryDraft(e, user);
+    const supportDraft = await activeAdminMessageDraft(e, user);
+    if (deliveryDraft && supportDraft) {
+      return say(e, chat, "Two editable drafts are open, so the media was not attached to either one. Finish or cancel one draft, then send the media again.", {
+        inline_keyboard: [[
+          { text: "✖️ Cancel support draft", callback_data: "support-message:cancel:" + supportDraft.id },
+          { text: "✖️ Cancel delivery draft", callback_data: "draft:cancel:" + deliveryDraft.id }
+        ]]
+      });
+    }
+    if (deliveryDraft) {
       const media = extractReceiptMedia(m);
       if (!media.media) return say(e,chat,media.unsupported || "Send one photo or document.");
-      await e.DB.prepare("UPDATE delivery_drafts SET media_kind=?,media_file_id=?,media_mime_type=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(media.media.kind,media.media.fileId,media.media.mimeType,draft.id,user).run();
-      return say(e,chat,"📎 Media attached to draft <code>"+esc(draft.checkout_code || "request")+"</code>.",{inline_keyboard:[[ {text:"👀 Preview",callback_data:"draft:preview:"+draft.id} ],[ {text:"✅ Send to customer",callback_data:"draft:send:"+draft.id},{text:"✖️ Cancel",callback_data:"draft:cancel:"+draft.id} ]]});
+      await e.DB.prepare("UPDATE delivery_drafts SET media_kind=?,media_file_id=?,media_mime_type=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(media.media.kind,media.media.fileId,media.media.mimeType,deliveryDraft.id,user).run();
+      return say(e,chat,"📎 Media attached to draft <code>"+esc(deliveryDraft.checkout_code || "request")+"</code>.",{inline_keyboard:[[ {text:"👀 Preview",callback_data:"draft:preview:"+deliveryDraft.id} ],[ {text:"✅ Send to customer",callback_data:"draft:send:"+deliveryDraft.id},{text:"✖️ Cancel",callback_data:"draft:cancel:"+deliveryDraft.id} ]]});
+    }
+    if (supportDraft) {
+      if (chat !== user) return say(e, chat, "Open the private Admin Desk chat to attach media to a customer support draft. Nothing was sent.");
+      const contextBefore = await loadAdminMessageDraftContext(e, supportDraft.id);
+      if (!contextBefore?.order || String(contextBefore.order.telegram_user_id) !== String(supportDraft.telegram_user_id) || String(contextBefore.order.telegram_chat_id) !== String(supportDraft.telegram_chat_id)) {
+        return say(e, chat, "The support draft no longer matches the selected order's Telegram destination, so the media was not attached.", adminMessageKeyboard(supportDraft.id));
+      }
+      const extracted = extractReceiptMedia(m);
+      if (!extracted.media) return say(e, chat, "Attach one Telegram photo or a PDF, JPG, PNG, or WebP document under 20 MB. The support draft was not changed.");
+      let nextText = supportDraft.message_text || null;
+      let note = "";
+      if (caption && !caption.startsWith("/")) {
+        if (caption.length > ADMIN_MESSAGE_TEXT_LIMIT) return say(e, chat, "The media caption is too long to use as support text, so the media was not attached. Shorten the text and try again.");
+        if (!adminMessageBody(supportDraft)) nextText = caption;
+        else if (caption !== adminMessageBody(supportDraft)) note = "Existing draft text was kept; the media caption was not used as message text.";
+      } else if (caption.startsWith("/")) {
+        note = "The media caption was not used as message text.";
+      }
+      const updated = await e.DB.prepare("UPDATE admin_message_drafts SET message_text=?,media_kind=?,media_file_id=?,media_mime_type=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?")
+        .bind(nextText, extracted.media.kind, extracted.media.fileId, extracted.media.mimeType, supportDraft.id, user)
+        .run();
+      if (!updated.meta?.changes) return say(e, chat, "The support draft changed while media was being attached. Nothing was sent.");
+      const context = await loadAdminMessageDraftContext(e, supportDraft.id);
+      if (!context?.order) return say(e, chat, "The support draft could not be reloaded. Nothing was sent.");
+      return sendAdminMessageDraftSummary(e, chat, context.draft, context.order, { heading: "📎 <b>Customer support draft updated</b>", note: note || undefined });
     }
   }
   if (hasReceiptCandidateMedia) {
@@ -590,13 +876,35 @@ async function message(e: Env, m: Msg) {
     t = caption;
   }
   if (!t) return;
-  // If the administrator has an active delivery draft, ordinary text becomes draft content.
+  // Ordinary admin text can edit exactly one open composer. If both editable
+  // workflows somehow have a draft, fail closed instead of guessing.
   if (user === e.ADMIN_TELEGRAM_ID && !t.startsWith("/")) {
-    const draft = await e.DB.prepare("SELECT id,checkout_code FROM delivery_drafts WHERE admin_telegram_id=? AND status='draft' ORDER BY updated_at DESC LIMIT 1").bind(user).first<any>();
-    if (draft) {
+    const deliveryDraft = await activeDeliveryDraft(e, user);
+    const supportDraft = await activeAdminMessageDraft(e, user);
+    if (deliveryDraft && supportDraft) {
+      return say(e, chat, "Two editable drafts are open, so that text was not added to either one. Finish or cancel one draft, then send the text again.", {
+        inline_keyboard: [[
+          { text: "✖️ Cancel support draft", callback_data: "support-message:cancel:" + supportDraft.id },
+          { text: "✖️ Cancel delivery draft", callback_data: "draft:cancel:" + deliveryDraft.id }
+        ]]
+      });
+    }
+    if (deliveryDraft) {
       if (t.length > 700) return say(e,chat,"Please keep delivery text under 700 characters.");
-      await e.DB.prepare("UPDATE delivery_drafts SET message_text=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(t,draft.id,user).run();
-      return say(e,chat,"📝 Draft updated for <code>"+esc(draft.checkout_code || "request")+"</code>. Optionally attach one photo or document, then preview before sending.",{inline_keyboard:[[ {text:"👀 Preview",callback_data:"draft:preview:"+draft.id} ],[ {text:"✅ Send to customer",callback_data:"draft:send:"+draft.id},{text:"✖️ Cancel",callback_data:"draft:cancel:"+draft.id} ]]});
+      await e.DB.prepare("UPDATE delivery_drafts SET message_text=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(t,deliveryDraft.id,user).run();
+      return say(e,chat,"📝 Draft updated for <code>"+esc(deliveryDraft.checkout_code || "request")+"</code>. Optionally attach one photo or document, then preview before sending.",{inline_keyboard:[[ {text:"👀 Preview",callback_data:"draft:preview:"+deliveryDraft.id} ],[ {text:"✅ Send to customer",callback_data:"draft:send:"+deliveryDraft.id},{text:"✖️ Cancel",callback_data:"draft:cancel:"+deliveryDraft.id} ]]});
+    }
+    if (supportDraft && chat === user) {
+      if (t.length > ADMIN_MESSAGE_TEXT_LIMIT) return say(e, chat, "Support message text is too long. Keep it to " + ADMIN_MESSAGE_TEXT_LIMIT + " characters or fewer. The draft was not changed.");
+      const contextBefore = await loadAdminMessageDraftContext(e, supportDraft.id);
+      if (!contextBefore?.order || String(contextBefore.order.telegram_user_id) !== String(supportDraft.telegram_user_id) || String(contextBefore.order.telegram_chat_id) !== String(supportDraft.telegram_chat_id)) {
+        return say(e, chat, "The support draft no longer matches the selected order's Telegram destination, so the text was not added.", adminMessageKeyboard(supportDraft.id));
+      }
+      const updated = await e.DB.prepare("UPDATE admin_message_drafts SET message_text=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(t, supportDraft.id, user).run();
+      if (!updated.meta?.changes) return say(e, chat, "The support draft changed while it was being updated. Nothing was sent.");
+      const context = await loadAdminMessageDraftContext(e, supportDraft.id);
+      if (!context?.order) return say(e, chat, "The support draft could not be reloaded. Nothing was sent.");
+      return sendAdminMessageDraftSummary(e, chat, context.draft, context.order, { heading: "📝 <b>Customer support draft updated</b>" });
     }
   }
   // Telegram may append @BotName to slash commands. Normalize only the command token.
@@ -636,17 +944,10 @@ async function message(e: Env, m: Msg) {
       ]
     });
   }
-  if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/message ")) {
-    const match = t.match(/^\/message\s+([^\s]+)\s+([\s\S]{2,2500})$/i);
-    if (!match) return say(e, chat, "Format: /message FL-ABC123 Your message here");
-    const ref = match[1], body = match[2].trim();
-    let order = await e.DB.prepare("SELECT id,telegram_chat_id,checkout_code,profile_id AS target_id,'contact' AS kind FROM contact_requests WHERE id=? OR checkout_code=? ORDER BY created_at DESC LIMIT 1").bind(ref, ref.toUpperCase()).first<any>();
-    if (!order) order = await e.DB.prepare("SELECT id,telegram_chat_id,checkout_code,service_id AS target_id,'service' AS kind FROM service_orders WHERE id=? OR checkout_code=? ORDER BY created_at DESC LIMIT 1").bind(ref, ref.toUpperCase()).first<any>();
-    if (!order) return say(e, chat, "No contact request or service order matched that UUID or FL- order code. Nothing was sent.");
-    try { await say(e, order.telegram_chat_id, "💬 <b>Message from FansLeak support</b>\n\n" + esc(body)); }
-    catch { return say(e, chat, "Telegram could not deliver the message. Check whether the customer has started the bot; no success was recorded."); }
-    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,?,?,?,?)").bind(user, "admin_message_customer", order.id, order.kind === "contact" ? order.target_id : null, "Admin sent support message for " + order.kind + " order " + order.checkout_code).run();
-    return say(e, chat, "✅ Message sent for order <code>" + esc(order.checkout_code || ref) + "</code>.");
+  if (user === e.ADMIN_TELEGRAM_ID && (t === "/message" || t.startsWith("/message "))) {
+    const match = t.match(/^\/message\s+([^\s]+)(?:\s+([\s\S]+))?$/i);
+    if (!match) return say(e, chat, "Format: /message FL-ABC123 Your message here\nYou may also use /message FL-ABC123 on its own, then send text and/or one photo or document. This opens a draft only; it does not send.");
+    return createOrReopenAdminMessageDraft(e, m, match[1], match[2] || "");
   }
 
   if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/deliver ")) {
@@ -706,6 +1007,7 @@ async function message(e: Env, m: Msg) {
       "/verify REQUEST_UUID SELAR_REFERENCE — manually verify a contact payment after checking it in Selar (only when no webhook sale is attached)",
       "/verifyservice ORDER_UUID SELAR_REFERENCE — manually verify a service payment after checking it in Selar",
       "/deliver ORDER_UUID fulfilment text — send fulfilment for a verified service order",
+      "/message ORDER_CODE_OR_UUID [text] — open a customer support draft; add text and/or one photo/document, then preview and explicitly send or cancel",
       "/setcontact PROFILE_ID @handle — store a creator contact with sharing DISABLED",
       "/enablecontact PROFILE_ID — record that the creator explicitly authorised sharing",
       "/disablecontact PROFILE_ID — revoke sharing consent immediately",
@@ -966,6 +1268,80 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     await say(e,chat,"Fulfilment sent to customer for order <code>"+esc(String(d.checkout_code||d.service_order_id))+"</code>.");
     return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Fulfilment sent once and recorded."});
   }
+  if (data.startsWith("support-message:")) {
+    if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor) {
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin access only in the private Admin Desk chat." });
+    }
+    const match = data.match(/^support-message:(preview|send|cancel):([0-9a-f-]{36})$/i);
+    if (!match) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Unknown support draft action." });
+    const action = match[1].toLowerCase(), draftId = match[2];
+    const context = await loadAdminMessageDraftContext(e, draftId);
+    if (!context || String(context.draft.admin_telegram_id) !== actor) {
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support draft not found for this admin." });
+    }
+    const draft = context.draft, order = context.order;
+
+    if (await expireAdminMessageDraftIfNeeded(e, draft)) {
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support draft expired. Nothing was sent." });
+    }
+
+    if (action === "cancel") {
+      if (draft.status !== "draft") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Only an unsent support draft can be cancelled." });
+      const cancelled = await e.DB.prepare("UPDATE admin_message_drafts SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(draftId, actor).run();
+      if (!cancelled.meta?.changes) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support draft state changed; nothing was sent." });
+      await auditAdminMessageDraft(e, actor, "admin_support_draft_cancelled", draft, order, "Admin cancelled unsent customer support draft for " + draft.order_kind + " order " + String(order?.checkout_code || draft.checkout_code || draft.order_id) + "; " + adminMessageContentDetails(draft));
+      await say(e, chat, "✖️ Customer support draft cancelled. Nothing was sent.");
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support draft cancelled." });
+    }
+
+    if (draft.status !== "draft") {
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: draft.status === "sending" ? "This support message is locked because its Telegram outcome needs review." : "Support draft is no longer active." });
+    }
+    if (!order || String(order.telegram_user_id) !== String(draft.telegram_user_id) || String(order.telegram_chat_id) !== String(draft.telegram_chat_id)) {
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "The selected order or customer destination changed. Nothing was sent." });
+    }
+
+    if (action === "preview") {
+      await sendAdminMessageDraftSummary(e, chat, draft, order, { heading: "👀 <b>Customer support preview</b>", includeMediaPreview: true });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Preview only — nothing has been sent." });
+    }
+
+    const problem = adminMessageSendProblem(draft);
+    if (problem) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: problem.slice(0, 200) });
+
+    const orderTable = draft.order_kind === "contact" ? "contact_requests" : "service_orders";
+    const claimed = await e.DB.prepare(`UPDATE admin_message_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=? AND message_text IS ? AND media_kind IS ? AND media_file_id IS ? AND media_mime_type IS ? AND EXISTS(SELECT 1 FROM ${orderTable} o WHERE o.id=admin_message_drafts.order_id AND o.telegram_user_id=admin_message_drafts.telegram_user_id AND o.telegram_chat_id=admin_message_drafts.telegram_chat_id)`)
+      .bind(draftId, actor, draft.message_text || null, draft.media_kind || null, draft.media_file_id || null, draft.media_mime_type || null)
+      .run();
+    if (!claimed.meta?.changes) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support draft changed, is already sending, or its destination no longer matches." });
+
+    const body = adminMessageBody(draft);
+    try {
+      if (draft.media_file_id && draft.media_kind === "photo") {
+        await tg(e, "sendPhoto", { chat_id: draft.telegram_chat_id, photo: draft.media_file_id, ...(body ? { caption: adminMessageCaption(body), parse_mode: "HTML" } : {}) });
+      } else if (draft.media_file_id && draft.media_kind === "document") {
+        await tg(e, "sendDocument", { chat_id: draft.telegram_chat_id, document: draft.media_file_id, ...(body ? { caption: adminMessageCaption(body), parse_mode: "HTML" } : {}) });
+      } else {
+        await say(e, draft.telegram_chat_id, ADMIN_MESSAGE_HEADER + "\n\n" + esc(body));
+      }
+    } catch {
+      try {
+        await auditAdminMessageDraft(e, actor, "admin_support_message_uncertain", draft, order, "Telegram support-message outcome uncertain for " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + "; draft locked as sending; " + adminMessageContentDetails(draft));
+      } catch { /* Preserve the locked sending state even if audit insertion fails. */ }
+      try {
+        await notifyAdminIfConfigured(e, "⚠️ Customer support message outcome is uncertain for " + draft.order_kind + " order <code>" + esc(String(order.checkout_code || draft.checkout_code || draft.order_id)) + "</code>. The draft remains locked as sending to prevent a duplicate. Inspect the customer conversation before any manual retry.");
+      } catch { /* The callback response below still tells the acting admin. */ }
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support-message outcome uncertain. Draft locked to prevent duplicates." });
+    }
+
+    const sent = await e.DB.prepare("UPDATE admin_message_drafts SET status='sent',delivered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draftId).run();
+    await auditAdminMessageDraft(e, actor, "admin_message_customer", draft, order, "Admin sent customer support message for " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + "; " + adminMessageContentDetails(draft));
+    if (!sent.meta?.changes) {
+      try { await notifyAdminIfConfigured(e, "A customer support message was sent for <code>" + esc(String(order.checkout_code || draft.order_id)) + "</code>, but the draft status changed concurrently. Inspect the audit before any retry."); } catch { /* The audit row above is the primary record. */ }
+    }
+    await say(e, chat, "✅ Support message sent for order <code>" + esc(String(order.checkout_code || order.id)) + "</code>.");
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support message sent once and recorded." });
+  }
   if (data.startsWith("done:") || data.startsWith("paid:")) {
     if (!u.message || String(u.message.chat.id) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Open the bot chat to continue." });
     const id = data.slice(data.indexOf(":") + 1);
@@ -1071,11 +1447,11 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Service orders loaded." });
     }
     if (action === "message_help") {
-      await say(e, chat, "<b>Message a customer</b>\nUse their FL- order code or full order UUID, then type your message.\n\nFormat: <code>/message FL-ABC123 Hi, I’m checking your request and will update you here.</code>\nThe bot sends the message privately to the Telegram account attached to that order. This does not change payment or approval status.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
+      await say(e, chat, "<b>Message a customer</b>\nUse their FL- order code or full order UUID to open a private, expiring support draft. You can include text immediately or add it next; you may also attach one Telegram photo or PDF/image document.\n\nExamples:\n<code>/message FL-ABC123 Hi, I’m checking your request and will update you here.</code>\n<code>/message FL-ABC123</code> — then send the text and/or attachment.\n\nNothing is sent while composing. Review the preview, then tap <b>Send to customer</b> or <b>Cancel</b>. This does not change payment, approval, consent, delivery, or fulfilment status.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Customer-message instructions opened." });
     }
     if (action === "help") {
-      await say(e, chat, "<b>Admin guide</b>\n• Review the real sale in Selar before confirming payment.\n• Payment confirmation and contact approval are separate actions.\n• Contact delivery requires explicit creator consent.\n• Use /message ORDER_CODE your message to contact a customer.\n• Use /help for all supported commands.\n• AI replies cannot verify payments or approve contact delivery.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
+      await say(e, chat, "<b>Admin guide</b>\n• Review the real sale in Selar before confirming payment.\n• Payment confirmation and contact approval are separate actions.\n• Contact delivery requires explicit creator consent.\n• Use /message ORDER_CODE_OR_UUID to open a customer support draft; nothing sends until you preview and confirm.\n• Use /help for all supported commands.\n• AI replies cannot verify payments or approve contact delivery.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin guide opened." });
     }
     if (action === "home") {
@@ -1139,6 +1515,8 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   }
   const otherDraft = await e.DB.prepare("SELECT id,checkout_code FROM delivery_drafts WHERE admin_telegram_id=? AND status='draft' AND request_id<>? ORDER BY updated_at DESC LIMIT 1").bind(actor,id).first<any>();
   if (otherDraft) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Finish or cancel the existing contact delivery draft (code " + String(otherDraft.checkout_code || "unknown") + ") before preparing another." });
+  const supportDraft = await activeAdminMessageDraft(e, actor);
+  if (supportDraft) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Finish or cancel the customer support draft (code " + String(supportDraft.checkout_code || supportDraft.order_id) + ") before preparing contact delivery." });
   const oldDraft = await e.DB.prepare("SELECT id,status FROM delivery_drafts WHERE request_id=?").bind(id).first<any>();
   if (oldDraft && (oldDraft.status === "sent" || oldDraft.status === "sending")) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Delivery already sent or its outcome needs review." });
   const draftId = oldDraft?.id || crypto.randomUUID();

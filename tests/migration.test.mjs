@@ -23,7 +23,7 @@ test('Migration: fresh database migrates to fully verified schema', () => {
   const result = applyAllMigrations(db);
 
   assert.equal(result.ok, true);
-  assert.equal(result.verifiedTables.length, 11);
+  assert.equal(result.verifiedTables.length, 12);
 
   const applied = getAppliedMigrations(db);
   assert.deepEqual(applied, [
@@ -35,7 +35,8 @@ test('Migration: fresh database migrates to fully verified schema', () => {
     '0006_receipt_review',
     '0007_front_desk_multi_requests',
     '0008_delivery_drafts',
-    '0009_service_delivery_drafts'
+    '0009_service_delivery_drafts',
+    '0010_admin_message_drafts'
   ]);
 
   const verified = verifySchema(db);
@@ -127,6 +128,28 @@ test('Migration 0007: contact users can keep multiple unpaid requests while serv
     () => db.prepare("INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status) VALUES ('svc-2','svc','7003','7003','awaiting_request')").run(),
     /UNIQUE constraint failed/i
   );
+});
+
+test('Migration 0010: only one editable general support draft is allowed per admin', () => {
+  const db = new DatabaseSync(':memory:');
+  applyAllMigrations(db);
+
+  const insertDraft = (id, adminId, status) => db.prepare(`
+    INSERT INTO admin_message_drafts
+      (id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,status,expires_at)
+    VALUES (?,?,?,?,?,?,?,?,?)
+  `).run(id, `order-${id}`, 'contact', adminId, '7201', '7201', 'FL-DRAFT1', status, '2999-01-01 00:00:00');
+
+  insertDraft('support-draft-1', '10001', 'draft');
+  assert.throws(
+    () => insertDraft('support-draft-2', '10001', 'draft'),
+    /UNIQUE constraint failed/i,
+    'A second editable support draft for the same admin must be rejected'
+  );
+
+  insertDraft('support-draft-other-admin', '10002', 'draft');
+  db.prepare("UPDATE admin_message_drafts SET status='cancelled' WHERE id='support-draft-1'").run();
+  insertDraft('support-draft-3', '10001', 'draft');
 });
 
 test('Migration 0005: pre-existing duplicate active rows block migration without data changes', () => {
@@ -232,7 +255,7 @@ function completeRemoteSchemaSnapshot() {
 test('Remote migration verifier: accepts all required tables, columns, and unique indexes', () => {
   const result = verifyRemoteSchema(completeRemoteSchemaSnapshot());
   assert.equal(result.ok, true);
-  assert.equal(result.verifiedTables.length, 11);
+  assert.equal(result.verifiedTables.length, 12);
 });
 
 test('Remote migration verifier: fails when a required column is missing', () => {

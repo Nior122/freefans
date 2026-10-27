@@ -21,6 +21,7 @@ function createTestDb() {
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0007_front_desk_multi_requests.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0008_delivery_drafts.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0009_service_delivery_drafts.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0010_admin_message_drafts.sql'), 'utf8'));
 
   return {
     raw: db,
@@ -1581,6 +1582,301 @@ test('Receipt delivery failure is recorded and the same submission can be retrie
     assert.equal(sentTelegramMessages.filter(m => m.method === 'sendPhoto').length, 2, 'One failed attempt and one successful retry are expected');
     assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM receipt_review_prompts WHERE telegram_user_id='5213'").get().cnt, 0);
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(orderId) as any).status, 'pending_payment');
+  } finally {
+    cleanup();
+  }
+});
+
+function customerTelegramCalls(sent: any[], chatId: string) {
+  return sent.filter(m => ['sendMessage', 'sendPhoto', 'sendDocument'].includes(m.method) && String(m.data.chat_id) === chatId);
+}
+
+function latestSupportDraft(db: any, orderId: string) {
+  return db.raw.prepare('SELECT * FROM admin_message_drafts WHERE order_id=? ORDER BY rowid DESC LIMIT 1').get(orderId) as any;
+}
+
+function supportPhotoPayload(messageId: number, caption?: string) {
+  const payload: any = photoMsg(10001, messageId, `support-photo-${messageId}`);
+  if (caption === undefined) delete payload.message.caption;
+  else payload.message.caption = caption;
+  return payload;
+}
+
+function supportDocumentPayload(messageId: number, caption?: string) {
+  const payload: any = documentMsg(10001, messageId, 'application/pdf', `support-${messageId}.pdf`, `support-document-${messageId}`);
+  if (caption !== undefined) payload.message.caption = caption;
+  return payload;
+}
+
+test('Admin Desk support draft sends plain text only after explicit confirmation and does not change order state', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests
+      (id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '8101', '8101', 'anaimiya', 'pending_payment', 'FL-SUPP01')`).run(orderId);
+
+    await tgPost(env, userMsg(9999, '/message FL-SUPP01 This must not be sent'));
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM admin_message_drafts').get().cnt, 0);
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8101').length, 0);
+
+    await tgPost(env, adminMsg('/message fl-supp01 Hello, I am checking your request and will update you here.'));
+    const draft = latestSupportDraft(db, orderId);
+    assert.ok(draft);
+    assert.equal(draft.status, 'draft');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8101').length, 0, 'Composing a support draft must not message the customer');
+    const draftSummary = messagesTo(sentTelegramMessages, '10001').find(m => String(m.data.text).includes('Customer support draft') && String(m.data.text).includes('FL-SUPP01'));
+    assert.ok(draftSummary);
+    const callbacks = (draftSummary.data.reply_markup as any).inline_keyboard.flat().map((b: any) => String(b.callback_data));
+    assert.ok(callbacks.some((data: string) => data === `support-message:preview:${draft.id}`));
+    assert.ok(callbacks.some((data: string) => data === `support-message:send:${draft.id}`));
+    assert.ok(callbacks.some((data: string) => data === `support-message:cancel:${draft.id}`));
+
+    await tgPost(env, callbackFrom(9999, `support-message:send:${draft.id}`, 'cb-support-non-admin'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8101').length, 0, 'A non-admin callback must not send a support draft');
+    assert.equal(latestSupportDraft(db, orderId).status, 'draft');
+
+    await tgPost(env, callbackFrom(10001, `support-message:preview:${draft.id}`, 'cb-support-preview'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8101').length, 0, 'Preview must not message the customer');
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('Customer support preview') && String(m.data.text).includes('pending_payment')));
+
+    await tgPost(env, callbackFrom(10001, `support-message:send:${draft.id}`, 'cb-support-send'));
+    const customerCalls = customerTelegramCalls(sentTelegramMessages, '8101');
+    assert.equal(customerCalls.length, 1);
+    assert.equal(customerCalls[0].method, 'sendMessage');
+    assert.ok(String(customerCalls[0].data.text).includes('Message from FansLeak support'));
+    assert.ok(String(customerCalls[0].data.text).includes('checking your request'));
+    assert.equal(latestSupportDraft(db, orderId).status, 'sent');
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(orderId) as any).status, 'pending_payment');
+
+    await tgPost(env, callbackFrom(10001, `support-message:send:${draft.id}`, 'cb-support-send-repeat'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8101').length, 1, 'A repeated send callback must not duplicate the support message');
+
+    const audits = db.raw.prepare('SELECT action,details FROM admin_audit WHERE request_id=? ORDER BY id').all(orderId) as any[];
+    assert.ok(audits.some(a => a.action === 'admin_support_draft_created'));
+    assert.ok(audits.some(a => a.action === 'admin_message_customer'));
+    assert.equal(audits.some(a => String(a.details || '').includes('checking your request')), false, 'Audit details must not store the support message body');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Admin Desk support draft sends text with one photo to a service order without fulfilling it', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO service_orders
+      (id,service_id,telegram_user_id,telegram_chat_id,status,checkout_code)
+      VALUES (?, 'custom-work', '8202', '8202', 'payment_verified', 'FL-SERV01')`).run(orderId);
+
+    await tgPost(env, adminMsg(`/message ${orderId.toUpperCase()}`));
+    let draft = latestSupportDraft(db, orderId);
+    assert.ok(draft);
+    await tgPost(env, adminMsg('Here is your update with the attached image.'));
+    await tgPost(env, supportPhotoPayload(9101));
+    draft = latestSupportDraft(db, orderId);
+    assert.equal(draft.media_kind, 'photo');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8202').length, 0);
+
+    await tgPost(env, callbackFrom(10001, `support-message:preview:${draft.id}`, 'cb-support-photo-preview'));
+    assert.ok(sentTelegramMessages.some(m => m.method === 'sendPhoto' && String(m.data.chat_id) === '10001'), 'Admin preview should show the actual attachment');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8202').length, 0);
+
+    await tgPost(env, callbackFrom(10001, `support-message:send:${draft.id}`, 'cb-support-photo-send'));
+    const customerCalls = customerTelegramCalls(sentTelegramMessages, '8202');
+    assert.equal(customerCalls.length, 1);
+    assert.equal(customerCalls[0].method, 'sendPhoto');
+    assert.equal(customerCalls[0].data.photo, 'photo-file-large');
+    assert.ok(String(customerCalls[0].data.caption).includes('Here is your update'));
+    assert.equal(latestSupportDraft(db, orderId).status, 'sent');
+    assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(orderId) as any).status, 'payment_verified', 'A support message must not fulfil the service order');
+
+    const audits = db.raw.prepare('SELECT details FROM admin_audit WHERE request_id=?').all(orderId) as any[];
+    assert.equal(audits.some(a => String(a.details || '').includes('photo-file-large')), false, 'Audit details must not store Telegram file IDs');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Admin Desk support draft can send a media-only document selected by order code', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests
+      (id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '8303', '8303', 'anaimiya', 'approved', 'FL-DOC001')`).run(orderId);
+
+    await tgPost(env, supportDocumentPayload(9201, '/message FL-DOC001'));
+    const draft = latestSupportDraft(db, orderId);
+    assert.ok(draft);
+    assert.equal(draft.message_text, null);
+    assert.equal(draft.media_kind, 'document');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8303').length, 0);
+
+    await tgPost(env, callbackFrom(10001, `support-message:preview:${draft.id}`, 'cb-support-doc-preview'));
+    assert.ok(sentTelegramMessages.some(m => m.method === 'sendDocument' && String(m.data.chat_id) === '10001'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8303').length, 0);
+
+    await tgPost(env, callbackFrom(10001, `support-message:send:${draft.id}`, 'cb-support-doc-send'));
+    const customerCalls = customerTelegramCalls(sentTelegramMessages, '8303');
+    assert.equal(customerCalls.length, 1);
+    assert.equal(customerCalls[0].method, 'sendDocument');
+    assert.equal(customerCalls[0].data.document, 'document-file-9201');
+    assert.equal(Object.prototype.hasOwnProperty.call(customerCalls[0].data, 'caption'), false, 'Media-only support messages should not invent a caption');
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(orderId) as any).status, 'approved');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Admin Desk support drafts can be cancelled and expire without sending', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests
+      (id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '8404', '8404', 'anaimiya', 'pending_payment', 'FL-CANC01')`).run(orderId);
+
+    await tgPost(env, adminMsg('/message FL-CANC01 First unsent support draft'));
+    const cancelledDraft = latestSupportDraft(db, orderId);
+    await tgPost(env, callbackFrom(10001, `support-message:cancel:${cancelledDraft.id}`, 'cb-support-cancel'));
+    assert.equal(latestSupportDraft(db, orderId).status, 'cancelled');
+    await tgPost(env, callbackFrom(10001, `support-message:send:${cancelledDraft.id}`, 'cb-support-cancelled-send'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8404').length, 0);
+
+    await tgPost(env, adminMsg('/message FL-CANC01 Second support draft'));
+    const expiredDraft = latestSupportDraft(db, orderId);
+    assert.notEqual(expiredDraft.id, cancelledDraft.id);
+    db.raw.prepare("UPDATE admin_message_drafts SET expires_at=datetime('now','-1 minute') WHERE id=?").run(expiredDraft.id);
+    await tgPost(env, callbackFrom(10001, `support-message:send:${expiredDraft.id}`, 'cb-support-expired-send'));
+    assert.equal(latestSupportDraft(db, orderId).status, 'expired');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8404').length, 0);
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(orderId) as any).status, 'pending_payment');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Admin Desk support order selection rejects invalid, missing, and ambiguous references', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const contactId = crypto.randomUUID();
+    const serviceId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests
+      (id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '8606', '8606', 'anaimiya', 'pending_payment', 'FL-DUP001')`).run(contactId);
+    db.raw.prepare(`INSERT INTO service_orders
+      (id,service_id,telegram_user_id,telegram_chat_id,status,checkout_code)
+      VALUES (?, 'custom-work', '8607', '8607', 'pending_payment', 'FL-DUP001')`).run(serviceId);
+
+    await tgPost(env, adminMsg('/message FL-DUP001 This must not be composed'));
+    await tgPost(env, adminMsg('/message FL-123 Invalid reference'));
+    await tgPost(env, adminMsg(`/message ${crypto.randomUUID()} Missing order`));
+
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM admin_message_drafts').get().cnt, 0);
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8606').length, 0);
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8607').length, 0);
+    const adminTexts = messagesTo(sentTelegramMessages, '10001').map(m => String(m.data.text || ''));
+    assert.ok(adminTexts.some(text => text.includes('matches more than one order')));
+    assert.ok(adminTexts.some(text => text.includes('full order UUID or an order code')));
+    assert.ok(adminTexts.some(text => text.includes('No contact request or service order matched')));
+  } finally {
+    cleanup();
+  }
+});
+
+test('Admin Desk support media captions enforce the Telegram limit before claiming a send', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO service_orders
+      (id,service_id,telegram_user_id,telegram_chat_id,status,checkout_code)
+      VALUES (?, 'custom-work', '8808', '8808', 'payment_verified', 'FL-CAPT01')`).run(orderId);
+
+    await tgPost(env, adminMsg(`/message FL-CAPT01 ${'x'.repeat(1100)}`));
+    await tgPost(env, supportPhotoPayload(9301));
+    let draft = latestSupportDraft(db, orderId);
+    await tgPost(env, callbackFrom(10001, `support-message:send:${draft.id}`, 'cb-support-caption-too-long'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8808').length, 0);
+    assert.equal(latestSupportDraft(db, orderId).status, 'draft', 'A blocked caption send must remain editable and unclaimed');
+
+    await tgPost(env, adminMsg('Short support update.'));
+    draft = latestSupportDraft(db, orderId);
+    await tgPost(env, callbackFrom(10001, `support-message:send:${draft.id}`, 'cb-support-caption-short-send'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8808').length, 1);
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8808')[0].method, 'sendPhoto');
+    assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(orderId) as any).status, 'payment_verified');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Uncertain Admin Desk support send locks the draft and blocks blind retries for the same order', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup, failTelegramMethods } = createTestEnv(db);
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests
+      (id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '8707', '8707', 'anaimiya', 'pending_payment', 'FL-UNCT01')`).run(orderId);
+
+    await tgPost(env, adminMsg('/message FL-UNCT01'));
+    await tgPost(env, supportPhotoPayload(9401));
+    const draft = latestSupportDraft(db, orderId);
+    failTelegramMethods.add('sendPhoto');
+
+    await tgPost(env, callbackFrom(10001, `support-message:send:${draft.id}`, 'cb-support-uncertain-send'));
+    assert.equal(latestSupportDraft(db, orderId).status, 'sending');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8707').filter(m => m.method === 'sendPhoto').length, 1, 'The failed Telegram attempt should be the only customer-send attempt');
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(orderId) as any).status, 'pending_payment');
+    const audits = db.raw.prepare('SELECT action,details FROM admin_audit WHERE request_id=? ORDER BY id').all(orderId) as any[];
+    assert.ok(audits.some(a => a.action === 'admin_support_message_uncertain'));
+    assert.equal(audits.some(a => a.action === 'admin_message_customer'), false);
+    assert.equal(audits.some(a => String(a.details || '').includes('photo-file-large')), false);
+
+    await tgPost(env, callbackFrom(10001, `support-message:send:${draft.id}`, 'cb-support-uncertain-retry'));
+    await tgPost(env, adminMsg('/message FL-UNCT01 Another message'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8707').filter(m => m.method === 'sendPhoto').length, 1, 'An uncertain support send must not be retried blindly');
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM admin_message_drafts WHERE order_id=?').get(orderId).cnt, 1);
+    assert.equal(latestSupportDraft(db, orderId).status, 'sending');
+  } finally {
+    cleanup();
+  }
+});
+
+test('General support drafts and protected contact-delivery drafts cannot overlap', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests
+      (id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '8909', '8909', 'anaimiya', 'payment_verified', 'FL-ISO001')`).run(orderId);
+    db.raw.prepare(`INSERT INTO creator_contacts
+      (profile_id,contact_value,sharing_enabled,consent_confirmed_at)
+      VALUES ('anaimiya', '@synthetic_contact', 1, '2026-01-01T00:00:00.000Z')`).run();
+
+    await tgPost(env, adminMsg('/message FL-ISO001 General support only'));
+    const supportDraft = latestSupportDraft(db, orderId);
+    await tgPost(env, callbackFrom(10001, `approve:${orderId}`, 'cb-delivery-blocked-by-support'));
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM delivery_drafts WHERE request_id=?').get(orderId).cnt, 0, 'An open support draft must block opening the protected delivery composer');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8909').length, 0);
+
+    await tgPost(env, callbackFrom(10001, `support-message:cancel:${supportDraft.id}`, 'cb-support-cancel-before-delivery'));
+    await tgPost(env, callbackFrom(10001, `approve:${orderId}`, 'cb-delivery-open-after-support-cancel'));
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM delivery_drafts WHERE request_id=? AND status=\'draft\'').get(orderId).cnt, 1);
+
+    await tgPost(env, adminMsg('/message FL-ISO001 This support draft must not open'));
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM admin_message_drafts WHERE order_id=?').get(orderId).cnt, 1, 'The protected delivery draft must block a new general support draft');
+    assert.equal(latestSupportDraft(db, orderId).status, 'cancelled');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8909').length, 0);
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(orderId) as any).status, 'payment_verified');
   } finally {
     cleanup();
   }
