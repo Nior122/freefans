@@ -1881,15 +1881,14 @@ async function selar(request: Request, e: Env) {
 
   const code = codeInName(s.customerName);
   let target: any = null;
-  let matchedBy: "unique_code" | "exact_full_name" | null = null;
+  let matchedBy: "unique_code" | "exact_full_name" | "email_fallback" | null = null;
 
-  // A unique checkout code is sufficient, even if Selar's name differs.
-  // If the code is absent/unknown/ambiguous, require an exact full-name match
-  // against the saved checkout name. Never match on a first name or partial name.
+  // Match strongest evidence first: unique checkout code, then exact full name.
+  // Email is a last-resort reconciliation clue only and never verifies payment.
   if (code) {
     const codeRows = kind === "contact"
       ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE checkout_code=? AND status='pending_payment' AND payment_method='selar' LIMIT 2").bind(code).all<any>()
-      : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name FROM service_orders WHERE checkout_code=? AND status='pending_payment' LIMIT 2").bind(code).all<any>();
+      : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name,buyer_email FROM service_orders WHERE checkout_code=? AND status='pending_payment' LIMIT 2").bind(code).all<any>();
     if (codeRows.results.length === 1) {
       target = codeRows.results[0];
       matchedBy = "unique_code";
@@ -1899,23 +1898,33 @@ async function selar(request: Request, e: Env) {
   if (!target) {
     const saleName = s.customerName.replace(new RegExp("\\s*" + (code || "") + "\\s*$", "i"), "").trim();
     const fullName = normName(saleName);
-    if (fullName.length < 5 || !fullName.includes(" ")) {
-      return json({ ok: true, matched: false, reason: code ? "no_unique_code_or_full_name_match" : "missing_code_and_full_name" });
+    if (fullName.length >= 5 && fullName.includes(" ")) {
+      const nameRows = kind === "contact"
+        ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE status='pending_payment' AND payment_method='selar' AND checkout_name IS NOT NULL").all<any>()
+        : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name,buyer_email FROM service_orders WHERE status='pending_payment' AND checkout_name IS NOT NULL").all<any>();
+      const exactNameRows = nameRows.results.filter((row: any) => row.checkout_name && normName(row.checkout_name) === fullName);
+      if (exactNameRows.length === 1) {
+        target = exactNameRows[0];
+        matchedBy = "exact_full_name";
+      }
     }
-
-    // Normalize in application code so repeated whitespace and case are handled
-    // consistently. Fetch all eligible pending candidates so a LIMIT cannot hide
-    // a second exact-name match and accidentally make an ambiguous name look unique.
-    const nameRows = kind === "contact"
-      ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE status='pending_payment' AND payment_method='selar' AND checkout_name IS NOT NULL").all<any>()
-      : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name FROM service_orders WHERE status='pending_payment' AND checkout_name IS NOT NULL").all<any>();
-    const exactNameRows = nameRows.results.filter((row: any) => row.checkout_name && normName(row.checkout_name) === fullName);
-    if (exactNameRows.length !== 1) {
-      return json({ ok: true, matched: false, reason: exactNameRows.length > 1 ? "ambiguous_full_name_match" : "no_unique_code_or_full_name_match" });
-    }
-    target = exactNameRows[0];
-    matchedBy = "exact_full_name";
   }
+
+  if (!target && s.email && emailRe.test(s.email)) {
+    const email = s.email.trim().toLowerCase();
+    const emailRows = kind === "contact"
+      ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE status='pending_payment' AND payment_method='selar' AND buyer_email IS NOT NULL").all<any>()
+      : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name,buyer_email FROM service_orders WHERE status='pending_payment' AND buyer_email IS NOT NULL").all<any>();
+    const exactEmailRows = emailRows.results.filter((row: any) => String(row.buyer_email || "").trim().toLowerCase() === email);
+    if (exactEmailRows.length === 1) {
+      target = exactEmailRows[0];
+      matchedBy = "email_fallback";
+    } else {
+      return json({ ok: true, matched: false, reason: exactEmailRows.length > 1 ? "ambiguous_email_fallback" : "no_unique_code_name_or_email_match" });
+    }
+  }
+
+  if (!target) return json({ ok: true, matched: false, reason: "no_unique_code_name_or_email_match" });
 
   const saleInserted = await e.DB.prepare("INSERT OR IGNORE INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id) VALUES(?,?,?,?,?,?)").bind(s.reference, s.email || target.buyer_email || "", 0, "UNK", s.productId, target.id).run();
   if (saleInserted.meta?.changes === 0) return json({ ok: true, duplicate: true });
