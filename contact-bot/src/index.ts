@@ -1512,31 +1512,6 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       await say(e, chat, "<b>Contact requests needing attention</b>\nChoose a request to review its saved status. A sale notification is not payment verification.", { inline_keyboard: [...buttons, [{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Contact requests loaded." });
     }
-    if (action === "consent") {
-      const cat = await catalogue(e);
-      const rows = await e.DB.prepare("SELECT profile_id,contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts").all<any>();
-      const saved = new Map((rows.results || []).map((r:any) => [String(r.profile_id),r]));
-      const buttons = cat.slice(0,20).map((p:any) => { const c:any=saved.get(p.id); const state=c && c.sharing_enabled===1 && c.consent_confirmed_at && c.contact_value ? "enabled" : c && c.contact_value ? "disabled" : "no contact"; return [{text:(p.name+" · "+state).slice(0,60),callback_data:"admin:creator:"+p.id}]; });
-      await say(e,chat,"<b>Creator sharing permissions</b>\nChoose a current public profile. Missing contact or consent is never treated as permission.",{inline_keyboard:[...buttons,[{text:"↩️ Admin Desk",callback_data:"admin:home"}]]});
-      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Creator permissions loaded."});
-    }
-    if (action.startsWith("creator:")) {
-      const profileId=action.slice("creator:".length);
-      if(!/^[A-Za-z0-9._-]{1,50}$/.test(profileId)) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Invalid profile."});
-      const cat=await catalogue(e), profile=cat.find((p:any)=>p.id===profileId);
-      if(!profile) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Profile not found in the current catalogue."});
-      const c=await e.DB.prepare("SELECT contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts WHERE profile_id=?").bind(profileId).first<any>();
-      const enabled=Boolean(c && c.sharing_enabled===1 && c.consent_confirmed_at && c.contact_value);
-      await say(e,chat,"<b>Creator sharing permission</b>\nProfile: "+esc(profile.name)+" (<code>"+esc(profileId)+"</code>)\nContact: "+(c?.contact_value?esc(c.contact_value):"not saved")+"\nSharing: "+(enabled?"enabled with recorded admin attestation":"disabled / not confirmed")+"\n\nOnly enable sharing after the creator has explicitly authorised release of this contact.",{inline_keyboard:[[ {text:"➕ Save/update contact",callback_data:"admin:contacthelp:"+profileId} ],[ {text:"🔐 Confirm creator authorization",callback_data:"admin:consentprompt:"+profileId} ],[ {text:"🚫 Revoke sharing",callback_data:"admin:consentrevoke:"+profileId} ],[ {text:"↩️ Back to profiles",callback_data:"admin:consent"} ]]});
-      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Creator details opened."});
-    }
-    if(action.startsWith("contacthelp:")) { const profileId=action.slice("contacthelp:".length); return say(e,chat,"Save the authorized handle using:\n<code>/setcontact "+esc(profileId)+" @telegram_handle</code>\nThe contact is saved with sharing disabled.",{inline_keyboard:[[ {text:"↩️ Back",callback_data:"admin:creator:"+profileId} ]]}); }
-    if(action.startsWith("consentprompt:")) {
-      const profileId=action.slice("consentprompt:".length), c=await e.DB.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id=?").bind(profileId).first<any>();
-      if(!c || !String(c.contact_value||"").trim()) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Save the authorized contact first."});
-      await say(e,chat,"<b>Confirm creator authorization</b>\nProfile: <code>"+esc(profileId)+"</code>\nContact: "+esc(c.contact_value)+"\n\nConfirm only if the creator explicitly authorized sharing this contact.",{inline_keyboard:[[ {text:"✅ Yes, authorization exists",callback_data:"admin:consentconfirm:"+profileId} ],[ {text:"↩️ Cancel",callback_data:"admin:creator:"+profileId} ]]});
-      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Explicit confirmation required."});
-    }
     if(action.startsWith("consentconfirm:")) {
       const profileId=action.slice("consentconfirm:".length), c=await e.DB.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id=?").bind(profileId).first<any>();
       if(!c || !String(c.contact_value||"").trim()) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"No contact saved; sharing remains disabled."});
