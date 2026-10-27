@@ -1031,7 +1031,18 @@ async function message(e: Env, m: Msg) {
     }
   }
   // Telegram may append @BotName to slash commands. Normalize only the command token.
-  t = t.replace(/^(\/[A-Za-z0-9_]+)@[A-Za-z0-9_]+(?=\s|$)/, "$1");
+  t = t.replace(/^([\/][A-Za-z0-9_]+)@[A-Za-z0-9_]+(?=\s|$)/, "$1");
+  if (user === e.ADMIN_TELEGRAM_ID) {
+    if (/^(?:list|show|view)\s+(?:all\s+)?profiles$/i.test(t)) t = "/profiles";
+    else if (/^(?:list|show|view)\s+(?:recent\s+)?orders$/i.test(t)) t = "/orders";
+    else if (/^delete\s+profile\s+([A-Za-z0-9._-]{1,50})$/i.test(t)) t = "/deleteprofile " + t.match(/^delete\s+profile\s+([A-Za-z0-9._-]{1,50})$/i)[1];
+    else if (/^restore\s+profile\s+([A-Za-z0-9._-]{1,50})$/i.test(t)) t = "/restoreprofile " + t.match(/^restore\s+profile\s+([A-Za-z0-9._-]{1,50})$/i)[1];
+    else if (/^(?:reject|decline)\s+(?:order\s+)?FL-[A-Z0-9]{6}$/i.test(t)) t = "/reject " + t.match(/FL-[A-Z0-9]{6}/i)[0];
+    else if (/^(?:approve|deliver|fulfil|fulfill)\s+(?:order\s+)?FL-[A-Z0-9]{6}$/i.test(t)) t = "deliver " + t.match(/FL-[A-Z0-9]{6}/i)[0];
+    else if (/^(?:send\s+)?broadcast\s*[:\-]?\s+[\s\S]+$/i.test(t)) t = "/broadcast " + t.replace(/^(?:send\s+)?broadcast\s*[:\-]?\s+/i, "");
+    else if (/^message\s+customer\s+FL-[A-Z0-9]{6}\s*[:\-]\s*[\s\S]+$/i.test(t)) t = "/message " + t.replace(/^message\s+customer\s+(FL-[A-Z0-9]{6})\s*[:\-]\s*/i, "$1 ");
+    else if (/^(?:delete|close|cancel)\s+all\s+pending\s+orders$/i.test(t)) t = "/expirepending";
+  }
   if (t.startsWith("/start")) {
     const arg = t.split(/\s+/, 2)[1] || "";
     if (arg.startsWith("contact_")) return start(e, m, arg);
