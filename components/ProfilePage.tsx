@@ -449,15 +449,19 @@ export const ProfilePage = () => {
 
         {/* Actions */}
         <div className="flex items-center gap-4 w-full max-w-sm justify-center mb-3">
-          <button
+          <a
+            href={contactBotUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={`Request contact for ${profile.name} on Telegram`}
             className="animate-wobble flex-1 bg-red-700 hover:bg-red-600 text-white py-2 rounded-full font-bold text-base transition-colors shadow-lg shadow-red-900/40 flex flex-col items-center justify-center gap-0"
           >
             <div className="flex items-center gap-2">
               <MessageSquare size={18} />
-              <span>Subscribe</span>
+              <span>Request Contact</span>
             </div>
-            <span className="text-[11px] font-semibold text-red-200 tracking-wide">{subCount} subscribers</span>
-          </button>
+            <span className="text-[11px] font-semibold text-red-200 tracking-wide">Continue in Telegram</span>
+          </a>
 
           <button
             onClick={handleFavorite}
