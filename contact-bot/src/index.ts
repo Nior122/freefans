@@ -187,7 +187,7 @@ async function sendVoiceReply(e: Env, chat: string | number, text: string) {
     if (!bytes?.byteLength) return false;
     const form = new FormData();
     form.set("chat_id", String(chat));
-    form.set("voice", new Blob([bytes], { type: "audio/mpeg" }), "reply.mp3");
+    form.set("voice", new Blob([new Uint8Array(bytes).buffer as ArrayBuffer], { type: "audio/mpeg" }), "reply.mp3");
     const response = await fetch(`https://api.telegram.org/bot${e.TELEGRAM_BOT_TOKEN}/sendVoice`, { method: "POST", body: form });
     const body = await response.json() as { ok?: boolean };
     return response.ok && body.ok === true;
