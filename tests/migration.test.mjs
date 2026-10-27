@@ -232,7 +232,7 @@ function completeRemoteSchemaSnapshot() {
 test('Remote migration verifier: accepts all required tables, columns, and unique indexes', () => {
   const result = verifyRemoteSchema(completeRemoteSchemaSnapshot());
   assert.equal(result.ok, true);
-  assert.equal(result.verifiedTables.length, 9);
+  assert.equal(result.verifiedTables.length, 11);
 });
 
 test('Remote migration verifier: fails when a required column is missing', () => {
