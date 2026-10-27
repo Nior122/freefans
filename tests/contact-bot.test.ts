@@ -1054,6 +1054,25 @@ test('Dotted profile IDs resolve via the Telegram-safe start parameter; malforme
   }
 });
 
+test('An open contact request does not block a service purchase, and an open service order does not block a contact request', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    await tgPost(env, userMsg(5191, '/start contact_anaimiya'));
+    await tgPost(env, userMsg(5191, '/start service_website'));
+    assert.equal((db.raw.prepare("SELECT COUNT(*) AS n FROM contact_requests WHERE telegram_user_id='5191'").get() as any).n, 1);
+    assert.equal((db.raw.prepare("SELECT COUNT(*) AS n FROM service_orders WHERE telegram_user_id='5191'").get() as any).n, 1);
+    assert.ok(messagesTo(sentTelegramMessages, '5191').some(m => String(m.data.text).includes('Tell me what you need')));
+
+    await tgPost(env, userMsg(5192, '/start service_website'));
+    await tgPost(env, userMsg(5192, '/start contact_rosebeck'));
+    assert.equal((db.raw.prepare("SELECT COUNT(*) AS n FROM service_orders WHERE telegram_user_id='5192'").get() as any).n, 1);
+    assert.equal((db.raw.prepare("SELECT COUNT(*) AS n FROM contact_requests WHERE telegram_user_id='5192'").get() as any).n, 1);
+  } finally {
+    cleanup();
+  }
+});
+
 test('Customer can have up to three unpaid contact requests and still gets payment-check buttons', async () => {
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
