@@ -1680,16 +1680,8 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       if(!c || !String(c.contact_value||"").trim()) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"No contact saved; sharing remains disabled."});
       await e.DB.prepare("UPDATE creator_contacts SET sharing_enabled=1,consent_confirmed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE profile_id=?").bind(profileId).run();
       await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(? ,'creator_consent_confirmed',?,'Admin attested authorization through UI confirmation')").bind(actor,profileId).run();
-      await say(e,chat,"✅ Sharing authorization recorded for <code>"+esc(profileId)+"</code>. This is your attestation that the creator explicitly authorized sharing.",{inline_keyboard:[[ {text:"↩️ Back to creator",callback_data:"admin:creator:"+profileId} ]]});
+      await say(e,chat,"✅ Sharing authorization recorded for <code>"+esc(profileId)+"</code>. This is your attestation that the creator explicitly authorized sharing.");
       return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Authorization attestation recorded."});
-    }
-    if(action.startsWith("consentrevoke:")) {
-      const profileId=action.slice("consentrevoke:".length);
-      const result=await e.DB.prepare("UPDATE creator_contacts SET sharing_enabled=0,consent_confirmed_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE profile_id=?").bind(profileId).run();
-      if(!result.meta?.changes) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"No saved contact to revoke."});
-      await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(? ,'creator_consent_revoked',?,'Admin revoked authorization through UI')").bind(actor,profileId).run();
-      await say(e,chat,"🚫 Sharing disabled and consent revoked for <code>"+esc(profileId)+"</code>.");
-      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Sharing revoked."});
     }
     if (action === "orders") {
       const rows = await e.DB.prepare("SELECT id,service_id,status,checkout_code,payment_reference FROM service_orders ORDER BY created_at DESC LIMIT 12").all<any>();
