@@ -10,7 +10,7 @@
 ## 1. Release candidate verification
 
 - [x] Review PR #33 and its final diff: https://github.com/Nior122/freefans/pull/33
-- [x] Latest observed CI run #178 passed automated tests, TypeScript checking, and Worker compile/Wrangler dry-run for the current release-candidate head.
+- [x] Latest observed CI run #179 passed automated tests, TypeScript checking, and Worker compile/Wrangler dry-run for the release-candidate code plus checklist.
 - [ ] Re-check that the latest PR head still has a successful CI run immediately before merge (repeat if any new commit is pushed).
 - [x] Confirm PR base is `fan`, head is `fix/admin-fulfillment-composer`, and the nine changed files are expected.
 - [x] Confirm the PR changes no Zapier files; this release does not require Zapier edits.
