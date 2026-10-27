@@ -1,6 +1,9 @@
 name: Deploy FansLeak contact bot
 
 on:
+  push:
+    branches:
+      - fan
   workflow_dispatch:
     inputs:
       contact_selar_checkout_url:
