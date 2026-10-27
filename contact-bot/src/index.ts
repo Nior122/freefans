@@ -456,8 +456,8 @@ async function start(e: Env, m: Msg, payload: string) {
     await notifyAdminIfConfigured(e, "Setup required: configure the Selar checkout URL and product code.");
     return;
   }
-  const activeService = await e.DB.prepare("SELECT id FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
-  if (activeService) return say(e, chat, "You already have a service purchase in progress. Finish it or contact support before starting a contact request.");
+  // Contact requests and service orders are independent purchases. An open order
+  // in one flow must not block the customer from starting the other flow.
   // Up to three unpaid contact requests are allowed per Telegram account.
   // A verified payment frees a slot; open requests never block conversation.
   const outstanding = await e.DB.prepare("SELECT COUNT(*) AS count FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment')").bind(user).first<any>();
@@ -531,8 +531,7 @@ async function startService(e: Env, m: Msg, serviceId: string) {
     await notifyAdminIfConfigured(e, "Service purchase setup required: configure the service Selar checkout URL and product code.");
     return;
   }
-  const activeContact = await e.DB.prepare("SELECT id FROM contact_requests WHERE telegram_user_id=? AND status IN('awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
-  if (activeContact) return say(e, chat, "You already have a FansLeak contact request in progress. Finish it or contact support before starting a service purchase.");
+  // Service orders and creator contact requests are independent purchases.
   const active = await e.DB.prepare("SELECT id FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
   if (active) return say(e, chat, "You already have a service order in progress. Finish it or contact support before starting another.");
   const id = crypto.randomUUID();
