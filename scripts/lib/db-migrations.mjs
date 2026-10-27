@@ -145,6 +145,30 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0014_remove_creator_sharing_permissions.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0015_service_delivery_draft_media',
+    description: 'Optional single media attachment for service fulfilment drafts',
+    apply(db) {
+      const columns = getTableColumns(db, 'service_delivery_drafts');
+      if (!columns.includes('media_kind')) {
+        db.exec("ALTER TABLE service_delivery_drafts ADD COLUMN media_kind TEXT CHECK(media_kind IS NULL OR media_kind IN ('photo','document'));");
+      }
+      if (!columns.includes('media_file_id')) {
+        db.exec('ALTER TABLE service_delivery_drafts ADD COLUMN media_file_id TEXT;');
+      }
+      if (!columns.includes('media_mime_type')) {
+        db.exec('ALTER TABLE service_delivery_drafts ADD COLUMN media_mime_type TEXT;');
+      }
+    }
+  },
+  {
+    version: '0016_admin_draft_recovery_actions',
+    description: 'Allow audited recovery confirmations for stale locked drafts',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0016_admin_draft_recovery_actions.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
@@ -281,8 +305,9 @@ export const EXPECTED_SCHEMA = {
     'delivered_at', 'created_at', 'updated_at'
   ],
   service_delivery_drafts: [
-    'id', 'service_order_id', 'admin_telegram_id', 'message_text', 'status',
-    'expires_at', 'delivered_at', 'created_at', 'updated_at'
+    'id', 'service_order_id', 'admin_telegram_id', 'message_text', 'media_kind',
+    'media_file_id', 'media_mime_type', 'status', 'expires_at', 'delivered_at',
+    'created_at', 'updated_at'
   ],
   admin_message_drafts: [
     'id', 'order_id', 'order_kind', 'admin_telegram_id', 'telegram_user_id',

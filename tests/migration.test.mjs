@@ -40,7 +40,9 @@ test('Migration: fresh database migrates to fully verified schema', () => {
     '0011_admin_broadcast_drafts',
     '0012_hidden_profiles',
     '0013_admin_pending_actions',
-    '0014_remove_creator_sharing_permissions'
+    '0014_remove_creator_sharing_permissions',
+    '0015_service_delivery_draft_media',
+    '0016_admin_draft_recovery_actions'
   ]);
 
   const verified = verifySchema(db);
@@ -154,6 +156,38 @@ test('Migration 0010: only one editable general support draft is allowed per adm
   insertDraft('support-draft-other-admin', '10002', 'draft');
   db.prepare("UPDATE admin_message_drafts SET status='cancelled' WHERE id='support-draft-1'").run();
   insertDraft('support-draft-3', '10001', 'draft');
+});
+
+test('Migrations 0015-0016: service media columns and draft-recovery confirmations preserve existing rows', () => {
+  const db = new DatabaseSync(':memory:');
+  applyAllMigrations(db);
+
+  db.prepare(`
+    INSERT INTO service_delivery_drafts
+      (id,service_order_id,admin_telegram_id,message_text,media_kind,media_file_id,media_mime_type,status,expires_at)
+    VALUES (?,?,?,?,?,?,?,?,?)
+  `).run('service-draft-media', 'service-order-media', '10001', 'Ready', 'photo', 'synthetic-file-id', 'image/jpeg', 'draft', '2999-01-01 00:00:00');
+
+  db.prepare(`
+    INSERT INTO admin_pending_actions
+      (id,admin_telegram_id,action,payload,status,expires_at)
+    VALUES (?,?,?,?,?,?)
+  `).run('recovery-action-1', '10001', 'recover_draft', '{"kind":"service","draftId":"service-draft-media","updatedAt":"2026-01-01T00:00:00.000Z"}', 'pending', '2999-01-01 00:00:00');
+
+  const draft = db.prepare("SELECT media_kind,media_file_id,media_mime_type FROM service_delivery_drafts WHERE id='service-draft-media'").get();
+  assert.equal(draft.media_kind, 'photo');
+  assert.equal(draft.media_file_id, 'synthetic-file-id');
+  assert.equal(draft.media_mime_type, 'image/jpeg');
+
+  assert.throws(
+    () => db.prepare(`
+      INSERT INTO admin_pending_actions
+        (id,admin_telegram_id,action,payload,status,expires_at)
+      VALUES (?,?,?,?,?,?)
+    `).run('recovery-action-2', '10001', 'hide_profile', 'anaimiya', 'pending', '2999-01-01 00:00:00'),
+    /UNIQUE constraint failed/i,
+    'Rebuilding pending actions must preserve the one-pending-confirmation guard'
+  );
 });
 
 test('Migration 0005: pre-existing duplicate active rows block migration without data changes', () => {

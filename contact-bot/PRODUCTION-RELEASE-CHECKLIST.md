@@ -106,12 +106,28 @@ Fill in after the authorized release:
 
 Do not check these from local tests alone. Record the merge SHA, manual deployment run, and owner smoke-test results in the release report.
 
-- [ ] The reviewed Release 1 PR is merged to `fan`, and the production workflow was dispatched manually from `fan` after merge.
-- [ ] Live `/health` responds successfully after the manual deployment.
-- [ ] A client account sending `/creators` and `/profiles` receives only the website direction and no profile names/IDs.
-- [ ] The configured admin in the private Admin Desk chat can view `/profiles` and search with `/profiles SEARCH_TEXT`.
-- [ ] `/setcontact` explains that it is retired and creates/sends nothing.
-- [ ] A synthetic email-only Selar event does not attach a sale; a unique FL code or exact saved checkout name still requires manual admin verification.
-- [ ] `/expirepending` previews exact counts, excludes `payment_verified` and `payment_review`, and does not close an order created after preview.
-- [ ] A manually verified synthetic request can be fulfilled with one admin-composed text or video only after **Prepare delivery** → preview → explicit send.
-- [ ] A voice-transcribed YES or verification command does not execute; a typed/button confirmation is required.
+Release 1 evidence recorded after owner testing: PR #42 merged at `ccd85b67b6fa2910d7bfa4ad39f145b152983162`; owner-dispatched deployment run `40522191466` succeeded; public `/health` and `/public/hidden-profiles` responded; owner Smoke Tests 1–7 passed for the core flows below. Unchecked items remain only partially live-verified as noted.
+
+- [x] The reviewed Release 1 PR is merged to `fan`, and the production workflow was dispatched manually from `fan` after merge.
+- [x] Live `/health` responds successfully after the manual deployment.
+- [x] A client account sending `/creators` and `/profiles` receives only the website direction and no profile names/IDs.
+- [x] The configured admin in the private Admin Desk chat can view `/profiles` and search with `/profiles SEARCH_TEXT`.
+- [x] `/setcontact` explains that it is retired and creates/sends nothing.
+- [ ] A synthetic email-only Selar event does not attach a sale; a unique FL code or exact saved checkout name still requires manual admin verification. *(Automated/deployed-code evidence only; no live email-only webhook event was sent.)*
+- [ ] `/expirepending` previews exact counts, excludes `payment_verified` and `payment_review`, and does not close an order created after preview. *(Live preview/cancel passed; full production closure and the post-preview-order case remain automated-only.)*
+- [x] A manually verified synthetic request can be fulfilled with one admin-composed text or video only after **Prepare delivery** → preview → explicit send. *(Live-verified with text exactly once and final status `approved`; live video delivery remains untested.)*
+- [x] A voice-transcribed YES or verification command does not execute; a typed/button confirmation is required.
+
+## 9. Phase B Release 2 gates (complete only with live evidence)
+
+Do not check these from the automated suite alone. Record the Release 2 PR/merge SHA, manual deployment run, observed `schema_migrations` entries for `0015_service_delivery_draft_media` and `0016_admin_draft_recovery_actions`, health checks, and sequential owner smoke-test results in the release report. Merging does not deploy the Worker or prove the website change is live.
+
+- [ ] The reviewed Release 2 PR is merged to `fan`, the Worker workflow is dispatched manually from `fan`, and Cloudflare Pages has deployed the matching website build.
+- [ ] Post-deployment `/health` and `/public/hidden-profiles` respond successfully, and the deployment log/schema verification proves migrations 0015 and 0016 were applied without dropping or recreating production data.
+- [ ] With a synthetic service composer open, request-delivery, support, and broadcast composers cannot open; after cancelling it, exactly one other composer can open.
+- [ ] With a request/service fulfilment draft open, bare typed `YES` neither becomes draft text nor sends anything; Preview → explicit Send is required.
+- [ ] `/orders SEARCH` and `/order FL_CODE` show the intended synthetic service order, payment evidence, draft state, and—only after manual verification—the saved service request text. A non-admin cannot obtain that inspection.
+- [ ] A manually verified synthetic service order can be fulfilled by `/deliver FL_CODE`, ordinary text replacement, one synthetic video attachment, Preview, and explicit Send exactly once; its final status is `fulfilled`.
+- [ ] Re-tapping stale Send buttons reports **already sent**, **already cancelled**, or **expired** as appropriate and never duplicates a customer message.
+- [ ] `/profiles hidden`, `/profiles all SEARCH`, and `/profile PROFILE_ID` agree with the live source catalogue and D1 override state; reversible hide/restore works and a hidden profile's direct website URL redirects home after a successful visibility check. This is not represented as physical source deletion.
+- [ ] On a synthetic stale `sending` draft only, `/drafts` shows the lock and `/recoverdraft …` requires a separate inspected-not-delivered confirmation, cancels only that draft, creates an audit row, changes no order/payment status, and sends nothing.
