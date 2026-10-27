@@ -169,11 +169,6 @@ async function telegramFileBytes(e: Env, fileId: string, maxBytes = 10 * 1024 * 
   if (bytes.byteLength > maxBytes) throw new Error("Media exceeds the supported size limit");
   return bytes;
 }
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + 0x8000, bytes.length)));
-  return btoa(binary);
-}
 async function sendVoiceReply(e: Env, chat: string | number, text: string) {
   if (!e.AI || !text.trim()) return false;
   try {
