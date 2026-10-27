@@ -202,6 +202,13 @@ export function migrateRemote() {
     runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0010_admin_message_drafts')");
   }
 
+  // Migration 11: admin-confirmed broadcast drafts with optional media.
+  if (!applied.has('0011_admin_broadcast_drafts')) {
+    console.log('[migrate-d1] Applying 0011_admin_broadcast_drafts migration...');
+    runWranglerFile(path.join(ROOT, 'contact-bot', 'migrations', '0011_admin_broadcast_drafts.sql'));
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0011_admin_broadcast_drafts')");
+  }
+
   // Final complete schema verification. These expectations are shared with the
   // local migration verifier to prevent the two definitions drifting apart.
   console.log('[migrate-d1] Verifying complete schema...');
