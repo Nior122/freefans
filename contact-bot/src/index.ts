@@ -991,12 +991,11 @@ async function message(e: Env, m: Msg) {
     }
   }
   if (!t) return;
-  if (user === e.ADMIN_TELEGRAM_ID && chat === user && /^(?:yes|yes send|confirm|send it|go ahead)[.! ]*$/i.test(t)) {
+  if (user === e.ADMIN_TELEGRAM_ID && chat === user && /^(?:yes|yes please|confirm|confirm it|go ahead|do it)[.! ]*$/i.test(t)) {
+    const pending = await e.DB.prepare("SELECT id,admin_telegram_id,action,payload,status,expires_at FROM admin_pending_actions WHERE admin_telegram_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
+    if (pending) { await confirmPendingAdminAction(e, user, chat, String(pending.id)); return; }
     const broadcastDraft = await activeBroadcastDraft(e, user);
-    if (broadcastDraft?.status === "draft") {
-      await executeBroadcast(e, user, chat, broadcastDraft);
-      return;
-    }
+    if (broadcastDraft?.status === "draft") { await executeBroadcast(e, user, chat, broadcastDraft); return; }
   }
   if (user === e.ADMIN_TELEGRAM_ID && !t.startsWith("/") && chat === user) {
     const broadcastDraft = await activeBroadcastDraft(e, user);
@@ -1094,12 +1093,24 @@ async function message(e: Env, m: Msg) {
   }
   if (user === e.ADMIN_TELEGRAM_ID && /^\/deleteprofile\s+/i.test(t)) {
     const match = t.match(/^\/deleteprofile\s+([A-Za-z0-9._-]{1,50})$/i);
-    if (!match) return say(e, chat, "Usage: /deleteprofile PROFILE_ID — removes the profile from the live site catalogue after confirmation.");
+    if (!match) return say(e, chat, "Usage: /deleteprofile PROFILE_ID");
+    const profileId = match[1];
     const cat = await catalogue(e);
-    const profile = cat.find(p => p.id === match[1]);
+    const profile = cat.find(p => p.id === profileId);
     if (!profile) return say(e, chat, "That profile is not currently visible. Check /profiles or use /restoreprofile PROFILE_ID.");
-    return say(e, chat, "⚠️ <b>Remove website profile?</b>\n" + esc(profile.name) + " (<code>" + esc(profile.id) + "</code>) will be hidden from the live profile listings and Telegram request catalogue. The source profile files will remain in GitHub.", {
-      inline_keyboard: [[{ text: "🗑️ Confirm hide profile", callback_data: "profiledelete:confirm:" + profile.id }], [{ text: "Cancel", callback_data: "profiledelete:cancel:" + profile.id }]]
+    const id = await createPendingAdminAction(e, user, "hide_profile", profileId);
+    if (!id) return say(e, chat, "You already have an admin action awaiting confirmation. Reply YES or cancel it before starting another.");
+    return say(e, chat, "⚠️ <b>Remove website profile?</b>\n" + esc(profile.name) + " (<code>" + esc(profile.id) + "</code>) will be hidden from public listings and the Telegram request catalogue. The source profile files remain recoverable in GitHub.\n\nReply <b>YES</b> or use the button to confirm.", {
+      inline_keyboard: [[{ text: "🗑️ Confirm hide profile", callback_data: "admin-action:confirm:" + id }], [{ text: "Cancel", callback_data: "admin-action:cancel:" + id }]]
+    });
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && t === "/expirepending") {
+    const contacts = await e.DB.prepare("SELECT COUNT(*) AS total FROM contact_requests WHERE status IN ('awaiting_email','pending_payment','awaiting_bank_reference','pending_manual_payment')").first<any>();
+    const services = await e.DB.prepare("SELECT COUNT(*) AS total FROM service_orders WHERE status IN ('awaiting_request','awaiting_email','pending_payment','payment_verified','payment_review')").first<any>();
+    const id = await createPendingAdminAction(e, user, "close_pending_orders", null);
+    if (!id) return say(e, chat, "You already have an admin action awaiting confirmation. Reply YES or cancel it before starting another.");
+    return say(e, chat, "⚠️ <b>Close all pending orders?</b>\nContact requests to expire: <b>" + Number(contacts?.total || 0) + "</b>\nService orders to cancel: <b>" + Number(services?.total || 0) + "</b>\n\nThis retains audit records and does not verify or approve payments. Reply <b>YES</b> or use the button to confirm.", {
+      inline_keyboard: [[{ text: "✅ Confirm close pending orders", callback_data: "admin-action:confirm:" + id }], [{ text: "Cancel", callback_data: "admin-action:cancel:" + id }]]
     });
   }
   if (user === e.ADMIN_TELEGRAM_ID && /^\/restoreprofile\s+/i.test(t)) {
@@ -1416,6 +1427,57 @@ async function message(e: Env, m: Msg) {
   }
   return aiReply(e, chat, t, "", voiceReply);
 }
+async function createPendingAdminAction(e: Env, actor: string, action: "hide_profile" | "close_pending_orders", payload: string | null): Promise<string | null> {
+  const current = await e.DB.prepare("SELECT id FROM admin_pending_actions WHERE admin_telegram_id=? AND status='pending' LIMIT 1").bind(actor).first<any>();
+  if (current) return null;
+  const id = crypto.randomUUID();
+  await e.DB.prepare("INSERT INTO admin_pending_actions(id,admin_telegram_id,action,payload,status,expires_at) VALUES(?,?,?,?,'pending',datetime('now','+10 minutes'))").bind(id, actor, action, payload).run();
+  return id;
+}
+async function confirmPendingAdminAction(e: Env, actor: string, chat: string | number, id: string): Promise<boolean> {
+  const action = await e.DB.prepare("SELECT id,admin_telegram_id,action,payload,status,expires_at FROM admin_pending_actions WHERE id=?").bind(id).first<any>();
+  if (!action || String(action.admin_telegram_id) !== actor || action.status !== "pending") {
+    await say(e, chat, "That confirmation is no longer active. Nothing was changed.");
+    return false;
+  }
+  if (Date.parse(String(action.expires_at).replace(" ", "T") + (String(action.expires_at).endsWith("Z") ? "" : "Z")) < Date.now()) {
+    await e.DB.prepare("UPDATE admin_pending_actions SET status='expired',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending'").bind(id).run();
+    await say(e, chat, "That confirmation expired. Nothing was changed.");
+    return false;
+  }
+  const claimed = await e.DB.prepare("UPDATE admin_pending_actions SET status='executing',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending' AND admin_telegram_id=?").bind(id, actor).run();
+  if (!claimed.meta?.changes) { await say(e, chat, "That action is already being handled. Nothing was repeated."); return false; }
+  try {
+    if (action.action === "hide_profile") {
+      const profileId = String(action.payload || "");
+      if (!/^[A-Za-z0-9._-]{1,50}$/.test(profileId)) throw new Error("invalid_profile_id");
+      await e.DB.prepare("INSERT OR IGNORE INTO hidden_profiles(profile_id,hidden_by_admin,reason) VALUES(?,?,?)").bind(profileId, actor, "Hidden by admin from Telegram Admin Desk").run();
+      await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,profile_id,details) VALUES(?,'profile_hidden',?,'Admin hid profile from public site listings and Telegram catalogue')").bind(actor, profileId).run();
+      await e.DB.prepare("UPDATE admin_pending_actions SET status='completed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='executing'").bind(id).run();
+      await say(e, chat, "🗑️ Profile <code>" + esc(profileId) + "</code> is hidden from website listings and Telegram requests. Refresh the website to see the change; source files remain recoverable in GitHub.");
+      return true;
+    }
+    if (action.action === "close_pending_orders") {
+      const contacts = await e.DB.prepare("SELECT id,checkout_code,telegram_chat_id FROM contact_requests WHERE status IN ('awaiting_email','pending_payment','awaiting_bank_reference','pending_manual_payment')").all<any>();
+      const services = await e.DB.prepare("SELECT id,checkout_code,telegram_chat_id FROM service_orders WHERE status IN ('awaiting_request','awaiting_email','pending_payment','payment_verified','payment_review')").all<any>();
+      const c = await e.DB.prepare("UPDATE contact_requests SET status='expired',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE status IN ('awaiting_email','pending_payment','awaiting_bank_reference','pending_manual_payment')").run();
+      const sv = await e.DB.prepare("UPDATE service_orders SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE status IN ('awaiting_request','awaiting_email','pending_payment','payment_verified','payment_review')").run();
+      const customerChats = [...new Set([...(contacts.results || []), ...(services.results || [])].map((r:any) => String(r.telegram_chat_id)).filter(Boolean))];
+      for (const customerChat of customerChats) await sayBestEffort(e, customerChat, "Your pending FansLeak order was closed by support. Reply here if you need help.");
+      await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,details) VALUES(?,'admin_closed_pending_orders',?)").bind(actor, "Closed pending contact requests=" + Number(c.meta?.changes || 0) + ", service orders=" + Number(sv.meta?.changes || 0)).run();
+      await e.DB.prepare("UPDATE admin_pending_actions SET status='completed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='executing'").bind(id).run();
+      await say(e, chat, "✅ Pending orders closed. Contact requests expired: <b>" + Number(c.meta?.changes || 0) + "</b>; service orders cancelled: <b>" + Number(sv.meta?.changes || 0) + "</b>. Customers were notified. Records were retained for audit; no payment was verified.");
+      return true;
+    }
+    throw new Error("unsupported_admin_action");
+  } catch (error) {
+    await e.DB.prepare("UPDATE admin_pending_actions SET status='failed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='executing'").bind(id).run();
+    await notifyAdminIfConfigured(e, "⚠️ Admin action failed. Reference: <code>" + esc(id) + "</code>. No success was reported; inspect the audit and database state before retrying.");
+    console.error("Admin action failed", String(error));
+    return false;
+  }
+}
+
 async function executeBroadcast(e: Env, actor: string, chat: string | number, draft: AdminBroadcastDraft): Promise<boolean> {
   if (draft.status !== "draft") { await say(e, chat, "This broadcast is no longer editable. It will not be sent again."); return false; }
   if (Date.parse(draft.expires_at.replace(" ", "T") + (draft.expires_at.endsWith("Z") ? "" : "Z")) < Date.now()) {
@@ -1448,6 +1510,18 @@ async function executeBroadcast(e: Env, actor: string, chat: string | number, dr
 
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
+  if (data.startsWith("admin-action:")) {
+    if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin private chat only." });
+    const match = data.match(/^admin-action:(confirm|cancel):([0-9a-f-]{36})$/i);
+    if (!match) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Invalid admin action." });
+    if (match[1].toLowerCase() === "cancel") {
+      const cancelled = await e.DB.prepare("UPDATE admin_pending_actions SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND admin_telegram_id=? AND status='pending'").bind(match[2], actor).run();
+      await say(e, chat, cancelled.meta?.changes ? "Action cancelled. Nothing was changed." : "That action is no longer pending.");
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Cancellation processed." });
+    }
+    await confirmPendingAdminAction(e, actor, chat, match[2]);
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin action processed." });
+  }
   if (data.startsWith("profiledelete:")) {
     if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin private chat only." });
     const match = data.match(/^profiledelete:(confirm|cancel):([A-Za-z0-9._-]{1,50})$/i);
