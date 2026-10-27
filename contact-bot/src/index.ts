@@ -1095,7 +1095,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     }
     return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Unknown admin menu action." });
   }
-  const m = data.match(/^(approve|reject|selarverify|serviceverify):([0-9a-f-]{36})$/i);
+  // All payment-verification, approval, and rejection callbacks are admin-only.\n  if (actor !== e.ADMIN_TELEGRAM_ID) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin access only." });\n  const m = data.match(/^(approve|reject|selarverify|serviceverify):([0-9a-f-]{36})$/i);
   if (!m) { await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Unknown action." }); return; }
   const action = m[1].toLowerCase(), id = m[2];
   if (action === "serviceverify") {
