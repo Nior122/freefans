@@ -859,8 +859,8 @@ async function startService(e: Env, m: Msg, serviceId: string) {
     return;
   }
   // Service orders and creator contact requests are independent purchases.
-  const active = await e.DB.prepare("SELECT id FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first();
-  if (active) return say(e, chat, "You already have a service order in progress. Finish it or contact support before starting another.");
+  const active = await e.DB.prepare("SELECT id,checkout_code,status,service_id,request_text FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
+  if (active) return say(e, chat, "👋 Welcome back — your existing service order is still here.\n\nOrder code: <code>" + esc(String(active.checkout_code || "not assigned")) + "</code>\nStatus: <b>" + esc(String(active.status)) + "</b>\n\nYou can keep chatting with me normally about this order. If you are describing the work, tell me what you need; when ready to pay, type PAY. I won’t create a duplicate order.");
   const id = crypto.randomUUID();
   let inserted = false;
   for (let attempt = 0; attempt < 3 && !inserted; attempt++) {
@@ -877,7 +877,7 @@ async function startService(e: Env, m: Msg, serviceId: string) {
     } catch {
       let raced: unknown = null;
       try { raced = await e.DB.prepare("SELECT id FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') LIMIT 1").bind(user).first(); } catch { /* fall through to the failure message below */ }
-      if (raced) return say(e, chat, "You already have a service order in progress. Finish it or contact support before starting another.");
+      if (raced) return say(e, chat, "👋 You already have a service order open. I can still help you here — continue describing what you need, or type PAY when you are ready to check out.");
     }
   }
   if (!inserted) return say(e, chat, "I couldn't start your service order just now. Please try again in a moment.");
