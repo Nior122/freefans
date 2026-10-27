@@ -58,9 +58,9 @@ Use only the owner's own Telegram account and synthetic/test records. Do not use
 - [ ] Confirm a sale/webhook match alone does not mark payment verified; manual payment verification remains required.
 - [ ] Verify an unverified request cannot be delivered.
 - [ ] Verify missing/revoked creator sharing consent blocks preview/send; re-enable sharing only after the creator has explicitly authorized it.
-- [ ] Create a contact delivery draft; confirm text/media are previewed, the draft expires, and no contact is sent until the explicit send button is pressed.
+- [ ] Create a contact delivery draft; confirm only one editable contact draft can be active for the admin at a time, text/media are previewed, the draft expires, and no contact is sent until the explicit send button is pressed.
 - [ ] Create a service fulfilment draft; confirm the service order remains `payment_verified` until explicit confirmation.
-- [ ] Verify a non-admin cannot invoke admin commands or callback buttons.
+- [ ] Verify a non-admin cannot invoke admin commands or payment-verification, approval, rejection, or delivery callback buttons.
 - [ ] Verify an uncertain Telegram send outcome remains locked as `sending`; inspect Telegram before any manual recovery. Do not blindly retry.
 - [ ] Confirm admin audit records exist for consent changes and completed/cancelled deliveries.
 - [ ] Confirm the existing Selar → Zapier/Worker reconciliation path remains unchanged and no secrets or private creator handles appear in logs or public pages.
