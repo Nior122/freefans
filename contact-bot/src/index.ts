@@ -996,6 +996,8 @@ async function message(e: Env, m: Msg) {
     if (pending) { await confirmPendingAdminAction(e, user, chat, String(pending.id)); return; }
     const broadcastDraft = await activeBroadcastDraft(e, user);
     if (broadcastDraft?.status === "draft") { await executeBroadcast(e, user, chat, broadcastDraft); return; }
+    const supportDraft = await activeAdminMessageDraft(e, user);
+    if (supportDraft?.status === "draft") { await executeSupportDraft(e, user, chat, supportDraft.id); return; }
   }
   if (user === e.ADMIN_TELEGRAM_ID && !t.startsWith("/") && chat === user) {
     const broadcastDraft = await activeBroadcastDraft(e, user);
@@ -1515,6 +1517,37 @@ async function executeBroadcast(e: Env, actor: string, chat: string | number, dr
   return failed === 0;
 }
 
+async function executeSupportDraft(e: Env, actor: string, chat: string | number, draftId: string): Promise<boolean> {
+  const context = await loadAdminMessageDraftContext(e, draftId);
+  if (!context || String(context.draft.admin_telegram_id) !== actor) { await say(e, chat, "Support draft not found for this admin."); return false; }
+  const draft = context.draft, order = context.order;
+  if (await expireAdminMessageDraftIfNeeded(e, draft)) { await say(e, chat, "Support draft expired. Nothing was sent."); return false; }
+  if (draft.status !== "draft") { await say(e, chat, draft.status === "sending" ? "This support message is locked while its delivery outcome is checked." : "Support draft is no longer active."); return false; }
+  if (!order || String(order.telegram_user_id) !== String(draft.telegram_user_id) || String(order.telegram_chat_id) !== String(draft.telegram_chat_id)) { await say(e, chat, "The selected order or customer destination changed. Nothing was sent."); return false; }
+  const problem = adminMessageSendProblem(draft);
+  if (problem) { await say(e, chat, problem); return false; }
+  const orderTable = draft.order_kind === "contact" ? "contact_requests" : "service_orders";
+  const claimed = await e.DB.prepare("UPDATE admin_message_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=? AND message_text IS ? AND media_kind IS ? AND media_file_id IS ? AND media_mime_type IS ? AND EXISTS(SELECT 1 FROM " + orderTable + " o WHERE o.id=admin_message_drafts.order_id AND o.telegram_user_id=admin_message_drafts.telegram_user_id AND o.telegram_chat_id=admin_message_drafts.telegram_chat_id)")
+    .bind(draftId, actor, draft.message_text || null, draft.media_kind || null, draft.media_file_id || null, draft.media_mime_type || null).run();
+  if (!claimed.meta?.changes) { await say(e, chat, "Support draft changed, is already sending, or its destination no longer matches."); return false; }
+  const body = adminMessageBody(draft);
+  try {
+    if (draft.media_file_id && draft.media_kind === "photo") await tg(e, "sendPhoto", { chat_id: draft.telegram_chat_id, photo: draft.media_file_id, ...(body ? { caption: adminMessageCaption(body), parse_mode: "HTML" } : {}) });
+    else if (draft.media_file_id && draft.media_kind === "document") await tg(e, "sendDocument", { chat_id: draft.telegram_chat_id, document: draft.media_file_id, ...(body ? { caption: adminMessageCaption(body), parse_mode: "HTML" } : {}) });
+    else await say(e, draft.telegram_chat_id, ADMIN_MESSAGE_HEADER + "\n\n" + esc(body));
+  } catch {
+    try { await auditAdminMessageDraft(e, actor, "admin_support_message_uncertain", draft, order, "Telegram support-message outcome uncertain for " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + "; draft locked as sending; " + adminMessageContentDetails(draft)); } catch {}
+    try { await notifyAdminIfConfigured(e, "⚠️ Customer support message outcome is uncertain for " + draft.order_kind + " order <code>" + esc(String(order.checkout_code || draft.checkout_code || draft.order_id)) + "</code>. The draft remains locked to prevent duplicates. Inspect the customer conversation before any retry."); } catch {}
+    await say(e, chat, "⚠️ Message outcome uncertain. The draft is locked to prevent duplicate sends; inspect the customer conversation before retrying.");
+    return false;
+  }
+  const sent = await e.DB.prepare("UPDATE admin_message_drafts SET status='sent',delivered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draftId).run();
+  await auditAdminMessageDraft(e, actor, "admin_message_customer", draft, order, "Admin sent customer support message for " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + "; " + adminMessageContentDetails(draft));
+  if (!sent.meta?.changes) await notifyAdminIfConfigured(e, "A customer support message was sent for <code>" + esc(String(order.checkout_code || draft.order_id)) + "</code>, but the draft status changed concurrently. Inspect the audit before any retry.");
+  await say(e, chat, "✅ Support message sent for order <code>" + esc(String(order.checkout_code || order.id)) + "</code>.");
+  return true;
+}
+
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
   if (data.startsWith("admin-action:")) {
@@ -1688,41 +1721,8 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Preview only — nothing has been sent." });
     }
 
-    const problem = adminMessageSendProblem(draft);
-    if (problem) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: problem.slice(0, 200) });
-
-    const orderTable = draft.order_kind === "contact" ? "contact_requests" : "service_orders";
-    const claimed = await e.DB.prepare(`UPDATE admin_message_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=? AND message_text IS ? AND media_kind IS ? AND media_file_id IS ? AND media_mime_type IS ? AND EXISTS(SELECT 1 FROM ${orderTable} o WHERE o.id=admin_message_drafts.order_id AND o.telegram_user_id=admin_message_drafts.telegram_user_id AND o.telegram_chat_id=admin_message_drafts.telegram_chat_id)`)
-      .bind(draftId, actor, draft.message_text || null, draft.media_kind || null, draft.media_file_id || null, draft.media_mime_type || null)
-      .run();
-    if (!claimed.meta?.changes) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support draft changed, is already sending, or its destination no longer matches." });
-
-    const body = adminMessageBody(draft);
-    try {
-      if (draft.media_file_id && draft.media_kind === "photo") {
-        await tg(e, "sendPhoto", { chat_id: draft.telegram_chat_id, photo: draft.media_file_id, ...(body ? { caption: adminMessageCaption(body), parse_mode: "HTML" } : {}) });
-      } else if (draft.media_file_id && draft.media_kind === "document") {
-        await tg(e, "sendDocument", { chat_id: draft.telegram_chat_id, document: draft.media_file_id, ...(body ? { caption: adminMessageCaption(body), parse_mode: "HTML" } : {}) });
-      } else {
-        await say(e, draft.telegram_chat_id, ADMIN_MESSAGE_HEADER + "\n\n" + esc(body));
-      }
-    } catch {
-      try {
-        await auditAdminMessageDraft(e, actor, "admin_support_message_uncertain", draft, order, "Telegram support-message outcome uncertain for " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + "; draft locked as sending; " + adminMessageContentDetails(draft));
-      } catch { /* Preserve the locked sending state even if audit insertion fails. */ }
-      try {
-        await notifyAdminIfConfigured(e, "⚠️ Customer support message outcome is uncertain for " + draft.order_kind + " order <code>" + esc(String(order.checkout_code || draft.checkout_code || draft.order_id)) + "</code>. The draft remains locked as sending to prevent a duplicate. Inspect the customer conversation before any manual retry.");
-      } catch { /* The callback response below still tells the acting admin. */ }
-      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support-message outcome uncertain. Draft locked to prevent duplicates." });
-    }
-
-    const sent = await e.DB.prepare("UPDATE admin_message_drafts SET status='sent',delivered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draftId).run();
-    await auditAdminMessageDraft(e, actor, "admin_message_customer", draft, order, "Admin sent customer support message for " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + "; " + adminMessageContentDetails(draft));
-    if (!sent.meta?.changes) {
-      try { await notifyAdminIfConfigured(e, "A customer support message was sent for <code>" + esc(String(order.checkout_code || draft.order_id)) + "</code>, but the draft status changed concurrently. Inspect the audit before any retry."); } catch { /* The audit row above is the primary record. */ }
-    }
-    await say(e, chat, "✅ Support message sent for order <code>" + esc(String(order.checkout_code || order.id)) + "</code>.");
-    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support message sent once and recorded." });
+    await executeSupportDraft(e, actor, chat, draftId);
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support send action processed." });
   }
   if (data.startsWith("done:") || data.startsWith("paid:")) {
     if (!u.message || String(u.message.chat.id) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Open the bot chat to continue." });
