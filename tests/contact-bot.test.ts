@@ -25,6 +25,7 @@ function createTestDb() {
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0011_admin_broadcast_drafts.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0012_hidden_profiles.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0013_admin_pending_actions.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0014_remove_creator_sharing_permissions.sql'), 'utf8'));
 
   return {
     raw: db,
@@ -807,9 +808,8 @@ test('Admin natural-language queries are allowlisted and command suffixes are no
     await tgPost(env,adminMsg('show pending contact requests'));
     assert.ok(sentTelegramMessages.some(m=>String(m.data.text||'').includes('FL-AI0001')),'allowlisted read-only query returns actual database data');
     await tgPost(env,adminMsg('/setcontact@KasiQueenbot anaimiya @anaimiya_real'));
-    const contact=db.raw.prepare("SELECT contact_value,sharing_enabled,consent_confirmed_at FROM creator_contacts WHERE profile_id='anaimiya'").get() as any;
+    const contact=db.raw.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id='anaimiya'").get() as any;
     assert.equal(contact.contact_value,'@anaimiya_real');
-    assert.equal(contact.sharing_enabled,1,'saving a contact is now a single admin-managed configuration step; there is no separate sharing-permission workflow');
     await tgPost(env,callbackFrom(9999,'admin:consentconfirm:anaimiya'));
     assert.equal(db.raw.prepare("SELECT COUNT(*) AS n FROM admin_audit WHERE action='creator_consent_confirmed'").get() && (db.raw.prepare("SELECT COUNT(*) AS n FROM admin_audit WHERE action='creator_consent_confirmed'").get() as any).n,0,'the removed permission workflow cannot be invoked by non-admin users');
   } finally { cleanup(); }
@@ -904,7 +904,7 @@ test('Non-admin users cannot invoke admin callbacks or commands', async () => {
 
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(reqId) as any).status, 'pending_payment');
     assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(svcId) as any).status, 'pending_payment');
-    assert.equal((db.raw.prepare("SELECT sharing_enabled FROM creator_contacts WHERE profile_id='anaimiya'").get() as any).sharing_enabled, 1, 'Attacker /disablecontact must not change consent');
+    assert.equal((db.raw.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id='anaimiya'").get() as any).contact_value, '@anaimiya_real', 'legacy permission commands must not alter the saved contact');
     assert.equal(db.raw.prepare("SELECT * FROM creator_contacts WHERE profile_id='rosebeck'").get(), undefined, 'Attacker /setcontact must not store a contact');
     for (const chat of ['5120', '5121']) {
       assert.equal(messagesTo(sentTelegramMessages, chat).filter(m => String(m.data.text).includes('@anaimiya_real') || String(m.data.text).includes('pwned')).length, 0);
@@ -1622,8 +1622,8 @@ test('General support drafts and protected contact-delivery drafts cannot overla
       (id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
       VALUES (?, '8909', '8909', 'anaimiya', 'payment_verified', 'FL-ISO001')`).run(orderId);
     db.raw.prepare(`INSERT INTO creator_contacts
-      (profile_id,contact_value,sharing_enabled,consent_confirmed_at)
-      VALUES ('anaimiya', '@synthetic_contact', 1, '2026-01-01T00:00:00.000Z')`).run();
+      (profile_id,contact_value)
+      VALUES ('anaimiya', '@synthetic_contact')`).run();
 
     await tgPost(env, adminMsg('/message FL-ISO001 General support only'));
     const supportDraft = latestSupportDraft(db, orderId);
