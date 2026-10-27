@@ -1495,6 +1495,42 @@ test('Admin Desk support draft can send a media-only document selected by order 
   }
 });
 
+test('Admin Desk support drafts can attach and send a video file', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests
+      (id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code)
+      VALUES (?, '8304', '8304', 'anaimiya', 'approved', 'FL-VID001')`).run(orderId);
+
+    await tgPost(env, adminMsg('/message FL-VID001'));
+    const draft = latestSupportDraft(db, orderId);
+    await tgPost(env, {
+      message: {
+        chat: { id: 10001, type: 'private' },
+        from: { id: 10001 },
+        video: { file_id: 'video-file-9301', file_unique_id: 'video-unique-9301', mime_type: 'video/mp4', file_size: 12000, duration: 4 }
+      }
+    });
+    const saved = db.raw.prepare('SELECT media_kind,media_file_id,media_mime_type FROM admin_message_drafts WHERE id=?').get(draft.id) as any;
+    assert.equal(saved.media_kind, 'document');
+    assert.equal(saved.media_file_id, 'video-file-9301');
+    assert.equal(saved.media_mime_type, 'video/mp4');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8304').length, 0);
+
+    await tgPost(env, callbackFrom(10001, `support-message:preview:${draft.id}`, 'cb-support-video-preview'));
+    assert.ok(sentTelegramMessages.some(m => m.method === 'sendDocument' && String(m.data.chat_id) === '10001'));
+    await tgPost(env, callbackFrom(10001, `support-message:send:${draft.id}`, 'cb-support-video-send'));
+    const customerCalls = customerTelegramCalls(sentTelegramMessages, '8304');
+    assert.equal(customerCalls.length, 1);
+    assert.equal(customerCalls[0].method, 'sendDocument');
+    assert.equal(customerCalls[0].data.document, 'video-file-9301');
+  } finally {
+    cleanup();
+  }
+});
+
 test('Admin Desk support drafts can be cancelled and expire without sending', async () => {
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
