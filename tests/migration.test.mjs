@@ -44,6 +44,10 @@ test('Migration: fresh database migrates to fully verified schema', () => {
 
   const verified = verifySchema(db);
   assert.equal(verified.ok, true);
+  const tables = getTableNames(db);
+  assert.ok(tables.includes('admin_broadcast_drafts'));
+  assert.ok(tables.includes('hidden_profiles'));
+  assert.ok(tables.includes('admin_pending_actions'));
 });
 
 test('Migration: fully migrated database is completely idempotent when re-migrated', () => {
@@ -76,6 +80,9 @@ test('Migration: partially migrated database (baseline only) migrates safely', (
   const tablesAfter = getTableNames(db);
   assert.ok(tablesAfter.includes('service_orders'));
   assert.ok(tablesAfter.includes('checkout_name_prompts'));
+  assert.ok(tablesAfter.includes('admin_broadcast_drafts'));
+  assert.ok(tablesAfter.includes('hidden_profiles'));
+  assert.ok(tablesAfter.includes('admin_pending_actions'));
 });
 
 test('Migration: partially migrated database with existing prompts table but missing columns adds columns safely', () => {
