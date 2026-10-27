@@ -893,6 +893,14 @@ async function message(e: Env, m: Msg) {
       return createOrReopenAdminMessageDraft(e, m, command[1], command[2] || "", extracted.media);
     }
 
+    const broadcastDraft = await activeBroadcastDraft(e, user);
+    if (broadcastDraft && broadcastDraft.status === "draft") {
+      const extracted = extractReceiptMedia(m);
+      if (!extracted.media) return say(e, chat, extracted.unsupported || "Attach one photo or document under 20 MB.");
+      const updated = await e.DB.prepare("UPDATE admin_broadcast_drafts SET media_kind=?,media_file_id=?,media_mime_type=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(extracted.media.kind, extracted.media.fileId, extracted.media.mimeType, broadcastDraft.id, user).run();
+      if (!updated.meta?.changes) return say(e, chat, "Broadcast draft changed; media was not attached.");
+      return say(e, chat, "📎 Media attached. Nothing has been sent.", { inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + broadcastDraft.id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + broadcastDraft.id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + broadcastDraft.id }]] });
+    }
     const deliveryDraft = await activeDeliveryDraft(e, user);
     const supportDraft = await activeAdminMessageDraft(e, user);
     if (deliveryDraft && supportDraft) {
@@ -976,6 +984,14 @@ async function message(e: Env, m: Msg) {
     }
   }
   if (!t) return;
+  if (user === e.ADMIN_TELEGRAM_ID && !t.startsWith("/") && chat === user) {
+    const broadcastDraft = await activeBroadcastDraft(e, user);
+    if (broadcastDraft && broadcastDraft.status === "draft") {
+      if (t.length > 900) return say(e, chat, "Broadcast text must be 900 characters or fewer. The draft was not changed.");
+      await e.DB.prepare("UPDATE admin_broadcast_drafts SET message_text=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(t, broadcastDraft.id, user).run();
+      return say(e, chat, "📝 Broadcast text updated. Nothing has been sent.", { inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + broadcastDraft.id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + broadcastDraft.id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + broadcastDraft.id }]] });
+    }
+  }
   // Ordinary admin text can edit exactly one open composer. If both editable
   // workflows somehow have a draft, fail closed instead of guessing.
   if (user === e.ADMIN_TELEGRAM_ID && !t.startsWith("/")) {
@@ -1033,6 +1049,24 @@ async function message(e: Env, m: Msg) {
     }
   }
 
+  if (user === e.ADMIN_TELEGRAM_ID && /^\/broadcast(?:\s|$)/i.test(t)) {
+    const text = t.replace(/^\/broadcast(?:@[A-Za-z0-9_]+)?\s*/i, "").trim();
+    const active = await activeBroadcastDraft(e, user);
+    if (active?.status === "sending") return say(e, chat, "⚠️ A broadcast is already sending or has an uncertain outcome. Check before retrying.");
+    if (active?.status === "draft") return say(e, chat, "You already have a broadcast draft. Send text to update it, attach one photo/document, or use /broadcastcancel.");
+    if (text.length > 900) return say(e, chat, "Broadcast text must be 900 characters or fewer.");
+    const id = crypto.randomUUID();
+    await e.DB.prepare("INSERT INTO admin_broadcast_drafts(id,admin_telegram_id,message_text,status,expires_at) VALUES(?,?,?,'draft',datetime('now','+30 minutes'))").bind(id, user, text || null).run();
+    return say(e, chat, "📣 <b>Broadcast draft created</b>\nAudience: customers with active/recent order records (maximum 100 recipients).\n\n" + (text ? esc(text) : "No message text yet. Send text or attach media.") + "\n\nNothing has been sent. Preview and confirm when ready.", {
+      inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + id }]]
+    });
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && t === "/broadcastcancel") {
+    const draft = await activeBroadcastDraft(e, user);
+    if (!draft || draft.status !== "draft") return say(e, chat, "No editable broadcast draft to cancel.");
+    await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(draft.id).run();
+    return say(e, chat, "✖️ Broadcast draft cancelled. Nothing was sent.");
+  }
   if (user === e.ADMIN_TELEGRAM_ID && /^\/authorizecontact\s+/i.test(t)) {
     const match = t.match(/^\/authorizecontact\s+([A-Za-z0-9._-]{1,50})$/i);
     if (!match) return say(e, chat, "Usage: /authorizecontact PROFILE_ID — use only after the creator explicitly authorised sharing this contact.");
