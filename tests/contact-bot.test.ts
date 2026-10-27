@@ -915,7 +915,7 @@ test('Non-admin users cannot invoke admin callbacks or commands', async () => {
   }
 });
 
-test('Selar webhook negative cases never mutate payment state', async () => {
+test('Selar webhook negative cases and mismatched code/name never mutate payment state', async () => {
   const db = createTestDb();
   const { env, cleanup, sentTelegramMessages } = createTestEnv(db);
   try {
@@ -935,9 +935,9 @@ test('Selar webhook negative cases never mutate payment state', async () => {
 
     const codeMatchNameMismatch = await selarPost(env, { ...validSale, reference: 'ref-neg-5', customer_full_name: 'Other Person FL-NEG001' });
     const codeMatchJson = await codeMatchNameMismatch.json() as any;
-    assert.equal(codeMatchJson.matched, true, 'a unique code is sufficient even when the full name differs');
-    assert.equal(codeMatchJson.reconciled_by, 'unique_code');
-    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).filter(m => String(m.data.text).includes('Selar sale received')).length, 1, 'a unique code match must notify admin');
+    assert.equal(codeMatchJson.matched, false, 'a saved checkout name must agree with the code; email fallback is unavailable when the order has no matching saved email');
+    assert.equal(codeMatchJson.reason, 'no_unique_code_name_or_email_match');
+    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).filter(m => String(m.data.text).includes('Selar sale received')).length, 0, 'mismatched identity clues must not attach a sale');
 
     assert.equal((await selarPost(env, { ...validSale, reference: 'ref-neg-6', status: 'failed' })).status, 422, 'explicitly non-paid events are rejected');
     assert.equal((await selarPost(env, { ...validSale, reference: 'ref-neg-7', padding: 'A'.repeat(70000) })).status, 413, 'oversized payload');
