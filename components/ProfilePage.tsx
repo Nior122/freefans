@@ -77,6 +77,11 @@ export const ProfilePage = () => {
   const REQUIRED_WAIT_MS = 4000; // 4 seconds
 
   const profile = profiles.find(p => p.id === id);
+  const telegramBotUsername = (import.meta.env.VITE_TELEGRAM_BOT_USERNAME || 'KasiQueenbot').trim().replace(/^@/, '');
+  // Telegram start parameters allow only letters, numbers, underscores, and hyphens.
+  // Encode dots in profile IDs so the bot can resolve the selected creator reliably.
+  const contactStartParam = `contact_${(profile?.id ?? '').replace(/\\./g, '_dot_')}`;
+  const contactBotUrl = telegramBotUsername ? `https://t.me/${telegramBotUsername}?start=${contactStartParam}` : undefined;
   if (!profile) return <Navigate to="/" replace />;
 
   const isFav = isFavorite(profile.id);
