@@ -19,11 +19,13 @@ export interface Env {
   SELAR_CHECKOUT_URL?: string;
   SELAR_WEBHOOK_SECRET?: string;
   SELAR_PRODUCT_ID?: string;
-  AI?: { run(model: string, input: { messages: Array<{ role: string; content: string }> }): Promise<{ response?: string }> };
+  AI?: { run(model: string, input: any): Promise<any> };
   AI_MODEL?: string;
 }
 type TelegramPhotoSize = { file_id?: string; file_unique_id?: string; file_size?: number; width?: number; height?: number };
 type TelegramDocument = { file_id?: string; file_unique_id?: string; file_name?: string; mime_type?: string; file_size?: number };
+type TelegramVoice = { file_id?: string; file_unique_id?: string; file_size?: number; duration?: number; mime_type?: string };
+type TelegramAudio = { file_id?: string; file_unique_id?: string; file_size?: number; duration?: number; mime_type?: string; file_name?: string };
 type Msg = {
   message_id?: number;
   chat: { id: number; type?: string };
@@ -32,6 +34,8 @@ type Msg = {
   caption?: string;
   photo?: TelegramPhotoSize[];
   document?: TelegramDocument;
+  voice?: TelegramVoice;
+  audio?: TelegramAudio;
 };
 type Update = { message?: Msg; callback_query?: { id: string; from: { id: number }; message?: Msg; data?: string } };
 type Profile = { id: string; name: string };
@@ -149,6 +153,77 @@ async function say(e: Env, chat: string | number, text: string, markup?: unknown
 async function notifyAdminIfConfigured(e: Env, text: string) {
   if (!e.ADMIN_TELEGRAM_ID) return;
   await say(e, e.ADMIN_TELEGRAM_ID, text);
+}
+async function telegramFileBytes(e: Env, fileId: string, maxBytes = 10 * 1024 * 1024): Promise<Uint8Array> {
+  const metaResponse = await fetch(`https://api.telegram.org/bot${e.TELEGRAM_BOT_TOKEN}/getFile?file_id=${encodeURIComponent(fileId)}`);
+  if (!metaResponse.ok) throw new Error("Telegram file lookup failed");
+  const meta = await metaResponse.json() as { ok?: boolean; result?: { file_path?: string; file_size?: number } };
+  if (!meta.ok || !meta.result?.file_path) throw new Error("Telegram file metadata unavailable");
+  if (meta.result.file_size && meta.result.file_size > maxBytes) throw new Error("Media exceeds the supported size limit");
+  const response = await fetch(`https://api.telegram.org/file/bot${e.TELEGRAM_BOT_TOKEN}/${meta.result.file_path}`);
+  if (!response.ok) throw new Error("Telegram file download failed");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  if (bytes.byteLength > maxBytes) throw new Error("Media exceeds the supported size limit");
+  return bytes;
+}
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + 0x8000, bytes.length)));
+  return btoa(binary);
+}
+async function sendVoiceReply(e: Env, chat: string | number, text: string) {
+  if (!e.AI || !text.trim()) return false;
+  try {
+    const result = await e.AI.run("@cf/myshell-ai/melotts", { prompt: text.slice(0, 700), lang: "en" });
+    let bytes: Uint8Array | null = null;
+    if (result instanceof ArrayBuffer) bytes = new Uint8Array(result);
+    else if (result instanceof Uint8Array) bytes = result;
+    else if (result?.audio instanceof ArrayBuffer) bytes = new Uint8Array(result.audio);
+    else if (Array.isArray(result?.audio)) bytes = new Uint8Array(result.audio);
+    else if (typeof result?.audio === "string") {
+      const raw = atob(result.audio);
+      bytes = Uint8Array.from(raw, c => c.charCodeAt(0));
+    }
+    if (!bytes?.byteLength) return false;
+    const form = new FormData();
+    form.set("chat_id", String(chat));
+    form.set("voice", new Blob([bytes], { type: "audio/mpeg" }), "reply.mp3");
+    const response = await fetch(`https://api.telegram.org/bot${e.TELEGRAM_BOT_TOKEN}/sendVoice`, { method: "POST", body: form });
+    const body = await response.json() as { ok?: boolean };
+    return response.ok && body.ok === true;
+  } catch (error) {
+    console.error("Voice reply unavailable", String(error));
+    return false;
+  }
+}
+async function transcribeVoice(e: Env, m: Msg): Promise<string> {
+  if (!e.AI) throw new Error("Speech recognition is unavailable");
+  const media = m.voice || m.audio;
+  if (!media?.file_id) throw new Error("Voice message has no Telegram file ID");
+  if ((media.file_size || 0) > 10 * 1024 * 1024) throw new Error("Voice messages must be under 10 MB");
+  const bytes = await telegramFileBytes(e, media.file_id);
+  const result = await e.AI.run("@cf/openai/whisper", { audio: Array.from(bytes) });
+  const transcript = String(result?.text || result?.transcription || "").trim();
+  if (!transcript) throw new Error("Speech could not be transcribed");
+  return transcript.slice(0, 3500);
+}
+async function analysePhoto(e: Env, m: Msg, prompt: string): Promise<string> {
+  if (!e.AI) throw new Error("Image analysis is unavailable");
+  const photos = Array.isArray(m.photo) ? m.photo : [];
+  const photo = photos[photos.length - 1];
+  if (!photo?.file_id) throw new Error("Image has no Telegram file ID");
+  const bytes = await telegramFileBytes(e, photo.file_id, 8 * 1024 * 1024);
+  const dataUrl = "data:image/jpeg;base64," + bytesToBase64(bytes);
+  const result = await e.AI.run("@cf/meta/llama-3.2-11b-vision-instruct", {
+    messages: [{ role: "user", content: [
+      { type: "text", text: (prompt || "Describe this image and answer any question the user included. Be concise and helpful.").slice(0, 1000) },
+      { type: "image_url", image_url: { url: dataUrl } }
+    ] }],
+    max_tokens: 500
+  });
+  const answer = String(result?.response || result?.description || "").trim();
+  if (!answer) throw new Error("Image model returned no answer");
+  return answer.slice(0, 3500);
 }
 async function sayBestEffort(e: Env, chat: string | number, text: string) {
   // Informational customer notifications must never roll back a recorded payment
@@ -738,7 +813,7 @@ async function start(e: Env, m: Msg, payload: string) {
   return say(e, chat, `${intro}\n\n${instructions}`, paymentKeyboard(e, requestId));
 }
 
-async function aiReply(e: Env, chat: string, userText: string, reminder = "") {
+async function aiReply(e: Env, chat: string, userText: string, reminder = "", voiceReply = false) {
   if (!e.AI) return say(e, chat, reminder || "👋 I'm the FansLeak front-desk assistant. I can help with your requests, payment checks, and next steps. What can I help you with?");
   try {
     // Supply read-only context from this customer's own request history. The
@@ -875,6 +950,27 @@ async function message(e: Env, m: Msg) {
     // the existing text flow; it is not treated as a payment receipt.
     t = caption;
   }
+  let voiceReply = false;
+  if (m.voice || m.audio) {
+    try {
+      t = await transcribeVoice(e, m);
+      voiceReply = true;
+      if (user !== e.ADMIN_TELEGRAM_ID) await sayBestEffort(e, chat, "🎙️ I heard: " + t);
+    } catch (error) {
+      console.error("Voice transcription failed", String(error));
+      return say(e, chat, "Sorry, I couldn’t understand that voice note. Please try a clearer, shorter recording or send the message as text.");
+    }
+  }
+  if (Array.isArray(m.photo) && m.photo.length > 0 && !t) {
+    try {
+      const answer = await analysePhoto(e, m, caption);
+      await say(e, chat, "🖼️ " + esc(answer));
+      return;
+    } catch (error) {
+      console.error("Image analysis failed", String(error));
+      return say(e, chat, "I couldn’t analyse that image just now. Please try a smaller photo or describe what you want me to look at.");
+    }
+  }
   if (!t) return;
   // Ordinary admin text can edit exactly one open composer. If both editable
   // workflows somehow have a draft, fail closed instead of guessing.
@@ -933,13 +1029,24 @@ async function message(e: Env, m: Msg) {
     }
   }
 
+  if (user === e.ADMIN_TELEGRAM_ID && /^\/authorizecontact\s+/i.test(t)) {
+    const match = t.match(/^\/authorizecontact\s+([A-Za-z0-9._-]{1,50})$/i);
+    if (!match) return say(e, chat, "Usage: /authorizecontact PROFILE_ID — use only after the creator explicitly authorised sharing this contact.");
+    const profileId = match[1];
+    const cat = await catalogue(e);
+    if (!cat.some(p => p.id === profileId)) return say(e, chat, "That profile is not in the current public catalogue.");
+    const contact = await e.DB.prepare("SELECT contact_value FROM creator_contacts WHERE profile_id=?").bind(profileId).first<any>();
+    if (!contact || !String(contact.contact_value || "").trim()) return say(e, chat, "No contact is saved for that profile. Save the authorised contact first with /setcontact.");
+    return say(e, chat, "<b>Confirm creator authorisation</b>\nProfile: <code>" + esc(profileId) + "</code>\nContact: " + esc(String(contact.contact_value)) + "\n\nConfirm only if the creator explicitly authorised release of this contact.", {
+      inline_keyboard: [[{ text: "✅ Confirm authorisation", callback_data: "admin:consentconfirm:" + profileId }], [{ text: "Cancel", callback_data: "admin:home" }]]
+    });
+  }
   if (user === e.ADMIN_TELEGRAM_ID && (t === "/admin" || t === "/menu")) {
     return say(e, chat, "<b>FansLeak Admin Desk</b>\nChoose what you want to manage. Payment checks and contact release remain manual and consent-gated.", {
       inline_keyboard: [
         [{ text: "📥 Review contact requests", callback_data: "admin:pending" }],
         [{ text: "🧾 Review service orders", callback_data: "admin:orders" }],
         [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }],
-        [{ text: "🛡️ Creator sharing permissions", callback_data: "admin:consent" }],
         [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]
       ]
     });
@@ -1099,7 +1206,13 @@ async function message(e: Env, m: Msg) {
         const transcript = (updated + "\nAssistant: " + answer).slice(-8000);
         await e.DB.prepare("UPDATE service_orders SET request_text=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='awaiting_request'").bind(transcript, serviceOrder.id).run();
       }
-      return say(e, chat, answer ? esc(answer) : "Thanks. Tell me a little more about what you need, or type PAY when you’re ready to purchase.");
+      const finalAnswer = answer ? answer : "Thanks. Tell me a little more about what you need, or type PAY when you’re ready to purchase.";
+      await say(e, chat, esc(finalAnswer));
+      if (voiceReply) {
+        const sent = await sendVoiceReply(e, chat, finalAnswer);
+        if (!sent) await sayBestEffort(e, chat, "🔊 I couldn’t generate an audio reply this time, so I’ve sent the answer as text.");
+      }
+      return;
     } catch (err) {
       console.error("AI service conversation failed", String(err));
       return say(e, chat, "I saved your message. You can tell me more, or type PAY when you’re ready to purchase.");
@@ -1186,7 +1299,7 @@ async function message(e: Env, m: Msg) {
       return say(e,chat,"<b>Contact request</b>\nID: <code>"+esc(row.id)+"</code>\nCode: <code>"+esc(row.checkout_code)+"</code>\nProfile: "+esc(row.profile_id)+"\nStatus: "+esc(row.status)+"\nSale reference: "+(row.payment_reference?"attached":"not attached"));
     }
   }
-  return aiReply(e, chat, t);
+  return aiReply(e, chat, t, "", voiceReply);
 }
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
