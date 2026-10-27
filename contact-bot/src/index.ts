@@ -991,6 +991,13 @@ async function message(e: Env, m: Msg) {
     }
   }
   if (!t) return;
+  if (user === e.ADMIN_TELEGRAM_ID && chat === user && /^(?:yes|yes send|confirm|send it|go ahead)[.! ]*$/i.test(t)) {
+    const broadcastDraft = await activeBroadcastDraft(e, user);
+    if (broadcastDraft?.status === "draft") {
+      await executeBroadcast(e, user, chat, broadcastDraft);
+      return;
+    }
+  }
   if (user === e.ADMIN_TELEGRAM_ID && !t.startsWith("/") && chat === user) {
     const broadcastDraft = await activeBroadcastDraft(e, user);
     if (broadcastDraft && broadcastDraft.status === "draft") {
@@ -1409,6 +1416,36 @@ async function message(e: Env, m: Msg) {
   }
   return aiReply(e, chat, t, "", voiceReply);
 }
+async function executeBroadcast(e: Env, actor: string, chat: string | number, draft: AdminBroadcastDraft): Promise<boolean> {
+  if (draft.status !== "draft") { await say(e, chat, "This broadcast is no longer editable. It will not be sent again."); return false; }
+  if (Date.parse(draft.expires_at.replace(" ", "T") + (draft.expires_at.endsWith("Z") ? "" : "Z")) < Date.now()) {
+    await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='expired',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(draft.id).run();
+    await say(e, chat, "This broadcast draft expired. Nothing was sent."); return false;
+  }
+  if (!draft.message_text?.trim() && !draft.media_file_id) { await say(e, chat, "Add message text or attach media before confirming the broadcast."); return false; }
+  const audience = await e.DB.prepare("SELECT telegram_chat_id FROM contact_requests WHERE status IN ('pending_payment','payment_verified','approved') UNION SELECT telegram_chat_id FROM service_orders WHERE status IN ('pending_payment','payment_verified','fulfilled')").all<any>();
+  const recipients = [...new Set((audience.results || []).map((r:any) => String(r.telegram_chat_id)).filter(Boolean))].slice(0, 100);
+  if (!recipients.length) { await say(e, chat, "There are no customers in the active/recent order audience. Nothing was sent."); return false; }
+  const claimed = await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(draft.id, actor).run();
+  if (!claimed.meta?.changes) { await say(e, chat, "Broadcast state changed or is already being sent. Nothing was sent by this attempt."); return false; }
+  let sent = 0, failed = 0;
+  for (const recipient of recipients) {
+    try {
+      const body = String(draft.message_text || "");
+      if (draft.media_file_id && draft.media_kind === "photo") await tg(e, "sendPhoto", { chat_id: recipient, photo: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
+      else if (draft.media_file_id && draft.media_kind === "document" && /^video\//i.test(draft.media_mime_type || "")) await tg(e, "sendVideo", { chat_id: recipient, video: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
+      else if (draft.media_file_id && draft.media_kind === "document") await tg(e, "sendDocument", { chat_id: recipient, document: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
+      else await say(e, recipient, esc(body));
+      sent++;
+    } catch { failed++; }
+  }
+  const status = failed === 0 ? "sent" : "partial";
+  await e.DB.prepare("UPDATE admin_broadcast_drafts SET status=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(status, draft.id).run();
+  await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,details) VALUES(?,?,?)").bind(actor, "admin_broadcast_" + status, "Broadcast draft " + draft.id + ": sent=" + sent + ", failed=" + failed + ", recipients=" + recipients.length).run();
+  await say(e, chat, (failed ? "⚠️" : "✅") + " Broadcast finished. Sent: <b>" + sent + "</b>; failed: <b>" + failed + "</b>. The draft is locked against duplicate sends.");
+  return failed === 0;
+}
+
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
   if (data.startsWith("profiledelete:")) {
@@ -1451,31 +1488,8 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       await say(e, chat, "👀 <b>Broadcast preview</b>\nRecipients: " + recipients.length + " (maximum 100 per broadcast)\nMessage: " + (draft.message_text ? esc(draft.message_text) : "—") + "\nMedia: " + (draft.media_kind ? esc(draft.media_mime_type || draft.media_kind) : "none") + "\n\nNo messages sent.", { inline_keyboard: [[{ text: "✅ Confirm and send", callback_data: "broadcast:send:" + id }], [{ text: "✖️ Cancel", callback_data: "broadcast:cancel:" + id }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Preview only." });
     }
-    if (!draft.message_text?.trim() && !draft.media_file_id) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Add message text or media before sending." });
-    if (!recipients.length) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "No customers in the current order audience." });
-    const claimed = await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(id, actor).run();
-    if (!claimed.meta?.changes) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast state changed; nothing sent." });
-    let sent = 0, failed = 0;
-    for (const recipient of recipients) {
-      try {
-        const body = String(draft.message_text || "");
-        if (draft.media_file_id && draft.media_kind === "photo") {
-          await tg(e, "sendPhoto", { chat_id: recipient, photo: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
-        } else if (draft.media_file_id && draft.media_kind === "document" && /^video\//i.test(draft.media_mime_type || "")) {
-          await tg(e, "sendVideo", { chat_id: recipient, video: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
-        } else if (draft.media_file_id && draft.media_kind === "document") {
-          await tg(e, "sendDocument", { chat_id: recipient, document: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
-        } else {
-          await say(e, recipient, esc(body));
-        }
-        sent++;
-      } catch { failed++; }
-    }
-    const status = failed === 0 ? "sent" : "partial";
-    await e.DB.prepare("UPDATE admin_broadcast_drafts SET status=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(status, id).run();
-    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,details) VALUES(?,?,?)").bind(actor, "admin_broadcast_" + status, "Broadcast draft " + id + ": sent=" + sent + ", failed=" + failed + ", recipients=" + recipients.length).run();
-    await say(e, chat, (failed ? "⚠️" : "✅") + " Broadcast finished. Sent: <b>" + sent + "</b>; failed: <b>" + failed + "</b>. The draft is locked against duplicate sends.");
-    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast complete." });
+    await executeBroadcast(e, actor, chat, draft);
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast action processed." });
   }
   if (data.startsWith("draft:")) {
     if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Admin access only."});
