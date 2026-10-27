@@ -137,6 +137,14 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0013_admin_pending_actions.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0014_remove_creator_sharing_permissions',
+    description: 'Remove retired creator-sharing permission columns while preserving contacts',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0014_remove_creator_sharing_permissions.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
@@ -236,8 +244,7 @@ export const EXPECTED_SCHEMA = {
     'payment_currency', 'created_at', 'updated_at', 'checkout_code', 'checkout_name'
   ],
   creator_contacts: [
-    'profile_id', 'contact_value', 'contact_type', 'sharing_enabled',
-    'consent_confirmed_at', 'updated_at'
+    'profile_id', 'contact_value', 'contact_type', 'updated_at'
   ],
   processed_sales: [
     'provider_reference', 'buyer_email', 'amount_minor', 'currency',
