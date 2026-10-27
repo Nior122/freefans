@@ -212,6 +212,8 @@ CI (`.github/workflows/check-contact-bot.yml`) runs the test suite, `tsc`, and t
 
 ## Production rollout (performed separately by the owner — NOT done by code changes alone)
 
+Use [`PRODUCTION-RELEASE-CHECKLIST.md`](./PRODUCTION-RELEASE-CHECKLIST.md) for the release gate, deployment sequence, smoke tests, stop conditions, and rollback guidance. It is a preparation document; it does not authorize or trigger production changes.
+
 1. Merge the reviewed PR into `fan`.
 2. Run **Actions → Deploy FansLeak contact bot → Run workflow** *from `fan`*, entering both Selar checkout URLs and exact product codes. It preflights secrets, applies all pending migrations (including `0008` and `0009`) with verification, deploys the Worker, writes Worker secrets, and reconnects the Telegram webhook. If the `0005` pre-check reports duplicate active rows, reconcile them as described above and re-run.
 3. Preserve the existing production Zapier configuration. The receipt fallback requires no Zapier change; only use the fresh-environment POST notes above when provisioning a genuinely new environment.
