@@ -652,19 +652,20 @@ async function message(e: Env, m: Msg) {
 
   if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/deliver ")) {
     const match = t.match(/^\/deliver\s+([0-9a-f-]{36})\s+([\s\S]{1,3500})$/i);
-    if (!match) return say(e, chat, "Usage: /deliver ORDER_ID service details or fulfilment text");
-    const order = await e.DB.prepare("SELECT id,telegram_chat_id,status FROM service_orders WHERE id=?").bind(match[1]).first<any>();
+    if (!match) return say(e, chat, "Usage: /deliver ORDER_UUID fulfilment text — this creates a draft for preview and confirmation.");
+    const order = await e.DB.prepare("SELECT id,checkout_code,status FROM service_orders WHERE id=?").bind(match[1]).first<any>();
     if (!order || order.status !== "payment_verified") return say(e, chat, "Order not found or payment has not been verified. Nothing was sent.");
-    const updateRes = await e.DB.prepare("UPDATE service_orders SET status='fulfilled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='payment_verified'").bind(order.id).run();
-    if (!updateRes.meta?.changes) return say(e, chat, "Order was already fulfilled or status changed. Nothing was sent.");
-    try {
-      await tg(e, "sendMessage", { chat_id: order.telegram_chat_id, text: "Your service order is ready. Details from the provider:\n\n" + match[2], disable_web_page_preview: true });
-    } catch (err) {
-      await e.DB.prepare("UPDATE service_orders SET status='payment_verified',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='fulfilled'").bind(order.id).run();
-      throw err;
+    const existing = await e.DB.prepare("SELECT id,status FROM service_delivery_drafts WHERE service_order_id=?").bind(order.id).first<any>();
+    if (existing && (existing.status === "sent" || existing.status === "sending")) return say(e, chat, "A fulfilment draft was already sent or has an uncertain delivery outcome. Inspect Telegram before any retry.");
+    const draftId = existing?.id || crypto.randomUUID();
+    if (existing) {
+      const updated = await e.DB.prepare("UPDATE service_delivery_drafts SET admin_telegram_id=?,message_text=?,status='draft',expires_at=datetime('now','+30 minutes'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status IN('draft','cancelled','expired')").bind(user,match[2],draftId).run();
+      if (!updated.meta?.changes) return say(e,chat,"Could not reopen the draft because its state changed. Nothing was sent.");
+    } else {
+      await e.DB.prepare("INSERT INTO service_delivery_drafts(id,service_order_id,admin_telegram_id,message_text,status,expires_at) VALUES(?,?,?,?,'draft',datetime('now','+30 minutes'))").bind(draftId,order.id,user,match[2]).run();
     }
-    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_order_fulfilled',?,?)").bind(user, order.id, "Admin sent service fulfilment").run();
-    return say(e, chat, "Fulfilment sent to customer for order " + esc(String(order.id)));
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_delivery_draft_created',?,?)").bind(user,order.id,"Admin created fulfilment draft; no customer message sent").run();
+    return say(e,chat,"📝 <b>Service fulfilment preview</b>\nOrder: <code>"+esc(String(order.checkout_code||order.id))+"</code>\n\n"+esc(match[2])+"\n\n<i>Draft only — nothing has been sent. Expires in 30 minutes.</i>",{inline_keyboard:[[ {text:"✅ Confirm and send",callback_data:"service-delivery:send:"+draftId},{text:"✖️ Cancel",callback_data:"service-delivery:cancel:"+draftId} ]]});
   }
   if (user === e.ADMIN_TELEGRAM_ID && t === "/orders") {
     const rows = await e.DB.prepare("SELECT id,service_id,telegram_username,telegram_user_id,status,CASE WHEN status='payment_verified' THEN substr(request_text,-180) ELSE 'Request hidden until payment verification' END AS summary FROM service_orders ORDER BY created_at DESC LIMIT 20").all<any>();
@@ -930,6 +931,41 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(? ,'delivery_sent',?,?,?)").bind(actor,d.request_id,d.profile_id,"Confirmed delivery draft sent through Telegram").run();
     if(!finalStatus.meta?.changes) await notifyAdminIfConfigured(e,"Delivery sent for request <code>"+d.request_id+"</code>, but status changed concurrently. Inspect audit before retrying.");
     return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Delivery sent once and recorded."});
+  }
+  if (data.startsWith("service-delivery:")) {
+    if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Admin access only."});
+    const match=data.match(/^service-delivery:(send|cancel):([0-9a-f-]{36})$/i);
+    if(!match) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Unknown service delivery action."});
+    const action=match[1].toLowerCase(), draftId=match[2];
+    const d=await e.DB.prepare("SELECT d.id,d.service_order_id,d.admin_telegram_id,d.message_text,d.status,d.expires_at,o.telegram_chat_id,o.status AS order_status,o.checkout_code FROM service_delivery_drafts d JOIN service_orders o ON o.id=d.service_order_id WHERE d.id=?").bind(draftId).first<any>();
+    if(!d || String(d.admin_telegram_id)!==actor) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft not found for this admin."});
+    if(action==="cancel") {
+      if(d.status!=="draft") return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Only an unsent draft can be cancelled."});
+      const cancelled=await e.DB.prepare("UPDATE service_delivery_drafts SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(draftId,actor).run();
+      if(!cancelled.meta?.changes) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft state changed; nothing was sent."});
+      await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_delivery_draft_cancelled',?,?)").bind(actor,d.service_order_id,"Admin cancelled unsent fulfilment draft").run();
+      await say(e,chat,"✖️ Service fulfilment draft cancelled. Nothing was sent.");
+      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft cancelled."});
+    }
+    if(d.status!=="draft" || !d.expires_at || Date.parse(String(d.expires_at).replace(" ","T")+"Z")<Date.now()) {
+      if(d.status==="draft") await e.DB.prepare("UPDATE service_delivery_drafts SET status='expired',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(draftId).run();
+      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft expired or is no longer active."});
+    }
+    if(d.order_status!=="payment_verified") return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Order is no longer awaiting fulfilment. Nothing was sent."});
+    const claimed=await e.DB.prepare("UPDATE service_delivery_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=? AND EXISTS(SELECT 1 FROM service_orders o WHERE o.id=service_delivery_drafts.service_order_id AND o.status='payment_verified')").bind(draftId,actor).run();
+    if(!claimed.meta?.changes) return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Draft is already sending or inactive."});
+    try {
+      await tg(e,"sendMessage",{chat_id:d.telegram_chat_id,text:"Your service order is ready. Details from the provider:\n\n"+String(d.message_text),disable_web_page_preview:true});
+    } catch {
+      await notifyAdminIfConfigured(e,"⚠️ Service fulfilment outcome is uncertain for order <code>"+esc(d.service_order_id)+"</code>. Draft remains locked to prevent duplicate delivery. Inspect Telegram before any retry.");
+      return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Delivery outcome uncertain. Draft locked to prevent duplicates."});
+    }
+    const fulfilled=await e.DB.prepare("UPDATE service_orders SET status='fulfilled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='payment_verified'").bind(d.service_order_id).run();
+    await e.DB.prepare("UPDATE service_delivery_drafts SET status='sent',delivered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draftId).run();
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_order_fulfilled',?,?)").bind(actor,d.service_order_id,"Admin confirmed and sent service fulfilment").run();
+    if(!fulfilled.meta?.changes) await notifyAdminIfConfigured(e,"Service fulfilment was sent but order status changed concurrently. Inspect audit before retrying: <code>"+esc(d.service_order_id)+"</code>");
+    await say(e,chat,"Fulfilment sent to customer for order <code>"+esc(String(d.checkout_code||d.service_order_id))+"</code>.");
+    return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Fulfilment sent once and recorded."});
   }
   if (data.startsWith("done:") || data.startsWith("paid:")) {
     if (!u.message || String(u.message.chat.id) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Open the bot chat to continue." });
