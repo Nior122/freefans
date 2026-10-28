@@ -23,7 +23,7 @@ test('Migration: fresh database migrates to fully verified schema', () => {
   const result = applyAllMigrations(db);
 
   assert.equal(result.ok, true);
-  assert.equal(result.verifiedTables.length, 17);
+  assert.equal(result.verifiedTables.length, 18);
 
   const applied = getAppliedMigrations(db);
   assert.deepEqual(applied, [
@@ -47,7 +47,8 @@ test('Migration: fresh database migrates to fully verified schema', () => {
     '0018_clear_delivered_media_references',
     '0019_admin_broadcast_recipients',
     '0020_receipt_review_actions',
-    '0021_admin_order_deletion_actions'
+    '0021_admin_order_deletion_actions',
+    '0022_user_language_preferences'
   ]);
 
   const verified = verifySchema(db);
@@ -304,6 +305,36 @@ test('Migration 0021: order-deletion confirmations preserve existing pending act
   );
 });
 
+test('Migration 0022: language preferences are additive, constrained, and preserve existing orders', () => {
+  const db = new DatabaseSync(':memory:');
+  applyAllMigrations(db);
+
+  db.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,?,?,?,?,?)")
+    .run('lang-existing-order', '7102', '7102', 'anaimiya', 'pending_payment', 'FL-LANG22');
+  db.prepare("INSERT INTO user_language_preferences(telegram_user_id,telegram_chat_id,language_code,pending_start_payload) VALUES(?,?,NULL,?)")
+    .run('7102', '7102', 'contact_anaimiya');
+
+  // Re-running the additive migration must not delete or alter existing rows.
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0022_user_language_preferences.sql'), 'utf8'));
+
+  const order = db.prepare("SELECT status,checkout_code FROM contact_requests WHERE id='lang-existing-order'").get();
+  assert.deepEqual([order.status, order.checkout_code], ['pending_payment', 'FL-LANG22']);
+  const pending = db.prepare("SELECT language_code,pending_start_payload FROM user_language_preferences WHERE telegram_user_id='7102'").get();
+  assert.deepEqual([pending.language_code, pending.pending_start_payload], [null, 'contact_anaimiya']);
+
+  db.prepare("UPDATE user_language_preferences SET language_code='pt',pending_start_payload=NULL WHERE telegram_user_id='7102'").run();
+  const saved = db.prepare("SELECT language_code,pending_start_payload FROM user_language_preferences WHERE telegram_user_id='7102'").get();
+  assert.deepEqual([saved.language_code, saved.pending_start_payload], ['pt', null]);
+
+  assert.throws(
+    () => db.prepare("INSERT INTO user_language_preferences(telegram_user_id,telegram_chat_id,language_code) VALUES('7103','7103','xx')").run(),
+    /CHECK constraint failed/i
+  );
+
+  const columns = db.prepare("PRAGMA table_info(user_language_preferences)").all().map(row => row.name);
+  assert.deepEqual(columns, ['telegram_user_id', 'telegram_chat_id', 'language_code', 'pending_start_payload', 'created_at', 'updated_at']);
+});
+
 test('Migration 0005: pre-existing duplicate active rows block migration without data changes', () => {
   const db = new DatabaseSync(':memory:');
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'schema.sql'), 'utf8'));
@@ -407,7 +438,7 @@ function completeRemoteSchemaSnapshot() {
 test('Remote migration verifier: accepts all required tables, columns, and unique indexes', () => {
   const result = verifyRemoteSchema(completeRemoteSchemaSnapshot());
   assert.equal(result.ok, true);
-  assert.equal(result.verifiedTables.length, 17);
+  assert.equal(result.verifiedTables.length, 18);
 });
 
 test('Remote migration verifier: fails when a required column is missing', () => {
