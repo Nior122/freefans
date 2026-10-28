@@ -1232,45 +1232,84 @@ async function aiReply(e: Env, chat: string, userText: string, reminder = "", vo
   }
 }
 
-async function startChannelSubscription(e: Env, m: Msg) {
+async function servicesMenu(e: Env, chat: string | number) {
+  const siteUrl = (e.SITE_URL || "https://fansleak.pages.dev").replace(/\/$/, "");
+  return say(e, chat, "💋 <b>Choose your next move, babe!</b>\n\n<b>1. 📸 Website photo previews</b>\nBrowse some hot photo previews and available profiles on our website. Photos only — no videos there. 😉\n\n<b>2. 🔥 Telegram channel</b>\nReady for more? Subscribe to our channel for authorised content shared with permission. 🔥\n\nWhich one are you feeling, handsome? 👀", {
+    inline_keyboard: [
+      [{ text: "📸 Visit the website ✨", url: siteUrl }],
+      [{ text: "🔥 Join now — Subscribe", callback_data: "services:join" }]
+    ]
+  });
+}
+
+async function cancelCustomerServiceOrder(e: Env, chat: string | number, user: string, id: string) {
+  const order = await e.DB.prepare("SELECT id,telegram_user_id,telegram_chat_id,checkout_code,status,payment_reference FROM service_orders WHERE id=?").bind(id).first<any>();
+  if (!order || String(order.telegram_user_id) !== user || String(order.telegram_chat_id) !== String(chat)) {
+    return say(e, chat, "I couldn't find that order on your account, babe. Nothing was deleted. 💗");
+  }
+  if (!["pending_payment", "awaiting_request", "awaiting_email"].includes(String(order.status))) {
+    return say(e, chat, "That order is no longer an unpaid order, so I can't delete it with this button. If you've already paid, please message Annie for help. 💌");
+  }
+  if (order.payment_reference) {
+    return say(e, chat, "A payment record is already attached to this order, so I can't delete it automatically. Your payment needs to be checked first. 💌");
+  }
+  await e.DB.prepare("DELETE FROM checkout_name_prompts WHERE telegram_user_id=? AND order_id=?").bind(user, id).run();
+  await e.DB.prepare("DELETE FROM receipt_review_prompts WHERE telegram_user_id=? AND order_id=?").bind(user, id).run();
+  await e.DB.prepare("DELETE FROM payment_receipt_submissions WHERE order_id=?").bind(id).run();
+  await e.DB.prepare("DELETE FROM service_delivery_drafts WHERE service_order_id=?").bind(id).run();
+  await e.DB.prepare("DELETE FROM processed_sales WHERE request_id=?").bind(id).run();
+  const deleted = await e.DB.prepare("DELETE FROM service_orders WHERE id=? AND telegram_user_id=? AND payment_reference IS NULL AND status IN('pending_payment','awaiting_request','awaiting_email')").bind(id, user).run();
+  if (!deleted.meta?.changes) return say(e, chat, "That order changed while I was cancelling it, so I left it untouched. Please try again. 💗");
+  await say(e, chat, "🗑️ All done, babe! Your unpaid order <code>" + esc(String(order.checkout_code || id)) + "</code> and its pending order data have been deleted.\n\nReady for something new? Choose one of the two options below. 😘");
+  return servicesMenu(e, chat);
+}
+
+async function startChannelSubscription(e: Env, m: Msg, forceNew = false) {
   const chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
   if (!e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || provider(e) !== "selar") {
-    await say(e, chat, "The channel subscription checkout is not available right now. Please try again shortly.");
-    await notifyAdminIfConfigured(e, "Service setup required: the Telegram channel subscription needs the configured service checkout and product code.");
-    return;
+    return say(e, chat, "The channel subscription checkout isn't ready right now, darling. Please try again shortly. 💌");
   }
-  const active = await e.DB.prepare("SELECT id,checkout_code,status,service_id FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
-  if (active) {
-    if (String(active.service_id) !== "telegram_channel" || String(active.status) !== "pending_payment") {
-      return say(e, chat, "You already have a service order in progress. Please finish that order or contact support before starting another. 💬");
+
+  const pending = await e.DB.prepare("SELECT id,checkout_code,status,service_id,created_at,payment_reference FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment') ORDER BY created_at DESC LIMIT 3").bind(user).all<any>();
+  const pendingRows = pending.results || [];
+  const unpaidRows = pendingRows.filter((row: any) => !row.payment_reference);
+  if (!forceNew && unpaidRows.length) {
+    const lines = ["💋 <b>Hey babe, I found an order you started earlier.</b>", "", "Here are your unpaid orders. You can cancel an order you don't want anymore, or continue if you still have room for another one."];
+    const buttons: Record<string, unknown>[][] = [];
+    for (const row of unpaidRows) {
+      lines.push("", "🧾 <b>Previous order</b>", "Order code: <code>" + esc(String(row.checkout_code || "not assigned")) + "</code>", "Status: <b>" + esc(String(row.status)) + "</b>", "Started: " + esc(String(row.created_at || "unknown")));
+      buttons.push([{ text: "🗑️ Cancel " + String(row.checkout_code || "order"), callback_data: "order:cancel:" + String(row.id) }]);
     }
-    const checkout = new URL(e.SERVICE_CHECKOUT_URL);
-    checkout.searchParams.set("add_to_cart", "1");
-    return say(e, chat, "💋 Your subscription checkout is ready again. Use the same unique code so your payment can be matched correctly.\n\nOrder code: <code>" + esc(String(active.checkout_code || "")) + "</code>\n\nEnter your full name followed by this code in the checkout name field, for example <code>John Doe " + esc(String(active.checkout_code || "")) + "</code>. After checkout, return here and tap the payment-check button. Payment is not confirmed until it is checked.", {
-      inline_keyboard: [
-        [{ text: "💳 Pay now", url: checkout.toString() }],
-        [{ text: "✅ Done — checkout completed", callback_data: "done:" + active.id }],
-        [{ text: "🔎 I've paid — check again", callback_data: "paid:" + active.id }]
-      ]
-    });
+    if (unpaidRows.length < 3) buttons.push([{ text: "💋 Continue with a new order", callback_data: "services:continue" }]);
+    lines.push("", "You can have up to <b>3 unpaid orders</b> at a time. Cancel an old one if you don't need it anymore. 😉");
+    return say(e, chat, lines.join("\n"), { inline_keyboard: buttons });
   }
+
+  if (!forceNew && !unpaidRows.length) {
+    const previous = await e.DB.prepare("SELECT id,checkout_code,status,service_id,created_at FROM service_orders WHERE telegram_user_id=? AND status IN('payment_verified','fulfilled') ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
+    if (previous) {
+      const completedWord = String(previous.status) === "fulfilled" ? "completed" : "payment verified";
+      return say(e, chat, "✨ <b>Welcome back, handsome!</b>\n\nYour previous channel order was " + completedWord + ". 💖\n\nOrder code: <code>" + esc(String(previous.checkout_code || "not assigned")) + "</code>\nStatus: <b>" + esc(String(previous.status)) + "</b>\n\nWant to start fresh, darling? Tap below and I'll prepare a new order. 😘", {
+        inline_keyboard: [[{ text: "🔄 Start again", callback_data: "services:restart" }]]
+      });
+    }
+  }
+  if (unpaidRows.length >= 3) {
+    const buttons = unpaidRows.map((row: any) => [{ text: "🗑️ Cancel " + String(row.checkout_code || "order"), callback_data: "order:cancel:" + String(row.id) }]);
+    return say(e, chat, "💋 You've reached the limit of 3 unpaid orders, babe. Cancel one below before starting another. 😘", { inline_keyboard: buttons });
+  }
+
   let code = "";
   try { code = await generateUniqueCheckoutCode(e.DB); }
-  catch {
-    await notifyAdminIfConfigured(e, "Alert: Checkout code generation exhausted retries for Telegram channel subscription.");
-    return say(e, chat, "I couldn't prepare your checkout just now. Please try again in a moment.");
-  }
+  catch { return say(e, chat, "I couldn't prepare your checkout just now, darling. Please try again in a moment. 💌"); }
   const id = crypto.randomUUID();
   try {
     await e.DB.prepare("INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,telegram_username,status,payment_method,checkout_code,request_text) VALUES(?,?,?,?,?,'pending_payment','selar',?,?)")
       .bind(id, "telegram_channel", user, chat, m.from?.username || "", code, "Telegram channel subscription from bot services menu").run();
-  } catch {
-    return say(e, chat, "I couldn't start your subscription just now. If you already have a service order, finish it first; otherwise, please try again shortly.");
-  }
+  } catch { return say(e, chat, "I couldn't start your subscription just now, babe. Please try again in a moment. 💗"); }
   const checkout = new URL(e.SERVICE_CHECKOUT_URL);
   checkout.searchParams.set("add_to_cart", "1");
-  await notifyAdminIfConfigured(e, "<b>New channel subscription order</b>\nSource: Telegram bot → View our services → Subscribe button\nCheckout product: service checkout (<code>" + esc(e.SERVICE_PRODUCT_ID) + "</code>)\nOrder code: <code>" + esc(code) + "</code>\nOrder UUID: <code>" + esc(id) + "</code>\nPayment is not verified yet.");
-  return say(e, chat, "🔥 <b>You're one step away!</b>\n\nOpen the checkout below. In the checkout name field, enter your full name followed by this unique code exactly, for example: <code>John Doe " + esc(code) + "</code>. The code helps match your payment to this subscription.\n\nAfter checkout, come back here and tap “Done — checkout completed” or “I've paid — check again”. Your subscription is not confirmed until payment is checked. 💌", {
+  return say(e, chat, "🔥 <b>You're about to join our channel, babe!</b> 😘\n\nJust follow these simple payment steps:\n\n<b>1. Tap “Pay now”</b> and finish checkout.\n\n<b>2. In the customer name field, enter your full name and the unique code shown below.</b>\n\n👉 <b>Unique code = " + esc(code) + "</b> 👈\n\n<b>Example:</b>\n<code>John Doe " + esc(code) + "</code>\n\nPlease keep the code exactly as shown so I can find your payment, handsome. 💋\n\n<b>3. After paying, come back here and tap “Done — checkout completed” or “I've paid — check again”.</b>\n\nI'll check the payment record first. If I can't find it, you can send your receipt for review. Your subscription is confirmed only after payment is checked. 💌", {
     inline_keyboard: [
       [{ text: "💳 Pay now", url: checkout.toString() }],
       [{ text: "✅ Done — checkout completed", callback_data: "done:" + id }],
@@ -1587,7 +1626,14 @@ async function message(e: Env, m: Msg) {
     if (user === e.ADMIN_TELEGRAM_ID && chat === user) {
       return say(e, chat, "Welcome back. Open /admin for the Admin Desk or /profiles to view and search website profiles.");
     }
-    return say(e, chat, "Hey you… 💋 I’m Annie. Welcome!\n\nLooking for something special? I can show you our model photo previews or help you get access to our Telegram channel. 😉\n\nTap below and take a look at what’s waiting for you. 🔥\n\n⚠️ <i>Never send passwords, PINs or OTPs here.</i>", { inline_keyboard: [[{ text: "👀 View our services 🔞", callback_data: "services:view" }]] });
+    const welcomes = [
+      "Hey handsome… 😘🔥 I’m Annie, babe. Looking for a little excitement? I can show you hot photo previews or help you join our channel. Tap below, darling. 💋",
+      "Well hello, hot boy 😏💖 Annie’s here, just for you. Want to peek at some spicy photo previews or check out the channel? You know what to do, babe. 👀🔥",
+      "Hey darling 💋😉 You made it! I’m Annie. Let’s make this interesting — browse some hot photo previews or explore the channel option below. Come on, handsome. 😘",
+      "Oh hey, babe… 😈💗 I was hoping you’d stop by. Ready for a little tease? Check out the photo previews or tap below to see the channel option. 🔥👀"
+    ];
+    const welcome = welcomes[Math.abs(Number(user) || user.length) % welcomes.length];
+    return say(e, chat, welcome + "\n\n⚠️ <i>Never send passwords, PINs or OTPs here.</i>", { inline_keyboard: [[{ text: "👀 View our services 🔞", callback_data: "services:view" }]] });
   }
   if (t === "/creators" || /^\/profiles(?:\s|$)/i.test(t)) {
     if (user !== e.ADMIN_TELEGRAM_ID) {
@@ -2482,18 +2528,19 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   if (data === "services:view") {
     if (!u.message) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Please open the bot chat to view services." });
     await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Here are the services 💋" });
-    const siteUrl = (e.SITE_URL || "https://fansleak.pages.dev").replace(/\/$/, "");
-    return say(e, u.message.chat.id, "💋 <b>Choose the experience you want</b>\n\n<b>1. 📸 FansLeak website — model photo previews</b>\nBrowse a selection of models and some of their pictures on our website. The website has photos only — no videos — so you can look through the available models first.\n\n<b>2. 🔥 Telegram channel — the full experience</b>\nWant the full package? Join our Telegram channel for the main updates and adult video content, including OnlyFans creators’ authorised content, consensual homemade amateur videos, and many more. Content should be shared with permission.\n\nChoose below to visit the photo gallery or start your channel subscription. ✨", {
-      inline_keyboard: [
-        [{ text: "📸 Visit the website ✨", url: siteUrl }],
-        [{ text: "🔥 Join now — Subscribe", callback_data: "services:join" }]
-      ]
-    });
+    return servicesMenu(e, u.message.chat.id);
   }
-  if (data === "services:join") {
+  if (data === "services:join" || data === "services:continue" || data === "services:restart") {
     if (!u.message) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Please open the bot chat to subscribe." });
-    await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Preparing your secure checkout…" });
-    return startChannelSubscription(e, { chat: u.message.chat, from: u.from, text: "/start service_telegram_channel" });
+    await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Getting things ready, babe… 💋" });
+    return startChannelSubscription(e, { chat: u.message.chat, from: u.from, text: "/start service_telegram_channel" }, data === "services:restart");
+  }
+  if (data.startsWith("order:cancel:")) {
+    if (!u.message || String(u.message.chat.id) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Open your private bot chat to cancel an order." });
+    const id = data.slice("order:cancel:".length);
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Invalid order reference." });
+    await cancelCustomerServiceOrder(e, u.message.chat.id, actor, id);
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Order cancellation checked." });
   }
   if (isAdminCallback && (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor)) {
     return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin private chat only." });
