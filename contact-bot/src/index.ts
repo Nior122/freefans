@@ -2996,7 +2996,7 @@ async function abandonedCart(request: Request, e: Env) {
   const recorded = await e.DB.prepare("INSERT OR IGNORE INTO processed_abandoned_carts(event_key,product_code,request_id,abandoned_at) VALUES(?,?,?,?)").bind(eventId, productCode, target?.id ?? null, new Date(abandonedAt).toISOString()).run();
   if (recorded.meta?.changes === 0) return json({ ok: true, duplicate: true });
   if (!target) return json({ ok: true, matched: false });
-  const extra = "\nIf you still want to continue, enter your full name followed by the unique code in the Selar name field.";
+  const extra = "\nIf you still want to continue, enter your full name followed by the unique code in the checkout name field.";
   try {
     await say(e, target.telegram_chat_id, "It looks like your checkout was not completed. If you already paid, reply here and I’ll help check it manually. Payment is not confirmed automatically. Please complete checkout using your full name and code; an email address cannot match or verify payment." + extra);
   } catch (err) {
