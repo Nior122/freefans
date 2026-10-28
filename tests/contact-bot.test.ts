@@ -884,12 +884,12 @@ test('Customer can have up to three unpaid contact requests and still gets payme
     const afterLimit = db.raw.prepare("SELECT count(*) AS cnt FROM contact_requests WHERE telegram_user_id='5110' AND status IN ('awaiting_email','pending_payment')").get() as any;
     assert.equal(afterLimit.cnt, 3, 'Fourth unpaid request must be blocked');
     const limitMessage = messagesTo(sentTelegramMessages, '5110').at(-1);
-    assert.ok(String(limitMessage?.data.text).includes('3 contact requests'));
+    assert.ok(String(limitMessage?.data.text).includes('3 requests awaiting payment'));
     const markup = limitMessage?.data.reply_markup as any;
     assert.ok(markup?.inline_keyboard?.flat().some((button: any) => String(button.text).includes('Check')));
     // The customer can still chat while all three requests are pending.
     await tgPost(env, userMsg(5110, 'Can you explain what happens next?'));
-    assert.ok(messagesTo(sentTelegramMessages, '5110').some(m => String(m.data.text).includes("I'm here to help with your FansLeak requests") || String(m.data.text).includes('front-desk assistant')));
+    assert.ok(messagesTo(sentTelegramMessages, '5110').some(m => String(m.data.text).includes("I'm here to help with your FansLeak requests") || String(m.data.text).includes('front-desk assistant') || String(m.data.text).includes("I'm Girl")));
   } finally {
     cleanup();
   }
@@ -1233,7 +1233,7 @@ test('Paid claim with an attached Selar sale uses manual verification and does n
     await tgPost(env, userMsg(5210, 'I have paid'));
 
     const customerMessages = messagesTo(sentTelegramMessages, '5210');
-    assert.ok(customerMessages.some(m => String(m.data.text).includes('found a Selar sale record already attached')));
+    assert.ok(customerMessages.some(m => String(m.data.text).includes('found a sale record already attached')));
     assert.ok(customerMessages.some(m => String(m.data.text).includes('not</b> need to send a receipt')));
     assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM receipt_review_prompts WHERE telegram_user_id='5210'").get().cnt, 0);
     assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM payment_receipt_submissions').get().cnt, 0);
@@ -1264,7 +1264,7 @@ test('Missing sale prompts for a Selar receipt photo, forwards it once, and neve
     const prompt = db.raw.prepare("SELECT * FROM receipt_review_prompts WHERE telegram_user_id='5211'").get() as any;
     assert.ok(prompt, 'A missing backend sale after checkout-name entry must create a receipt prompt');
     assert.equal(prompt.order_id, order.id);
-    assert.ok(messagesTo(sentTelegramMessages, '5211').some(m => String(m.data.text).includes('forward your <b>Selar receipt</b>')));
+    assert.ok(messagesTo(sentTelegramMessages, '5211').some(m => String(m.data.text).includes('forward your <b>payment receipt</b>')));
 
     const receipt = photoMsg(5211, 8101);
     await tgPost(env, receipt);
@@ -1711,7 +1711,7 @@ test('A backend sale arriving after the receipt prompt supersedes receipt forwar
     assert.equal(sentTelegramMessages.filter(m => m.method === 'sendPhoto').length, 0, 'Receipt must not be forwarded once backend evidence exists');
     assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM payment_receipt_submissions').get().cnt, 0);
     assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM receipt_review_prompts WHERE telegram_user_id='5214'").get().cnt, 0);
-    assert.ok(messagesTo(sentTelegramMessages, '5214').some(m => String(m.data.text).includes('found a Selar sale record already attached')));
+    assert.ok(messagesTo(sentTelegramMessages, '5214').some(m => String(m.data.text).includes('found a sale record already attached')));
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(orderId) as any).status, 'pending_payment');
   } finally {
     cleanup();
