@@ -218,6 +218,44 @@ test('Customer starting contact request generates unique FL-XXXXXX code and pers
   }
 });
 
+test('Direct /start opens Annie welcome, service menu, and channel checkout using service product', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    await tgPost(env, userMsg(6101, '/start'));
+    const welcome = messagesTo(sentTelegramMessages, '6101').at(-1);
+    assert.match(String(welcome?.data.text), /I’m Annie/);
+    assert.ok((welcome?.data.reply_markup as any)?.inline_keyboard?.flat().some((b: any) => b.text === '👀 View our services 🔞'));
+
+    await tgPost(env, callbackFrom(6101, 'services:view', 'services-view'));
+    const menu = messagesTo(sentTelegramMessages, '6101').at(-1);
+    assert.match(String(menu?.data.text), /website has photos only — no videos/i);
+    assert.match(String(menu?.data.text), /consensual homemade amateur videos/i);
+    assert.ok((menu?.data.reply_markup as any)?.inline_keyboard?.flat().some((b: any) => b.text === '📸 Visit the website ✨' && b.url === 'https://fansleak.pages.dev'));
+    assert.ok((menu?.data.reply_markup as any)?.inline_keyboard?.flat().some((b: any) => b.callback_data === 'services:join'));
+
+    await tgPost(env, callbackFrom(6101, 'services:join', 'services-join'));
+    const order = db.raw.prepare('SELECT * FROM service_orders WHERE telegram_user_id = ?').get('6101') as any;
+    assert.ok(order, 'Channel subscription must create a service order');
+    assert.equal(order.service_id, 'telegram_channel');
+    assert.equal(order.status, 'pending_payment');
+    assert.equal(order.payment_method, 'selar');
+    assert.match(order.checkout_code, /^FL-[0-9A-Z]{6}$/);
+    assert.match(String(order.request_text), /services menu/i);
+
+    const checkoutMessage = messagesTo(sentTelegramMessages, '6101').at(-1);
+    const buttons = (checkoutMessage?.data.reply_markup as any)?.inline_keyboard?.flat() || [];
+    assert.ok(buttons.some((b: any) => b.text === '💳 Pay now' && String(b.url).startsWith('https://selar.com/x19128f988')));
+    assert.ok(buttons.some((b: any) => b.text === '🔎 I've paid — check again'));
+    assert.match(String(checkoutMessage?.data.text), new RegExp(order.checkout_code));
+    const adminMessage = messagesTo(sentTelegramMessages, String(env.ADMIN_TELEGRAM_ID)).find(m => String(m.data.text).includes('New channel subscription order'));
+    assert.match(String(adminMessage?.data.text), /Telegram bot → View our services → Subscribe button/);
+    assert.match(String(adminMessage?.data.text), /service checkout/);
+  } finally {
+    cleanup();
+  }
+});
+
 test('Starting request with invalid profile fails closed', async () => {
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
