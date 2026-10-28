@@ -927,7 +927,7 @@ test('Customer can have up to three unpaid contact requests and still gets payme
     assert.ok(markup?.inline_keyboard?.flat().some((button: any) => String(button.text).includes('Check')));
     // The customer can still chat while all three requests are pending.
     await tgPost(env, userMsg(5110, 'Can you explain what happens next?'));
-    assert.ok(messagesTo(sentTelegramMessages, '5110').some(m => String(m.data.text).includes("I'm here to help with your FansLeak requests") || String(m.data.text).includes('front-desk assistant') || String(m.data.text).includes("I'm Girl")));
+    assert.ok(messagesTo(sentTelegramMessages, '5110').some(m => String(m.data.text).includes("I'm here to help with your FansLeak requests") || String(m.data.text).includes('front-desk assistant') || String(m.data.text).includes("I'm Annie")));
   } finally {
     cleanup();
   }
