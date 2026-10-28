@@ -226,10 +226,13 @@ test('Direct /start opens Annie welcome, service menu, and channel checkout usin
   try {
     await tgPost(env, userMsg(6101, '/start'));
     const welcome = messagesTo(sentTelegramMessages, '6101').at(-1);
-    assert.match(String(welcome?.data.text), /Annie/);
-    assert.match(String(welcome?.data.text), /handsome|babe|darling|hot boy/i);
-    assert.doesNotMatch(String(welcome?.data.text), /our model photo previews/i);
-    assert.ok((welcome?.data.reply_markup as any)?.inline_keyboard?.flat().some((b: any) => b.text === '👀 View our services 🔞'));
+    const welcomeText = String(welcome?.data.text);
+    assert.ok(welcomeText.includes('💋 <b>Hey babe, what do you want?</b>'));
+    assert.ok(welcomeText.includes('Go to our website and see hot photo previews. Look at sexy girls with perfect bodies and naughty poses. These photos are fire and will make you hard. Only photos. No videos.💋'));
+    assert.ok(welcomeText.includes('Want the real hot stuff? Join our Telegram channel right now. You get all the OnlyFans videos, fresh leaks, dirty chats, full videos, and new nasty drops every day. This is where it gets wild and addictive.🔞'));
+    const welcomeButtons = (welcome?.data.reply_markup as any)?.inline_keyboard?.flat() || [];
+    assert.ok(welcomeButtons.some((b: any) => b.text === '📸 Website Photo Previews' && b.url === 'https://fansleak.pages.dev'));
+    assert.ok(welcomeButtons.some((b: any) => b.text === '🔥 Telegram Channel' && b.callback_data === 'services:join'));
 
     await tgPost(env, callbackFrom(6101, 'services:view', 'services-view'));
     const menu = messagesTo(sentTelegramMessages, '6101').at(-1);
