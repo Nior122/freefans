@@ -1142,7 +1142,7 @@ async function handleReceiptMedia(e: Env, m: Msg, preliminaryOrder: CustomerOrde
     return say(e, chat, "I couldn't forward that receipt for review just now. Your order remains pending and nothing was marked paid. Please send the same payment receipt again in a moment.");
   }
 
-  await e.DB.prepare("UPDATE payment_receipt_submissions SET status='forwarded',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='forwarding'").bind(submissionId).run();
+  await e.DB.prepare("UPDATE payment_receipt_submissions SET status='forwarded',telegram_file_id=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='forwarding'").bind(submissionId).run();
   await clearPaymentPrompts(e, user, latestOrder.id);
   return say(e, chat, "Thanks — your payment receipt has been sent for manual review with your order details. This does <b>not</b> mark your order as paid or verified. I’ll update you here after the payment has been checked. Your request or service fulfilment is sent only after verification.");
 }
@@ -2478,7 +2478,7 @@ async function executeBroadcast(e: Env, actor: string, chat: string | number, dr
     } catch { failed++; }
   }
   const status = failed === 0 ? "sent" : "partial";
-  await e.DB.prepare("UPDATE admin_broadcast_drafts SET status=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(status, draft.id).run();
+  await e.DB.prepare("UPDATE admin_broadcast_drafts SET status=?,media_kind=NULL,media_file_id=NULL,media_mime_type=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(status, draft.id).run();
   await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,details) VALUES(?,?,?)").bind(actor, "admin_broadcast_" + status, "Broadcast draft " + draft.id + ": sent=" + sent + ", failed=" + failed + ", recipients=" + recipients.length).run();
   await say(e, chat, (failed ? "⚠️" : "✅") + " Broadcast finished. Sent: <b>" + sent + "</b>; failed: <b>" + failed + "</b>. The draft is locked against duplicate sends.");
   return failed === 0;
@@ -2515,7 +2515,7 @@ async function executeSupportDraft(e: Env, actor: string, chat: string | number,
     await say(e, chat, "⚠️ Message outcome uncertain. The draft is locked to prevent duplicate sends; inspect the customer conversation before retrying.");
     return false;
   }
-  const sent = await e.DB.prepare("UPDATE admin_message_drafts SET status='sent',delivered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draftId).run();
+  const sent = await e.DB.prepare("UPDATE admin_message_drafts SET status='sent',media_kind=NULL,media_file_id=NULL,media_mime_type=NULL,delivered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draftId).run();
   await auditAdminMessageDraft(e, actor, "admin_message_customer", draft, order, "Admin sent customer support message for " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + "; " + adminMessageContentDetails(draft));
   if (!sent.meta?.changes) await notifyAdminIfConfigured(e, "A customer support message was sent for <code>" + esc(String(order.checkout_code || draft.order_id)) + "</code>, but the draft status changed concurrently. Inspect the audit before any retry.");
   await say(e, chat, "✅ Support message sent for order <code>" + esc(String(order.checkout_code || order.id)) + "</code>.");
@@ -2658,7 +2658,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Delivery outcome uncertain. Draft locked to prevent duplicates."});
     }
     const finalStatus=await e.DB.prepare("UPDATE contact_requests SET status='approved',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='payment_verified'").bind(d.request_id).run();
-    await e.DB.prepare("UPDATE delivery_drafts SET status='sent',delivered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draftId).run();
+    await e.DB.prepare("UPDATE delivery_drafts SET status='sent',media_kind=NULL,media_file_id=NULL,media_mime_type=NULL,delivered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draftId).run();
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(? ,'delivery_sent',?,?,?)").bind(actor,d.request_id,d.profile_id,"Confirmed delivery draft sent through Telegram").run();
     if(!finalStatus.meta?.changes) await notifyAdminIfConfigured(e,"Delivery sent for request <code>"+d.request_id+"</code>, but status changed concurrently. Inspect audit before retrying.");
     else await sayBestEffort(e,chat,"✅ Delivery sent once for request <code>"+esc(d.checkout_code || d.request_id)+"</code>. The request is now <b>approved</b>. This draft is marked sent and will not send again.");
@@ -2712,7 +2712,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Delivery outcome uncertain. Draft locked to prevent duplicates."});
     }
     const fulfilled=await e.DB.prepare("UPDATE service_orders SET status='fulfilled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='payment_verified'").bind(d.service_order_id).run();
-    await e.DB.prepare("UPDATE service_delivery_drafts SET status='sent',delivered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draftId).run();
+    await e.DB.prepare("UPDATE service_delivery_drafts SET status='sent',media_kind=NULL,media_file_id=NULL,media_mime_type=NULL,delivered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draftId).run();
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_order_fulfilled',?,?)").bind(actor,d.service_order_id,"Admin confirmed and sent service fulfilment; media="+(context.draft.media_file_id ? String(context.draft.media_kind || "file") : "none")+"; text_length="+body.length).run();
     if(!fulfilled.meta?.changes) await notifyAdminIfConfigured(e,"Service fulfilment was sent but order status changed concurrently. Inspect audit before retrying: <code>"+esc(d.service_order_id)+"</code>");
     else await sayBestEffort(e,chat,"✅ Service fulfilment sent once for order <code>"+esc(String(d.checkout_code||d.service_order_id))+"</code>. The order is now <b>fulfilled</b>; this draft is marked sent and will not send again.");
@@ -3015,7 +3015,7 @@ async function selar(request: Request, e: Env) {
   const fullName = normName(saleName);
   if (code) {
     const codeRows = kind === "contact"
-      ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE checkout_code=? AND status='pending_payment' AND payment_method='selar' LIMIT 2").bind(code).all<any>()
+      ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,telegram_username,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE checkout_code=? AND status='pending_payment' AND payment_method='selar' LIMIT 2").bind(code).all<any>()
       : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name,buyer_email FROM service_orders WHERE checkout_code=? AND status='pending_payment' LIMIT 2").bind(code).all<any>();
     if (codeRows.results.length === 1) {
       const candidate = codeRows.results[0];
@@ -3031,7 +3031,7 @@ async function selar(request: Request, e: Env) {
   if (!target && !code) {
     if (fullName.length >= 5 && fullName.includes(" ")) {
       const nameRows = kind === "contact"
-        ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE status='pending_payment' AND payment_method='selar' AND checkout_name IS NOT NULL").all<any>()
+        ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,telegram_username,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE status='pending_payment' AND payment_method='selar' AND checkout_name IS NOT NULL").all<any>()
         : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name,buyer_email FROM service_orders WHERE status='pending_payment' AND checkout_name IS NOT NULL").all<any>();
       const exactNameRows = nameRows.results.filter((row: any) => row.checkout_name && normName(row.checkout_name) === fullName);
       if (exactNameRows.length === 1) {
@@ -3055,7 +3055,7 @@ async function selar(request: Request, e: Env) {
       const upd = await e.DB.prepare("UPDATE contact_requests SET payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment' AND payment_method='selar'").bind(s.reference, target.id).run();
       if (!upd.meta?.changes) throw new Error("order_state_changed_before_attach");
       const markup = { inline_keyboard: [[{ text: "✅ I checked Selar — confirm payment", callback_data: "selarverify:" + target.id }, { text: "Reject request", callback_data: "reject:" + target.id }]] };
-      await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nSource: FansLeak website → model Subscribe button\nCheckout product: profile request (<code>${esc(e.SELAR_PRODUCT_ID || "")}</code>)\nRequest: <code>${target.id}</code>\nProfile: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nOrder code: <code>${esc(effectiveCode)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}${clueNote}`, markup);
+      await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nSource: FansLeak website → model Subscribe button\nCheckout product: profile request (<code>${esc(e.SELAR_PRODUCT_ID || "")}</code>)\nRequest: <code>${target.id}</code>\nProfile: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nTelegram username: ${target.telegram_username ? "@" + esc(String(target.telegram_username).replace(/^@+/, "")) : "not provided"}\nOrder code: <code>${esc(effectiveCode)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}${clueNote}`, markup);
       await sayBestEffort(e, target.telegram_chat_id, "A payment notification was received. Your request still needs payment verification before it can be approved.");
     } else {
       const upd = await e.DB.prepare("UPDATE service_orders SET payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(s.reference, target.id).run();
