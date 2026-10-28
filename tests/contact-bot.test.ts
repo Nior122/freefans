@@ -241,7 +241,7 @@ test('Starting request with invalid profile fails closed', async () => {
     assert.equal(order, undefined, 'No order should be created for non-existent profile');
 
     const sent = sentTelegramMessages.find(m => m.data.chat_id === '5002');
-    assert.ok(String(sent?.data.text).includes('not currently in the public FansLeak catalogue'));
+    assert.ok(String(sent?.data.text).includes('not currently listed on our website'));
   } finally {
     cleanup();
   }
@@ -1597,7 +1597,7 @@ test('Admin Desk support order selection rejects invalid, missing, and ambiguous
     const adminTexts = messagesTo(sentTelegramMessages, '10001').map(m => String(m.data.text || ''));
     assert.ok(adminTexts.some(text => text.includes('matches more than one order')));
     assert.ok(adminTexts.some(text => text.includes('full order UUID or an order code')));
-    assert.ok(adminTexts.some(text => text.includes('No contact request or service order matched')));
+    assert.ok(adminTexts.some(text => text.includes('No request or service order matched')));
   } finally {
     cleanup();
   }
@@ -1770,7 +1770,7 @@ test('Clients cannot list creators in the bot, while the private admin can view 
     await tgPost(env, userMsg(6200, '/creators'));
     await tgPost(env, userMsg(6200, '/profiles rose'));
     const clientText = messagesTo(sentTelegramMessages, '6200').map(m => String(m.data.text || '')).join('\n');
-    assert.ok(clientText.includes('only listed on the FansLeak website'));
+    assert.ok(clientText.includes('listed on our website'));
     assert.ok(!clientText.includes('Anaimiya'));
     assert.ok(!clientText.includes('RoseBeck'));
     assert.ok(!clientText.includes('emanuela.ebony'));
