@@ -2336,3 +2336,75 @@ test('Release 2: stale sending draft recovery requires a separate confirmation a
     cleanup();
   }
 });
+
+
+test('Annie shows previous unpaid order details, cancels and deletes it, then returns to the two service options', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    await tgPost(env, userMsg(6201, '/start'));
+    await tgPost(env, callbackFrom(6201, 'services:join', 'first-join'));
+    const first = db.raw.prepare("SELECT * FROM service_orders WHERE telegram_user_id='6201'").get() as any;
+    assert.ok(first);
+    await tgPost(env, callbackFrom(6201, 'services:join', 'second-join'));
+    const prompt = messagesTo(sentTelegramMessages, '6201').at(-1);
+    assert.match(String(prompt?.data.text), new RegExp(first.checkout_code));
+    const cancelButton = ((prompt?.data.reply_markup as any)?.inline_keyboard || []).flat().find((b: any) => String(b.callback_data).startsWith('order:cancel:'));
+    assert.ok(cancelButton, 'Previous unpaid order must have a cancel button');
+    await tgPost(env, callbackFrom(6201, String(cancelButton.callback_data), 'cancel-old-order'));
+    assert.equal(db.raw.prepare("SELECT count(*) AS n FROM service_orders WHERE id=?").get(first.id).n, 0, 'Cancelled unpaid order must be deleted');
+    const afterCancel = messagesTo(sentTelegramMessages, '6201').at(-1);
+    const buttons = ((afterCancel?.data.reply_markup as any)?.inline_keyboard || []).flat();
+    assert.ok(buttons.some((b: any) => b.text === '📸 Visit the website ✨'));
+    assert.ok(buttons.some((b: any) => b.callback_data === 'services:join'));
+  } finally { cleanup(); }
+});
+
+test('Channel flow allows up to three unverified orders and blocks a fourth', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    await tgPost(env, callbackFrom(6202, 'services:join', 'join-1'));
+    for (let i = 2; i <= 3; i++) {
+      await tgPost(env, callbackFrom(6202, 'services:join', 'prompt-' + i));
+      await tgPost(env, callbackFrom(6202, 'services:continue', 'continue-' + i));
+    }
+    assert.equal(db.raw.prepare("SELECT count(*) AS n FROM service_orders WHERE telegram_user_id='6202' AND status='pending_payment'").get().n, 3);
+    await tgPost(env, callbackFrom(6202, 'services:join', 'join-at-limit'));
+    const last = messagesTo(sentTelegramMessages, '6202').at(-1);
+    assert.match(String(last?.data.text), /limit of 3 unpaid orders/i);
+    assert.equal(db.raw.prepare("SELECT count(*) AS n FROM service_orders WHERE telegram_user_id='6202'").get().n, 3);
+  } finally { cleanup(); }
+});
+
+test('Previously fulfilled channel order offers Start again and creates a fresh order without deleting history', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    db.raw.prepare("INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,telegram_username,status,payment_method,checkout_code) VALUES(?,?,?,?,?,'fulfilled','selar',?)")
+      .run('6203-previous-order', 'telegram_channel', '6203', '6203', 'hot_customer', 'FL-ABC123');
+    await tgPost(env, callbackFrom(6203, 'services:join', 'join-after-complete'));
+    const prompt = messagesTo(sentTelegramMessages, '6203').at(-1);
+    assert.match(String(prompt?.data.text), /previous channel order was completed/i);
+    assert.ok(((prompt?.data.reply_markup as any)?.inline_keyboard || []).flat().some((b: any) => b.callback_data === 'services:restart'));
+    await tgPost(env, callbackFrom(6203, 'services:restart', 'restart-order'));
+    assert.equal(db.raw.prepare("SELECT count(*) AS n FROM service_orders WHERE telegram_user_id='6203'").get().n, 2);
+    assert.equal(db.raw.prepare("SELECT count(*) AS n FROM service_orders WHERE id='6203-previous-order' AND status='fulfilled'").get().n, 1);
+  } finally { cleanup(); }
+});
+
+test('Hourly cleanup deletes unpaid orders older than 48 hours and tells the customer', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    db.raw.prepare("INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,telegram_username,status,payment_method,checkout_code,created_at) VALUES(?,?,?,?,?,'pending_payment','selar',?,datetime('now','-49 hours'))")
+      .run('6204-expired-service', 'telegram_channel', '6204', '6204', 'expire_me', 'FL-EXP123');
+    db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,telegram_username,profile_id,status,payment_method,checkout_code,created_at) VALUES(?,?,?,?,?,'pending_payment','selar',?,datetime('now','-49 hours'))")
+      .run('6205-expired-contact', '6205', '6205', 'expire_contact', 'anaimiya', 'FL-EXP456');
+    await worker.scheduled({} as any, env);
+    assert.equal(db.raw.prepare("SELECT count(*) AS n FROM service_orders WHERE id='6204-expired-service'").get().n, 0);
+    assert.equal(db.raw.prepare("SELECT count(*) AS n FROM contact_requests WHERE id='6205-expired-contact'").get().n, 0);
+    assert.match(messagesTo(sentTelegramMessages, '6204').map(m => String(m.data.text)).join('\n'), /deleted because checkout wasn't completed within 48 hours/i);
+    assert.match(messagesTo(sentTelegramMessages, '6205').map(m => String(m.data.text)).join('\n'), /deleted because checkout wasn't completed within 48 hours/i);
+  } finally { cleanup(); }
+});
