@@ -169,6 +169,14 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0016_admin_draft_recovery_actions.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0017_limit_unverified_service_orders',
+    description: 'Replace the one-active-service-order index with a three-unverified-order cap',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0017_limit_unverified_service_orders.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
