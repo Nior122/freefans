@@ -33,6 +33,7 @@ function createTestDb() {
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0019_admin_broadcast_recipients.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0020_receipt_review_actions.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0021_admin_order_deletion_actions.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0022_user_language_preferences.sql'), 'utf8'));
 
   return {
     raw: db,
@@ -66,6 +67,18 @@ function createTestDb() {
       };
     }
   };
+}
+
+function seedLanguage(db: any, userId: number | string, language = 'en') {
+  db.raw.prepare(`
+    INSERT INTO user_language_preferences(telegram_user_id,telegram_chat_id,language_code,pending_start_payload)
+    VALUES(?,?,?,NULL)
+    ON CONFLICT(telegram_user_id) DO UPDATE SET
+      telegram_chat_id=excluded.telegram_chat_id,
+      language_code=excluded.language_code,
+      pending_start_payload=NULL,
+      updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+  `).run(String(userId), String(userId), language);
 }
 
 // Create a test environment with mock fetch to intercept Telegram API calls and catalogue fetch
@@ -190,6 +203,7 @@ test('Customer starting contact request generates unique FL-XXXXXX code and pers
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
+    seedLanguage(db, 5001);
     const update = {
       message: {
         chat: { id: 5001 },
@@ -245,6 +259,7 @@ test('Direct /start opens Annie welcome, service menu, and channel checkout usin
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
+    seedLanguage(db, 6101);
     await tgPost(env, userMsg(6101, '/start'));
     const welcome = messagesTo(sentTelegramMessages, '6101').find(m => String(m.data.text).includes('Hey babe, what do you want?'));
     const welcomeText = String(welcome?.data.text);
@@ -309,6 +324,7 @@ test('Starting request with invalid profile fails closed', async () => {
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
+    seedLanguage(db, 5002);
     // Non-existent profile
     const update = {
       message: {
@@ -338,6 +354,7 @@ test('Separate service orders are created and isolated from contact requests', a
   const db = createTestDb();
   const { env, cleanup } = createTestEnv(db);
   try {
+    seedLanguage(db, 6001);
     const update = {
       message: {
         chat: { id: 6001 },
@@ -767,6 +784,7 @@ test('Checkout code collision exhaust fails safely without returning unchecked c
   const db = createTestDb();
   const { env, cleanup } = createTestEnv(db);
   try {
+    seedLanguage(db, 9301);
     // Create a mock DB where prepare('SELECT id FROM ...') always returns a collision
     const collidingDb = {
       ...db,
@@ -920,6 +938,9 @@ test('Dotted profile IDs resolve via the Telegram-safe start parameter; malforme
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
+    seedLanguage(db, 5101);
+    seedLanguage(db, 5102);
+    seedLanguage(db, 5103);
     await tgPost(env, userMsg(5101, '/start contact_emanuela_dot_ebony'));
     const order = db.raw.prepare('SELECT * FROM contact_requests WHERE telegram_user_id = ?').get('5101') as any;
     assert.ok(order, 'Encoded dotted profile ID must create a request');
@@ -943,6 +964,8 @@ test('An open contact request does not block a service purchase, and an open ser
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
+    seedLanguage(db, 5191);
+    seedLanguage(db, 5192);
     await tgPost(env, userMsg(5191, '/start contact_anaimiya'));
     await tgPost(env, userMsg(5191, '/start service_website'));
     assert.equal((db.raw.prepare("SELECT COUNT(*) AS n FROM contact_requests WHERE telegram_user_id='5191'").get() as any).n, 1);
@@ -962,6 +985,7 @@ test('Customer can have up to three unpaid contact requests and still gets payme
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
+    seedLanguage(db, 5110);
     await tgPost(env, userMsg(5110, '/start contact_anaimiya'));
     await tgPost(env, userMsg(5110, '/start contact_rosebeck'));
     await tgPost(env, userMsg(5110, '/start contact_sweet_creator'));
@@ -1076,6 +1100,8 @@ test('Saved email is audit information only and checkout-name confirmation never
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
+    seedLanguage(db, 5150);
+    seedLanguage(db, 5151);
     await tgPost(env, userMsg(5150, '/start contact_anaimiya'));
     let order = db.raw.prepare("SELECT * FROM contact_requests WHERE telegram_user_id='5150'").get() as any;
 
@@ -1312,6 +1338,7 @@ test('Paid claim with an attached Selar sale uses manual verification and does n
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
+    seedLanguage(db, 5210);
     await tgPost(env, userMsg(5210, '/start contact_anaimiya'));
     const order = db.raw.prepare("SELECT * FROM contact_requests WHERE telegram_user_id='5210'").get() as any;
     const saleResponse = await selarPost(env, {
@@ -1342,6 +1369,7 @@ test('Missing sale prompts for a Selar receipt photo, forwards it once, and neve
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
+    seedLanguage(db, 5211);
     await tgPost(env, userMsg(5211, '/start contact_anaimiya'));
     const order = db.raw.prepare("SELECT * FROM contact_requests WHERE telegram_user_id='5211'").get() as any;
 
@@ -3134,6 +3162,7 @@ test('Annie shows previous unpaid order details, cancels and deletes it, then re
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
+    seedLanguage(db, 6201);
     await tgPost(env, userMsg(6201, '/start'));
     await tgPost(env, callbackFrom(6201, 'services:join', 'first-join'));
     const first = db.raw.prepare("SELECT * FROM service_orders WHERE telegram_user_id='6201'").get() as any;
@@ -3199,4 +3228,167 @@ test('Hourly cleanup deletes unpaid orders older than 48 hours and tells the cus
     assert.match(messagesTo(sentTelegramMessages, '6204').map(m => String(m.data.text)).join('\n'), /deleted because checkout wasn't completed within 48 hours/i);
     assert.match(messagesTo(sentTelegramMessages, '6205').map(m => String(m.data.text)).join('\n'), /deleted because checkout wasn't completed within 48 hours/i);
   } finally { cleanup(); }
+});
+
+test('Language picker gates a first plain /start, saves every supported choice, and resumes the localized welcome', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const cases = [
+      { user: 6301, code: 'en', welcome: 'Hey babe, what do you want?', start: '🚀 Start', language: '🌐 Language' },
+      { user: 6302, code: 'es', welcome: 'Hola, guapo, ¿qué quieres?', start: '🚀 Inicio', language: '🌐 Idioma' },
+      { user: 6303, code: 'de', welcome: 'Hey mein Hübscher, was hättest du gern?', start: '🚀 Start', language: '🌐 Sprache' },
+      { user: 6304, code: 'fr', welcome: 'Salut beau gosse, qu’est-ce qui te ferait plaisir ?', start: '🚀 Démarrer', language: '🌐 Langue' },
+      { user: 6305, code: 'ar', welcome: 'مرحبًا حبيبي، ماذا تريد؟', start: '🚀 ابدأ', language: '🌐 اللغة' },
+      { user: 6306, code: 'pt', welcome: 'Olá, querido, o que queres?', start: '🚀 Iniciar', language: '🌐 Idioma' }
+    ];
+    const expectedCallbacks = ['language:set:en', 'language:set:es', 'language:set:de', 'language:set:fr', 'language:set:ar', 'language:set:pt'];
+    for (const item of cases) {
+      await tgPost(env, userMsg(item.user, '/start'));
+      const picker = messagesTo(sentTelegramMessages, String(item.user)).at(-1);
+      assert.ok(String(picker?.data.text).includes('Choose your language'), 'A first plain /start must show the language picker');
+      assert.ok(String(picker?.data.text).includes('اختر لغتك'), 'The picker heading must include Arabic script');
+      const buttons = ((picker?.data.reply_markup as any)?.inline_keyboard || []).flat();
+      assert.deepEqual(buttons.map((b: any) => b.callback_data), expectedCallbacks);
+      assert.equal((db.raw.prepare('SELECT count(*) AS n FROM contact_requests WHERE telegram_user_id=?').get(String(item.user)) as any).n, 0);
+      assert.equal((db.raw.prepare('SELECT count(*) AS n FROM service_orders WHERE telegram_user_id=?').get(String(item.user)) as any).n, 0);
+
+      await tgPost(env, callbackFrom(item.user, `language:set:${item.code}`, `lang-${item.code}`));
+      const pref = db.raw.prepare('SELECT language_code,pending_start_payload FROM user_language_preferences WHERE telegram_user_id=?').get(String(item.user)) as any;
+      assert.equal(pref.language_code, item.code);
+      assert.equal(pref.pending_start_payload, null);
+      const customerMessages = messagesTo(sentTelegramMessages, String(item.user));
+      assert.ok(customerMessages.some(m => String(m.data.text).includes(item.welcome)), `The ${item.code} welcome must be shown after selection`);
+      const tip = customerMessages.at(-1);
+      const replyButtons = (((tip?.data.reply_markup as any)?.keyboard || []) as any[]).flat().map((b: any) => b.text);
+      assert.ok(replyButtons.includes(item.start), `The ${item.code} Start button must be persistent`);
+      assert.ok(replyButtons.includes(item.language), `The ${item.code} Language button must be persistent`);
+
+      const beforeSecondStart = customerMessages.length;
+      await tgPost(env, userMsg(item.user, '/start'));
+      const secondStart = messagesTo(sentTelegramMessages, String(item.user)).slice(beforeSecondStart);
+      assert.ok(secondStart.some(m => String(m.data.text).includes(item.welcome)), 'A saved language must be restored on the next /start');
+      assert.ok(!secondStart.some(m => String(m.data.text).includes('Choose your language')), 'A saved language must not force the picker again');
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('Language picker preserves a pending profile start, resumes it in Portuguese exactly once, and keeps payment callbacks intact', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    await tgPost(env, userMsg(6311, '/start contact_anaimiya'));
+    assert.equal((db.raw.prepare("SELECT count(*) AS n FROM contact_requests WHERE telegram_user_id='6311'").get() as any).n, 0, 'No order may be created before language selection');
+    const pending = db.raw.prepare("SELECT language_code,pending_start_payload FROM user_language_preferences WHERE telegram_user_id='6311'").get() as any;
+    assert.deepEqual([pending.language_code, pending.pending_start_payload], [null, 'contact_anaimiya']);
+
+    await tgPost(env, callbackFrom(6311, 'language:set:pt', 'lang-profile-pt'));
+    const order = db.raw.prepare("SELECT * FROM contact_requests WHERE telegram_user_id='6311'").get() as any;
+    assert.ok(order, 'Selecting Portuguese must resume the preserved profile start');
+    assert.equal(order.profile_id, 'anaimiya');
+    assert.match(order.checkout_code, /^FL-[0-9A-Z]{6}$/);
+    const savedPref = db.raw.prepare("SELECT language_code,pending_start_payload FROM user_language_preferences WHERE telegram_user_id='6311'").get() as any;
+    assert.deepEqual([savedPref.language_code, savedPref.pending_start_payload], ['pt', null]);
+
+    const customerMessages = messagesTo(sentTelegramMessages, '6311');
+    assert.ok(customerMessages.some(m => String(m.data.text).includes('Idioma guardado')));
+    const greeting = customerMessages.find(m => String(m.data.text).includes('Sou a Annie para Anaimiya.'));
+    assert.ok(greeting, 'The resumed greeting must be in Portuguese');
+    assert.ok(String(greeting.data.text).includes(`<b>John Doe ${order.checkout_code}</b>`), 'The FL code must remain unchanged in Portuguese instructions');
+    const payButton = (((greeting.data.reply_markup as any)?.inline_keyboard || []) as any[]).flat().find((b: any) => b.callback_data === `pay_selar:${order.id}`);
+    assert.ok(payButton, 'The existing pay_selar callback must be preserved');
+
+    await tgPost(env, callbackFrom(6311, payButton.callback_data, 'pt-pay-now'));
+    const checkoutMessage = messagesTo(sentTelegramMessages, '6311').find(m => String(m.data.text).includes(String(env.SELAR_CHECKOUT_URL)) && String(m.data.text).includes(order.checkout_code));
+    assert.ok(checkoutMessage, 'Portuguese checkout instructions must preserve the URL and FL code');
+    const openCheckout = (((checkoutMessage.data.reply_markup as any)?.inline_keyboard || []) as any[]).flat().find((b: any) => b.url);
+    assert.equal(openCheckout?.url, `${env.SELAR_CHECKOUT_URL}?add_to_cart=1`);
+
+    await tgPost(env, callbackFrom(6311, 'language:set:pt', 'lang-profile-pt-again'));
+    assert.equal((db.raw.prepare("SELECT count(*) AS n FROM contact_requests WHERE telegram_user_id='6311'").get() as any).n, 1, 'A repeated language tap must not resume the cleared start again');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Language picker preserves a pending service start and resumes it in Arabic script', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    await tgPost(env, userMsg(6312, '/start service_consultation1'));
+    assert.equal((db.raw.prepare("SELECT count(*) AS n FROM service_orders WHERE telegram_user_id='6312'").get() as any).n, 0);
+    assert.equal((db.raw.prepare("SELECT pending_start_payload FROM user_language_preferences WHERE telegram_user_id='6312'").get() as any).pending_start_payload, 'service_consultation1');
+
+    await tgPost(env, callbackFrom(6312, 'language:set:ar', 'lang-service-ar'));
+    const order = db.raw.prepare("SELECT * FROM service_orders WHERE telegram_user_id='6312'").get() as any;
+    assert.ok(order, 'Selecting Arabic must resume the preserved service start');
+    assert.equal(order.service_id, 'consultation1');
+    assert.equal(order.status, 'awaiting_request');
+    assert.match(order.checkout_code, /^FL-[0-9A-Z]{6}$/);
+    const welcome = messagesTo(sentTelegramMessages, '6312').find(m => String(m.data.text).includes(order.id));
+    assert.ok(welcome, 'The service welcome must include the order reference');
+    assert.match(String(welcome.data.text), /[\u0600-\u06FF]/, 'The resumed service welcome must render Arabic script');
+    assert.ok(String(welcome.data.text).includes('اكتب PAY'));
+    assert.equal((db.raw.prepare("SELECT pending_start_payload FROM user_language_preferences WHERE telegram_user_id='6312'").get() as any).pending_start_payload, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test('Switching language with /language or the localized button preserves an order and its checkout-name prompt', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    seedLanguage(db, 6313, 'en');
+    await tgPost(env, userMsg(6313, '/start contact_anaimiya'));
+    const order = db.raw.prepare("SELECT * FROM contact_requests WHERE telegram_user_id='6313'").get() as any;
+    assert.ok(order);
+    await tgPost(env, callbackFrom(6313, `done:${order.id}`, 'lang-switch-done'));
+    assert.ok(db.raw.prepare("SELECT order_id FROM checkout_name_prompts WHERE telegram_user_id='6313'").get(), 'The checkout-name prompt must be open before switching');
+
+    await tgPost(env, userMsg(6313, '/language'));
+    assert.ok(String(messagesTo(sentTelegramMessages, '6313').at(-1)?.data.text).includes('Choose your language'));
+    await tgPost(env, callbackFrom(6313, 'language:set:es', 'lang-switch-es'));
+    assert.ok(messagesTo(sentTelegramMessages, '6313').some(m => String(m.data.text).includes('Tus solicitudes y pedidos actuales no han cambiado.')));
+    let saved = db.raw.prepare('SELECT status,checkout_code,checkout_name FROM contact_requests WHERE id=?').get(order.id) as any;
+    assert.deepEqual([saved.status, saved.checkout_code, saved.checkout_name], ['pending_payment', order.checkout_code, null]);
+    assert.ok(db.raw.prepare("SELECT order_id FROM checkout_name_prompts WHERE telegram_user_id='6313'").get(), 'Switching language must not consume the checkout-name prompt');
+
+    await tgPost(env, userMsg(6313, '🌐 Idioma'));
+    assert.ok(String(messagesTo(sentTelegramMessages, '6313').at(-1)?.data.text).includes('Choose your language'), 'The localized Language button must reopen the picker instead of being treated as a checkout name');
+    assert.ok(db.raw.prepare("SELECT order_id FROM checkout_name_prompts WHERE telegram_user_id='6313'").get(), 'The localized Language button must not consume the prompt');
+    await tgPost(env, callbackFrom(6313, 'language:set:de', 'lang-switch-de'));
+    assert.equal((db.raw.prepare("SELECT language_code FROM user_language_preferences WHERE telegram_user_id='6313'").get() as any).language_code, 'de');
+    assert.ok(db.raw.prepare("SELECT order_id FROM checkout_name_prompts WHERE telegram_user_id='6313'").get());
+
+    await tgPost(env, userMsg(6313, `Buyer Name ${order.checkout_code}`));
+    saved = db.raw.prepare('SELECT status,checkout_code,checkout_name FROM contact_requests WHERE id=?').get(order.id) as any;
+    assert.deepEqual([saved.status, saved.checkout_code, saved.checkout_name], ['pending_payment', order.checkout_code, 'Buyer Name']);
+    assert.equal(db.raw.prepare("SELECT count(*) AS n FROM checkout_name_prompts WHERE telegram_user_id='6313'").get().n, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('Invalid language callbacks fail safely, the admin cannot save a customer language, and missing preferences fall back to English', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    await tgPost(env, userMsg(6314, '/start'));
+    await tgPost(env, callbackFrom(6314, 'language:set:xx', 'lang-invalid'));
+    assert.ok(sentTelegramMessages.some(m => m.method === 'answerCallbackQuery' && String(m.data.text).includes('That language option is not available.')));
+    assert.equal((db.raw.prepare("SELECT language_code FROM user_language_preferences WHERE telegram_user_id='6314'").get() as any).language_code, null);
+
+    await tgPost(env, userMsg(6314, '/creators'));
+    assert.ok(String(messagesTo(sentTelegramMessages, '6314').at(-1)?.data.text).includes('Creator profiles are listed on our website'), 'An ongoing message with no saved language must fall back to English');
+    assert.equal((db.raw.prepare("SELECT language_code FROM user_language_preferences WHERE telegram_user_id='6314'").get() as any).language_code, null);
+
+    await tgPost(env, callbackFrom(10001, 'language:set:es', 'lang-admin-blocked'));
+    assert.ok(sentTelegramMessages.some(m => m.method === 'answerCallbackQuery' && String(m.data.text).includes('Open your private chat with this bot to choose a language.')));
+    assert.equal(db.raw.prepare("SELECT * FROM user_language_preferences WHERE telegram_user_id='10001'").get(), undefined);
+  } finally {
+    cleanup();
+  }
 });

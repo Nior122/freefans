@@ -223,6 +223,14 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0021_admin_order_deletion_actions.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0022_user_language_preferences',
+    description: 'Persistent Telegram customer language preferences and pending start payloads',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0022_user_language_preferences.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
@@ -382,7 +390,11 @@ export const EXPECTED_SCHEMA = {
     'completed_at', 'created_at', 'updated_at'
   ],
   hidden_profiles: ['profile_id', 'hidden_by_admin', 'reason', 'hidden_at'],
-  admin_pending_actions: ['id', 'admin_telegram_id', 'action', 'payload', 'status', 'expires_at', 'created_at', 'updated_at']
+  admin_pending_actions: ['id', 'admin_telegram_id', 'action', 'payload', 'status', 'expires_at', 'created_at', 'updated_at'],
+  user_language_preferences: [
+    'telegram_user_id', 'telegram_chat_id', 'language_code', 'pending_start_payload',
+    'created_at', 'updated_at'
+  ]
 };
 
 export const EXPECTED_UNIQUE_INDEXES = [

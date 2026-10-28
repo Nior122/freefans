@@ -312,6 +312,14 @@ export function migrateRemote() {
     runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0021_admin_order_deletion_actions')");
   }
 
+  // Migration 22: persistent customer language preferences. Additive only;
+  // no existing order, payment, draft, or audit table is changed.
+  if (!applied.has('0022_user_language_preferences')) {
+    console.log('[migrate-d1] Applying 0022_user_language_preferences migration...');
+    runWranglerFile(path.join(ROOT, 'contact-bot', 'migrations', '0022_user_language_preferences.sql'));
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0022_user_language_preferences')");
+  }
+
   // Final complete schema verification. These expectations are shared with the
   // local migration verifier to prevent the two definitions drifting apart.
   console.log('[migrate-d1] Verifying complete schema...');
