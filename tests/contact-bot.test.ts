@@ -215,12 +215,24 @@ test('Customer starting contact request generates unique FL-XXXXXX code and pers
     assert.ok(sent, 'Message must be sent to customer');
     const greeting = String(sent.data.text);
     assert.ok(greeting.includes('Hi babe! I’m Annie for Anaimiya.'));
-    assert.ok(greeting.includes(`I’ve started your hot request. Your code is:\n<b>${order.checkout_code}</b>`), 'The unique checkout code must be bold and on its own line');
+    assert.ok(greeting.includes(`I’ve started your hot request. Your code is:\n\n👉 <b>${order.checkout_code}</b> 👈`), 'The unique checkout code must be bold, prominent, and on its own line');
     assert.ok(greeting.includes('Tap the <b>Pay now</b> button below to open checkout.'));
-    assert.ok(greeting.includes(`<b>John Doe ${order.checkout_code}</b>`), 'The example name must include this request’s actual code');
+    assert.ok(greeting.includes(`write your full name and the code exactly like this:\n\n<b>John Doe ${order.checkout_code}</b>`), 'The example name must include this request’s actual code');
     assert.ok(greeting.includes('This lets me match your payment fast. Do not use email — it will not work.'));
-    assert.ok(greeting.includes('creator-approved videos'));
+    assert.ok(greeting.includes('all her sexy videos, fresh OnlyFans leaks, way more hot photos of her'));
     assert.ok(greeting.includes('Ready to unlock it all? 🔥'));
+
+    const greetingButtons = ((sent.data.reply_markup as any)?.inline_keyboard || []).flat();
+    const payNowButton = greetingButtons.find((button: any) => button.text === '💳 Pay now');
+    assert.ok(payNowButton, 'The website-originated greeting must preserve the Pay now button');
+    assert.equal(payNowButton.callback_data, `pay_selar:${order.id}`);
+
+    await tgPost(env, callbackFrom(5001, payNowButton.callback_data));
+    const checkoutMessage = messagesTo(sentTelegramMessages, '5001').find(m => String(m.data.text).includes('Open the checkout here:'));
+    assert.ok(checkoutMessage, 'The Pay now button must send checkout instructions');
+    const checkoutButtons = ((checkoutMessage.data.reply_markup as any)?.inline_keyboard || []).flat();
+    const openCheckoutButton = checkoutButtons.find((button: any) => button.text === 'Open Checkout ↗️');
+    assert.equal(openCheckoutButton?.url, `${env.SELAR_CHECKOUT_URL}?add_to_cart=1`);
   } finally {
     cleanup();
   }
