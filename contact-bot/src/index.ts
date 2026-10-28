@@ -2533,7 +2533,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   if (data === "services:join" || data === "services:continue" || data === "services:restart") {
     if (!u.message) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Please open the bot chat to subscribe." });
     await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Getting things ready, babe… 💋" });
-    return startChannelSubscription(e, { chat: u.message.chat, from: u.from, text: "/start service_telegram_channel" }, data === "services:restart");
+    return startChannelSubscription(e, { chat: u.message.chat, from: u.from, text: "/start service_telegram_channel" }, data !== "services:join");
   }
   if (data.startsWith("order:cancel:")) {
     if (!u.message || String(u.message.chat.id) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Open your private bot chat to cancel an order." });
