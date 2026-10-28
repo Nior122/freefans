@@ -213,8 +213,14 @@ test('Customer starting contact request generates unique FL-XXXXXX code and pers
     // Verify message sent to customer
     const sent = sentTelegramMessages.find(m => m.method === 'sendMessage' && m.data.chat_id === '5001');
     assert.ok(sent, 'Message must be sent to customer');
-    assert.ok(String(sent.data.text).includes(order.checkout_code));
-    assert.ok(String(sent.data.text).includes('Anaimiya'));
+    const greeting = String(sent.data.text);
+    assert.ok(greeting.includes('Hi babe! I’m Annie for Anaimiya.'));
+    assert.ok(greeting.includes(`I’ve started your hot request. Your code is:\n<b>${order.checkout_code}</b>`), 'The unique checkout code must be bold and on its own line');
+    assert.ok(greeting.includes('Tap the <b>Pay now</b> button below to open checkout.'));
+    assert.ok(greeting.includes(`<b>John Doe ${order.checkout_code}</b>`), 'The example name must include this request’s actual code');
+    assert.ok(greeting.includes('This lets me match your payment fast. Do not use email — it will not work.'));
+    assert.ok(greeting.includes('creator-approved videos'));
+    assert.ok(greeting.includes('Ready to unlock it all? 🔥'));
   } finally {
     cleanup();
   }
