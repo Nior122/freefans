@@ -28,6 +28,7 @@ function createTestDb() {
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0014_remove_creator_sharing_permissions.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0015_service_delivery_draft_media.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0016_admin_draft_recovery_actions.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0017_limit_unverified_service_orders.sql'), 'utf8'));
 
   return {
     raw: db,
@@ -224,13 +225,15 @@ test('Direct /start opens Annie welcome, service menu, and channel checkout usin
   try {
     await tgPost(env, userMsg(6101, '/start'));
     const welcome = messagesTo(sentTelegramMessages, '6101').at(-1);
-    assert.match(String(welcome?.data.text), /I’m Annie/);
+    assert.match(String(welcome?.data.text), /Annie/);
+    assert.match(String(welcome?.data.text), /handsome|babe|darling|hot boy/i);
+    assert.doesNotMatch(String(welcome?.data.text), /our model photo previews/i);
     assert.ok((welcome?.data.reply_markup as any)?.inline_keyboard?.flat().some((b: any) => b.text === '👀 View our services 🔞'));
 
     await tgPost(env, callbackFrom(6101, 'services:view', 'services-view'));
     const menu = messagesTo(sentTelegramMessages, '6101').at(-1);
-    assert.match(String(menu?.data.text), /website has photos only — no videos/i);
-    assert.match(String(menu?.data.text), /consensual homemade amateur videos/i);
+    assert.match(String(menu?.data.text), /photos only — no videos/i);
+    assert.match(String(menu?.data.text), /authorised content shared with permission/i);
     assert.ok((menu?.data.reply_markup as any)?.inline_keyboard?.flat().some((b: any) => b.text === '📸 Visit the website ✨' && b.url === 'https://fansleak.pages.dev'));
     assert.ok((menu?.data.reply_markup as any)?.inline_keyboard?.flat().some((b: any) => b.callback_data === 'services:join'));
 
@@ -249,9 +252,13 @@ test('Direct /start opens Annie welcome, service menu, and channel checkout usin
     assert.ok(buttons.some((b: any) => b.text === '✅ Done — checkout completed'));
     assert.ok(buttons.some((b: any) => b.text === "🔎 I've paid — check again"));
     assert.match(String(checkoutMessage?.data.text), new RegExp(order.checkout_code));
-    const adminMessage = messagesTo(sentTelegramMessages, String(env.ADMIN_TELEGRAM_ID)).find(m => String(m.data.text).includes('New channel subscription order'));
-    assert.match(String(adminMessage?.data.text), /Telegram bot → View our services → Subscribe button/);
-    assert.match(String(adminMessage?.data.text), /service checkout/);
+    assert.doesNotMatch(
+      messagesTo(sentTelegramMessages, String(env.ADMIN_TELEGRAM_ID)).map(m => String(m.data.text)).join("\n"),
+      /New channel subscription order|Source: Telegram bot → View our services/
+    );
+    assert.match(String(checkoutMessage?.data.text), /👉 <b>Unique code = FL-[0-9A-Z]{6}<\/b> 👈/);
+    assert.match(String(checkoutMessage?.data.text), /Example:\n<code>John Doe FL-[0-9A-Z]{6}<\/code>/);
+    assert.match(String(checkoutMessage?.data.text), /You're about to join our channel/);
   } finally {
     cleanup();
   }
