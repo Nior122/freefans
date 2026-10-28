@@ -177,6 +177,14 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0017_limit_unverified_service_orders.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0018_clear_delivered_media_references',
+    description: 'Clear Telegram media references from already delivered or closed drafts',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0018_clear_delivered_media_references.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
