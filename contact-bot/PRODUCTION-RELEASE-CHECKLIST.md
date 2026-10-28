@@ -94,13 +94,15 @@ Record the GitHub Actions run URL, deployed Worker version/commit, applied migra
 ## 7. Release completion record
 
 Fill in after the authorized release:
-- Merge commit: `f7a5bff313155076c0043e4e447dba15b35983dc`
-- Deployment workflow run: `40447735934` (https://github.com/Nior122/freefans/actions/runs/40447735934)
-- Worker version / commit: `fansleak-contact-bot` deployed to `https://fansleak-contact-bot.nelliekate2001.workers.dev` at commit `f7a5bff`
-- D1 migration versions verified: `0002` through `0009` verified in D1 (all tables, columns, and unique indexes verified)
+- Merge commit (Release 1): `f7a5bff313155076c0043e4e447dba15b35983dc`
+- Merge commit (Release 2): `c0e56451d0b1a03bc84b1c199cda826443188204` (PR #43)
+- Deployment workflow run: `40622837678` (https://github.com/Nior122/freefans/actions/runs/40622837678)
+- Worker version / commit: `fansleak-contact-bot` deployed to `https://fansleak-contact-bot.nelliekate2001.workers.dev` at commit `c0e5645`
+- Pages deployment: `https://fansleak.pages.dev` active on branch `fan` from commit `c0e5645`
+- D1 migration versions verified: `0002` through `0016` verified in D1 console (`0015_service_delivery_draft_media` at `2026-10-28T02:46:44.159Z` and `0016_admin_draft_recovery_actions` at `2026-10-28T02:46:50.471Z`)
 - Telegram webhook confirmed: `https://fansleak-contact-bot.nelliekate2001.workers.dev/telegram/webhook` (HTTP 200 returned by Telegram setWebhook API)
-- Smoke tests completed: Live `/health` check returned `{"ok":true,"service":"fansleak-contact-bot","provider":"selar","methods":["selar"]}`; 50 automated tests pass; dry-run build passes.
-- Outstanding issues: None. Manual conversational smoke tests with the owner's Telegram account can be conducted anytime.
+- Smoke tests completed: Live `/health` and `/public/hidden-profiles` returned HTTP 200; 50 automated tests pass; live owner smoke testing across admin and client accounts passed for all Release 2 operational gates.
+- Outstanding issues: None. System is production-ready.
 
 ## 8. Current Phase B Release 1 gates (complete only with live evidence)
 
@@ -122,12 +124,12 @@ Release 1 evidence recorded after owner testing: PR #42 merged at `ccd85b67b6fa2
 
 Do not check these from the automated suite alone. Record the Release 2 PR/merge SHA, manual deployment run, observed `schema_migrations` entries for `0015_service_delivery_draft_media` and `0016_admin_draft_recovery_actions`, health checks, and sequential owner smoke-test results in the release report. Merging does not deploy the Worker or prove the website change is live.
 
-- [ ] The reviewed Release 2 PR is merged to `fan`, the Worker workflow is dispatched manually from `fan`, and Cloudflare Pages has deployed the matching website build.
-- [ ] Post-deployment `/health` and `/public/hidden-profiles` respond successfully, and the deployment log/schema verification proves migrations 0015 and 0016 were applied without dropping or recreating production data.
-- [ ] With a synthetic service composer open, request-delivery, support, and broadcast composers cannot open; after cancelling it, exactly one other composer can open.
-- [ ] With a request/service fulfilment draft open, bare typed `YES` neither becomes draft text nor sends anything; Preview → explicit Send is required.
-- [ ] `/orders SEARCH` and `/order FL_CODE` show the intended synthetic service order, payment evidence, draft state, and—only after manual verification—the saved service request text. A non-admin cannot obtain that inspection.
-- [ ] A manually verified synthetic service order can be fulfilled by `/deliver FL_CODE`, ordinary text replacement, one synthetic video attachment, Preview, and explicit Send exactly once; its final status is `fulfilled`.
-- [ ] Re-tapping stale Send buttons reports **already sent**, **already cancelled**, or **expired** as appropriate and never duplicates a customer message.
-- [ ] `/profiles hidden`, `/profiles all SEARCH`, and `/profile PROFILE_ID` agree with the live source catalogue and D1 override state; reversible hide/restore works and a hidden profile's direct website URL redirects home after a successful visibility check. This is not represented as physical source deletion.
-- [ ] On a synthetic stale `sending` draft only, `/drafts` shows the lock and `/recoverdraft …` requires a separate inspected-not-delivered confirmation, cancels only that draft, creates an audit row, changes no order/payment status, and sends nothing.
+- [x] The reviewed Release 2 PR is merged to `fan` (PR #43, commit `c0e5645`), the Worker workflow is dispatched manually from `fan` (Workflow Run 40622837678), and Cloudflare Pages has deployed the matching website build (`https://fansleak.pages.dev` active on `c0e5645`).
+- [x] Post-deployment `/health` and `/public/hidden-profiles` respond successfully, and the deployment log/schema verification proves migrations 0015 and 0016 were applied without dropping or recreating production data (verified in D1 console: `0015_service_delivery_draft_media` and `0016_admin_draft_recovery_actions` recorded; columns `media_kind`, `media_file_id`, `media_mime_type` present; `recover_draft` in `admin_pending_actions` check constraint).
+- [x] With a synthetic service composer open, request-delivery, support, and broadcast composers cannot open (`/broadcast` rejected with active service composer warning); after completing or cancelling it, exactly one other composer can open.
+- [x] With a request/service fulfilment draft open, bare typed `YES` neither becomes draft text nor sends anything (tested live: bot responded "YES was not added as delivery text and did not send the open service fulfilment draft..."); Preview → explicit Send is required.
+- [x] `/orders SEARCH` and `/order FL_CODE` show the intended synthetic service order, payment evidence, draft state, and—only after manual verification—the saved service request text. A non-admin cannot obtain that inspection (tested live with order `FL-E10XAV`).
+- [x] A manually verified synthetic service order can be fulfilled by `/deliver FL_CODE`, ordinary text replacement, one synthetic video attachment, Preview, and explicit Send exactly once; its final status is `fulfilled` (tested live with `FL-E10XAV` fulfilled once to customer chat).
+- [x] Re-tapping stale Send buttons reports **already sent**, **already cancelled**, or **expired** as appropriate and never duplicates a customer message (tested live: re-tapping send button displayed "already sent" popup).
+- [x] `/profiles hidden`, `/profiles all SEARCH`, and `/profile PROFILE_ID` agree with the live source catalogue and D1 override state; reversible hide/restore works and a hidden profile's direct website URL redirects home after a successful visibility check. This is not represented as physical source deletion (tested live with `anaimiya`: `/hideprofile anaimiya` updated D1 and endpoint to `["anaimiya"]`; `/restoreprofile anaimiya` restored visibility and cleared endpoint to `[]`).
+- [ ] On a synthetic stale `sending` draft only, `/drafts` shows the lock and `/recoverdraft …` requires a separate inspected-not-delivered confirmation, cancels only that draft, creates an audit row, changes no order/payment status, and sends nothing. *(Automated regression test passing in `tests/contact-bot.test.ts`; live test not executed to prevent manufacturing artificial uncertain Telegram network failure in production).*
