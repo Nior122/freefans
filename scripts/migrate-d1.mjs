@@ -263,6 +263,27 @@ export function migrateRemote() {
     runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0016_admin_draft_recovery_actions')");
   }
 
+  // Migration 17: allow up to three unverified service orders per Telegram user.
+  if (!applied.has('0017_limit_unverified_service_orders')) {
+    console.log('[migrate-d1] Applying 0017_limit_unverified_service_orders migration...');
+    runWranglerFile(path.join(ROOT, 'contact-bot', 'migrations', '0017_limit_unverified_service_orders.sql'));
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0017_limit_unverified_service_orders')");
+  }
+
+  // Migration 18: clear delivered/closed Telegram media references.
+  if (!applied.has('0018_clear_delivered_media_references')) {
+    console.log('[migrate-d1] Applying 0018_clear_delivered_media_references migration...');
+    runWranglerFile(path.join(ROOT, 'contact-bot', 'migrations', '0018_clear_delivered_media_references.sql'));
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0018_clear_delivered_media_references')");
+  }
+
+  // Migration 19: durable snapshot and delivery ledger for all-client broadcasts.
+  if (!applied.has('0019_admin_broadcast_recipients')) {
+    console.log('[migrate-d1] Applying 0019_admin_broadcast_recipients migration...');
+    runWranglerFile(path.join(ROOT, 'contact-bot', 'migrations', '0019_admin_broadcast_recipients.sql'));
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0019_admin_broadcast_recipients')");
+  }
+
   // Final complete schema verification. These expectations are shared with the
   // local migration verifier to prevent the two definitions drifting apart.
   console.log('[migrate-d1] Verifying complete schema...');

@@ -18,4 +18,4 @@ PAYMENT_METHODS = "selar"
 AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 
 [triggers]
-crons = ["0 * * * *"]
+crons = ["*/5 * * * *", "0 * * * *"]

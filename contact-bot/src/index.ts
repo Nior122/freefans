@@ -73,6 +73,9 @@ type ReceiptSubmission = {
   status: string;
 };
 type AdminBroadcastDraft = { id: string; admin_telegram_id: string; message_text?: string | null; media_kind?: "photo" | "document" | null; media_file_id?: string | null; media_mime_type?: string | null; status: string; expires_at: string };
+type BroadcastRecipientCounts = { total: number; pending: number; sending: number; sent: number; failed: number; uncertain: number; cancelled: number };
+const BROADCAST_BATCH_SIZE = 25;
+const BROADCAST_RECIPIENT_STALE_MINUTES = 10;
 type AdminMessageDraft = {
   id: string;
   order_id: string;
@@ -1633,6 +1636,7 @@ async function message(e: Env, m: Msg) {
     else if (/^(?:reject|decline)\s+(?:order\s+)?FL-[A-Z0-9]{6}$/i.test(t)) t = "/reject " + t.match(/FL-[A-Z0-9]{6}/i)[0];
     else if (/^(?:approve|deliver|fulfil|fulfill)\s+(?:order\s+)?FL-[A-Z0-9]{6}$/i.test(t)) t = "deliver " + t.match(/FL-[A-Z0-9]{6}/i)[0];
     else if (/^(?:send\s+)?broadcast(?:\s+to\s+(?:all\s+)?clients)?$/i.test(t) || /^send\s+(?:mass\s+)?messages?\s+to\s+clients$/i.test(t) || /^send\s+(?:photo|video|media)\s+to\s+clients$/i.test(t) || /^send\s+(?:a\s+)?message\s+to\s+all\s+clients$/i.test(t)) t = "/broadcast";
+    else if (/^send\s+(?:a\s+)?(?:mass\s+)?messages?\s+to\s+(?:all\s+)?clients\s*[:\-]\s*[\s\S]+$/i.test(t)) t = "/broadcast " + t.replace(/^send\s+(?:a\s+)?(?:mass\s+)?messages?\s+to\s+(?:all\s+)?clients\s*[:\-]\s*/i, "");
     else if (/^(?:send\s+)?broadcast\s*[:\-]?\s+[\s\S]+$/i.test(t)) t = "/broadcast " + t.replace(/^(?:send\s+)?broadcast\s*[:\-]?\s+/i, "");
     else if (/^(?:send\s+)?(?:a\s+)?message\s+to\s+customer\s+FL-[A-Z0-9]{6}\s*[:\-]\s*[\s\S]+$/i.test(t)) t = "/message " + t.replace(/^(?:send\s+)?(?:a\s+)?message\s+to\s+customer\s+(FL-[A-Z0-9]{6})\s*[:\-]\s*/i, "$1 ");
     else if (/^message\s+customer\s+FL-[A-Z0-9]{6}\s*[:\-]\s*[\s\S]+$/i.test(t)) t = "/message " + t.replace(/^message\s+customer\s+(FL-[A-Z0-9]{6})\s*[:\-]\s*/i, "$1 ");
@@ -1667,7 +1671,13 @@ async function message(e: Env, m: Msg) {
     const text = t.replace(/^\/broadcast(?:@[A-Za-z0-9_]+)?\s*/i, "").trim();
     if (text.length > 900) return say(e, chat, "Broadcast text must be 900 characters or fewer.");
     const active = await activeBroadcastDraft(e, user);
-    if (active?.status === "sending") return say(e, chat, "⚠️ A broadcast is already sending or has an uncertain outcome. Use /drafts to inspect it before any recovery; do not blind-retry.");
+    if (active?.status === "sending") {
+      const counts = await broadcastRecipientCounts(e, active.id);
+      if (counts.total) {
+        return say(e, chat, "📣 <b>A broadcast is already in progress.</b>\n" + formatBroadcastRecipientCounts(counts) + "\nCompleted clients will not receive duplicates. Continue the next saved batch or stop the remaining clients.", broadcastProgressKeyboard(active.id));
+      }
+      return say(e, chat, "⚠️ A broadcast is already sending or has an uncertain outcome. Use /drafts to inspect it before any recovery; do not blind-retry.");
+    }
     if (active?.status === "draft") return say(e, chat, "You already have the one open broadcast composer. Send text to update it, attach one photo/video/document, preview it, or use /broadcastcancel.", { inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + active.id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + active.id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + active.id }]] });
     const conflicts = await adminComposerConflicts(e, user, { kind: "broadcast" });
     if (conflicts.length) return replyAdminComposerConflict(e, chat, conflicts, "opening a broadcast composer");
@@ -1684,13 +1694,18 @@ async function message(e: Env, m: Msg) {
       await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(id, user).run();
       return replyAdminComposerConflict(e, chat, racedConflicts, "opening a broadcast composer");
     }
-    return say(e, chat, "📣 <b>Broadcast draft created</b>\nAudience: customers with active/recent order records (maximum 100 recipients).\n\n" + (text ? esc(text) : "No message text yet. Send text or attach media.") + "\n\nNothing has been sent. Preview and confirm when ready.", {
+    return say(e, chat, "📣 <b>Broadcast draft created</b>\nAudience: every unique saved client chat from profile requests and service orders, excluding your admin chat. Delivery is batched with a saved per-client ledger so nobody is sent the same broadcast twice.\n\n" + (text ? esc(text) : "No message text yet. Send text or attach media.") + "\n\nNothing has been sent. Preview and confirm when ready.", {
       inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + id }]]
     });
   }
   if (user === e.ADMIN_TELEGRAM_ID && t === "/broadcastcancel") {
     const draft = await activeBroadcastDraft(e, user);
-    if (!draft || draft.status !== "draft") return say(e, chat, "No editable broadcast draft to cancel.");
+    if (!draft) return say(e, chat, "No editable or in-progress broadcast draft to cancel.");
+    if (draft.status === "sending") {
+      await stopBroadcastRemaining(e, user, chat, draft);
+      return;
+    }
+    if (draft.status !== "draft") return say(e, chat, "No editable broadcast draft to cancel.");
     await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(draft.id).run();
     return say(e, chat, "✖️ Broadcast draft cancelled. Nothing was sent.");
   }
@@ -1715,6 +1730,14 @@ async function message(e: Env, m: Msg) {
         lines.push("  This is editable. Ordinary text/media should go only to this composer when it is the sole editable draft.");
         if (keyboard.length < 8) keyboard.push([{ text: "✖️ Cancel " + adminComposerLabel(state.kind), callback_data: adminComposerCancelCallback(state) }]);
       } else if (state.status === "sending") {
+        if (state.kind === "broadcast") {
+          const counts = await broadcastRecipientCounts(e, state.draftId);
+          if (counts.total) {
+            lines.push("  Broadcast delivery: sent " + counts.sent + ", failed " + counts.failed + ", uncertain " + counts.uncertain + ", remaining " + counts.pending + ", in flight " + counts.sending + ", cancelled " + counts.cancelled + ", total " + counts.total + ". Saved batches continue automatically; completed clients will not receive duplicates.");
+            if (keyboard.length < 8) keyboard.push([{ text: "▶️ Continue broadcast", callback_data: "broadcast:continue:" + state.draftId }, { text: "⏹️ Stop remaining", callback_data: "broadcast:stop:" + state.draftId }]);
+            continue;
+          }
+        }
         const lockedAt = draftExpiryMs(state.updatedAt);
         if (Number.isFinite(lockedAt) && lockedAt <= Date.now() - 5 * 60 * 1000) {
           lines.push("  Locked send is older than five minutes. First inspect the customer conversation. Only if this exact message definitely was not delivered, use <code>" + esc(adminComposerRecoveryCommand(state)) + "</code>.");
@@ -1739,6 +1762,12 @@ async function message(e: Env, m: Msg) {
     if (!state) return say(e, chat, "No " + esc(adminComposerLabel(kind)) + " draft with that ID was found for this admin. Nothing was changed.");
     if (state.status !== "sending") {
       return say(e, chat, inactiveDraftMessage(state.status, "That " + adminComposerLabel(kind) + " draft") + (state.status === "draft" ? " Cancel it normally if you no longer need it." : ""));
+    }
+    if (kind === "broadcast") {
+      const counts = await broadcastRecipientCounts(e, state.draftId);
+      if (counts.total) {
+        return say(e, chat, "This broadcast uses a saved per-client delivery ledger, so the single-recipient stale-lock recovery confirmation does not apply. Use /drafts to continue remaining batches or stop the remaining clients. Already completed clients will not be resent.", broadcastProgressKeyboard(state.draftId));
+      }
     }
     const lockedAt = draftExpiryMs(state.updatedAt);
     if (!state.updatedAt || !Number.isFinite(lockedAt) || lockedAt > Date.now() - 5 * 60 * 1000) {
@@ -1868,6 +1897,7 @@ async function message(e: Env, m: Msg) {
         [{ text: "📥 Review requests", callback_data: "admin:pending" }],
         [{ text: "🧾 Review service orders", callback_data: "admin:orders" }],
         [{ text: "📝 Drafts & recovery", callback_data: "admin:drafts" }],
+        [{ text: "📣 Broadcast to all clients", callback_data: "admin:broadcast_help" }],
         [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }],
         [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]
       ]
@@ -2040,7 +2070,7 @@ async function message(e: Env, m: Msg) {
       "/verifyservice ORDER_UUID SELAR_REFERENCE — manually verify a service payment after checking it in Selar",
       "/deliver ORDER_CODE_OR_UUID [fulfilment text] — open a service fulfilment draft; then add/replace text and/or one photo, video, or document before preview and explicit confirmation",
       "/message ORDER_CODE_OR_UUID [text] — open a customer support draft; add text and/or one photo, video, or document, then preview and explicitly send or cancel",
-      "/broadcast [text] — open a broadcast draft; preview the audience/content and confirm before sending",
+      "/broadcast [text] — open an all-client broadcast draft for every unique saved profile/service order chat; preview and confirm before batched, ledger-tracked sending",
       "/hideprofile PROFILE_ID — preview reversibly hiding a website profile (legacy alias: /deleteprofile)",
       "/restoreprofile PROFILE_ID — remove a reversible hidden-profile override",
       "/expirepending — preview the exact unpaid orders that would close, then confirm",
@@ -2259,7 +2289,7 @@ function adminOrderInspectionKeyboard(order: CustomerOrder) {
     rows.push([{ text: "📝 Prepare service fulfilment", callback_data: "admin:service-deliver:" + order.id }]);
   }
   rows.push(
-    [{ text: "💬 How to message this customer", callback_data: "admin:message_help" }],
+    [{ text: "💬 Message this customer", callback_data: "admin:message:" + order.kind + ":" + order.id }],
     [{ text: order.kind === "contact" ? "↩️ Back to requests" : "↩️ Back to service orders", callback_data: order.kind === "contact" ? "admin:pending" : "admin:orders" }],
     [{ text: "🏠 Admin Desk", callback_data: "admin:home" }]
   );
@@ -2469,6 +2499,140 @@ async function confirmPendingAdminAction(e: Env, actor: string, chat: string | n
   }
 }
 
+async function broadcastAudienceCount(e: Env, adminTelegramId: string): Promise<number> {
+  const row = await e.DB.prepare("SELECT COUNT(*) AS total FROM (SELECT telegram_chat_id FROM contact_requests UNION SELECT telegram_chat_id FROM service_orders) WHERE telegram_chat_id IS NOT NULL AND TRIM(telegram_chat_id)<>'' AND telegram_chat_id<>?")
+    .bind(String(adminTelegramId))
+    .first<any>();
+  return Number(row?.total || 0);
+}
+
+async function snapshotBroadcastRecipients(e: Env, draft: AdminBroadcastDraft): Promise<void> {
+  await e.DB.prepare("INSERT OR IGNORE INTO admin_broadcast_recipients(broadcast_id,telegram_chat_id) SELECT ?,telegram_chat_id FROM (SELECT telegram_chat_id FROM contact_requests UNION SELECT telegram_chat_id FROM service_orders) WHERE telegram_chat_id IS NOT NULL AND TRIM(telegram_chat_id)<>'' AND telegram_chat_id<>? ORDER BY telegram_chat_id")
+    .bind(draft.id, String(draft.admin_telegram_id))
+    .run();
+}
+
+async function broadcastRecipientCounts(e: Env, broadcastId: string): Promise<BroadcastRecipientCounts> {
+  const counts: BroadcastRecipientCounts = { total: 0, pending: 0, sending: 0, sent: 0, failed: 0, uncertain: 0, cancelled: 0 };
+  const rows = await e.DB.prepare("SELECT status,COUNT(*) AS count FROM admin_broadcast_recipients WHERE broadcast_id=? GROUP BY status").bind(broadcastId).all<any>();
+  for (const row of rows.results || []) {
+    const status = String(row.status || "") as keyof BroadcastRecipientCounts;
+    if (status !== "total" && Object.prototype.hasOwnProperty.call(counts, status)) counts[status] = Number(row.count || 0);
+  }
+  counts.total = counts.pending + counts.sending + counts.sent + counts.failed + counts.uncertain + counts.cancelled;
+  return counts;
+}
+
+function formatBroadcastRecipientCounts(counts: BroadcastRecipientCounts): string {
+  return "Sent: <b>" + counts.sent + "</b>; failed: <b>" + counts.failed + "</b>; uncertain: <b>" + counts.uncertain + "</b>; cancelled: <b>" + counts.cancelled + "</b>; remaining: <b>" + counts.pending + "</b>; in flight: <b>" + counts.sending + "</b>; total clients: <b>" + counts.total + "</b>.";
+}
+
+function broadcastProgressKeyboard(draftId: string) {
+  return {
+    inline_keyboard: [[
+      { text: "▶️ Continue broadcast", callback_data: "broadcast:continue:" + draftId },
+      { text: "⏹️ Stop remaining", callback_data: "broadcast:stop:" + draftId }
+    ]]
+  };
+}
+
+async function finalizeBroadcastIfComplete(e: Env, draft: AdminBroadcastDraft, notifyChat?: string | number): Promise<{ counts: BroadcastRecipientCounts; finalized: boolean }> {
+  const counts = await broadcastRecipientCounts(e, draft.id);
+  if (!counts.total || counts.pending || counts.sending) return { counts, finalized: false };
+  const status = counts.cancelled === counts.total
+    ? "cancelled"
+    : (counts.failed || counts.uncertain || counts.cancelled ? "partial" : "sent");
+  const updated = await e.DB.prepare("UPDATE admin_broadcast_drafts SET status=?,media_kind=NULL,media_file_id=NULL,media_mime_type=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'")
+    .bind(status, draft.id)
+    .run();
+  if (!updated.meta?.changes) return { counts, finalized: false };
+  await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,details) VALUES(?,?,?)")
+    .bind(draft.admin_telegram_id, "admin_broadcast_" + status, "Broadcast draft " + draft.id + ": sent=" + counts.sent + ", failed=" + counts.failed + ", uncertain=" + counts.uncertain + ", cancelled=" + counts.cancelled + ", recipients=" + counts.total)
+    .run();
+  if (notifyChat !== undefined) {
+    await say(e, notifyChat, (status === "sent" ? "✅" : "⚠️") + " <b>Broadcast finished.</b>\n" + formatBroadcastRecipientCounts(counts) + "\nCompleted recipients are recorded in the delivery ledger and will not be sent this broadcast again.");
+  }
+  return { counts, finalized: true };
+}
+
+async function sendBroadcastToRecipient(e: Env, draft: AdminBroadcastDraft, recipient: string): Promise<void> {
+  const body = String(draft.message_text || "");
+  if (draft.media_file_id && draft.media_kind === "photo") await tg(e, "sendPhoto", { chat_id: recipient, photo: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
+  else if (draft.media_file_id && draft.media_kind === "document" && /^video\//i.test(draft.media_mime_type || "")) await tg(e, "sendVideo", { chat_id: recipient, video: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
+  else if (draft.media_file_id && draft.media_kind === "document") await tg(e, "sendDocument", { chat_id: recipient, document: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
+  else await say(e, recipient, esc(body));
+}
+
+async function processBroadcastBatch(e: Env, draft: AdminBroadcastDraft, options: { chat?: string | number; notifyProgress?: boolean } = {}): Promise<BroadcastRecipientCounts> {
+  if (draft.status !== "sending") return broadcastRecipientCounts(e, draft.id);
+  await e.DB.prepare("UPDATE admin_broadcast_recipients SET status='uncertain',completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE broadcast_id=? AND status='sending' AND attempted_at IS NOT NULL AND datetime(attempted_at)<=datetime('now','-" + BROADCAST_RECIPIENT_STALE_MINUTES + " minutes')")
+    .bind(draft.id)
+    .run();
+  await e.DB.prepare("UPDATE admin_broadcast_drafts SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draft.id).run();
+  let counts = await broadcastRecipientCounts(e, draft.id);
+  if (!counts.total) return counts;
+  const pending = await e.DB.prepare("SELECT telegram_chat_id FROM admin_broadcast_recipients WHERE broadcast_id=? AND status='pending' ORDER BY telegram_chat_id ASC LIMIT ?")
+    .bind(draft.id, BROADCAST_BATCH_SIZE)
+    .all<any>();
+  for (const row of pending.results || []) {
+    const recipient = String(row.telegram_chat_id || "");
+    if (!recipient) continue;
+    const claimed = await e.DB.prepare("UPDATE admin_broadcast_recipients SET status='sending',attempted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE broadcast_id=? AND telegram_chat_id=? AND status='pending'")
+      .bind(draft.id, recipient)
+      .run();
+    if (!claimed.meta?.changes) continue;
+    try {
+      await sendBroadcastToRecipient(e, draft, recipient);
+      await e.DB.prepare("UPDATE admin_broadcast_recipients SET status='sent',completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE broadcast_id=? AND telegram_chat_id=? AND status='sending'")
+        .bind(draft.id, recipient)
+        .run();
+    } catch (err) {
+      if (/\b429\b|Too Many Requests/i.test(String(err))) {
+        await e.DB.prepare("UPDATE admin_broadcast_recipients SET status='pending',attempted_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE broadcast_id=? AND telegram_chat_id=? AND status='sending'")
+          .bind(draft.id, recipient)
+          .run();
+        break;
+      }
+      await e.DB.prepare("UPDATE admin_broadcast_recipients SET status='failed',completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE broadcast_id=? AND telegram_chat_id=? AND status='sending'")
+        .bind(draft.id, recipient)
+        .run();
+    }
+  }
+  const finished = await finalizeBroadcastIfComplete(e, draft, options.chat ?? draft.admin_telegram_id);
+  counts = finished.counts;
+  if (!finished.finalized && options.notifyProgress && options.chat !== undefined) {
+    await say(e, options.chat, "📣 <b>Broadcast in progress.</b>\n" + formatBroadcastRecipientCounts(counts) + "\nDelivery is saved per client, so completed clients will not receive duplicates. Remaining batches continue automatically, or you can continue/stop now.", broadcastProgressKeyboard(draft.id));
+  }
+  return counts;
+}
+
+async function stopBroadcastRemaining(e: Env, actor: string, chat: string | number, draft: AdminBroadcastDraft): Promise<boolean> {
+  if (String(draft.admin_telegram_id) !== String(actor)) { await say(e, chat, "Broadcast draft not found for this admin."); return false; }
+  if (draft.status !== "sending") { await say(e, chat, inactiveDraftMessage(draft.status, "This broadcast draft")); return false; }
+  let counts = await broadcastRecipientCounts(e, draft.id);
+  if (!counts.total) {
+    await say(e, chat, "This older broadcast has no recipient ledger, so its outcome cannot be resumed or stopped safely recipient-by-recipient. Use /drafts and the existing inspected recovery path; do not blind-retry.");
+    return false;
+  }
+  await e.DB.prepare("UPDATE admin_broadcast_recipients SET status='cancelled',completed_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE broadcast_id=? AND status='pending'").bind(draft.id).run();
+  await e.DB.prepare("UPDATE admin_broadcast_drafts SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draft.id).run();
+  counts = await broadcastRecipientCounts(e, draft.id);
+  if (counts.sending) {
+    await say(e, chat, "⏹️ <b>Broadcast stop requested.</b>\n" + formatBroadcastRecipientCounts(counts) + "\nNo further pending clients will be started. An already in-flight Telegram attempt may still complete; it will not be retried.");
+    return true;
+  }
+  const finished = await finalizeBroadcastIfComplete(e, draft, chat);
+  return finished.finalized;
+}
+
+async function processScheduledBroadcasts(e: Env): Promise<void> {
+  const drafts = await e.DB.prepare("SELECT id,admin_telegram_id,message_text,media_kind,media_file_id,media_mime_type,status,expires_at FROM admin_broadcast_drafts WHERE status='sending' ORDER BY updated_at ASC LIMIT 1").all<AdminBroadcastDraft>();
+  for (const draft of drafts.results || []) {
+    const counts = await broadcastRecipientCounts(e, draft.id);
+    if (counts.total) await processBroadcastBatch(e, draft, { chat: draft.admin_telegram_id, notifyProgress: false });
+  }
+}
+
 async function executeBroadcast(e: Env, actor: string, chat: string | number, draft: AdminBroadcastDraft): Promise<boolean> {
   if (draft.status !== "draft") { await say(e, chat, inactiveDraftMessage(draft.status, "This broadcast draft")); return false; }
   if (Date.parse(draft.expires_at.replace(" ", "T") + (draft.expires_at.endsWith("Z") ? "" : "Z")) < Date.now()) {
@@ -2476,31 +2640,30 @@ async function executeBroadcast(e: Env, actor: string, chat: string | number, dr
     await say(e, chat, "This broadcast draft expired. Nothing was sent."); return false;
   }
   if (!draft.message_text?.trim() && !draft.media_file_id) { await say(e, chat, "Add message text or attach media before confirming the broadcast."); return false; }
-  const audience = await e.DB.prepare("SELECT telegram_chat_id FROM contact_requests WHERE status IN ('pending_payment','payment_verified','approved') UNION SELECT telegram_chat_id FROM service_orders WHERE status IN ('pending_payment','payment_verified','fulfilled')").all<any>();
-  const recipients = [...new Set((audience.results || []).map((r:any) => String(r.telegram_chat_id)).filter(Boolean))].slice(0, 100);
-  if (!recipients.length) { await say(e, chat, "There are no customers in the active/recent order audience. Nothing was sent."); return false; }
+  const audienceTotal = await broadcastAudienceCount(e, actor);
+  if (!audienceTotal) { await say(e, chat, "There are no saved client chats from profile requests or service orders. Nothing was sent."); return false; }
   const claimed = await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(draft.id, actor).run();
   if (!claimed.meta?.changes) {
     const current = await e.DB.prepare("SELECT status FROM admin_broadcast_drafts WHERE id=?").bind(draft.id).first<any>();
     await say(e, chat, inactiveDraftMessage(current?.status || "changed", "This broadcast draft"));
     return false;
   }
-  let sent = 0, failed = 0;
-  for (const recipient of recipients) {
-    try {
-      const body = String(draft.message_text || "");
-      if (draft.media_file_id && draft.media_kind === "photo") await tg(e, "sendPhoto", { chat_id: recipient, photo: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
-      else if (draft.media_file_id && draft.media_kind === "document" && /^video\//i.test(draft.media_mime_type || "")) await tg(e, "sendVideo", { chat_id: recipient, video: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
-      else if (draft.media_file_id && draft.media_kind === "document") await tg(e, "sendDocument", { chat_id: recipient, document: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
-      else await say(e, recipient, esc(body));
-      sent++;
-    } catch { failed++; }
+  const sendingDraft = { ...draft, status: "sending" };
+  try {
+    await snapshotBroadcastRecipients(e, sendingDraft);
+  } catch {
+    await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='draft',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending' AND admin_telegram_id=?").bind(draft.id, actor).run();
+    await say(e, chat, "The broadcast audience could not be snapshotted safely. Nothing was sent; keep the draft and inspect the deployment/database before retrying.");
+    return false;
   }
-  const status = failed === 0 ? "sent" : "partial";
-  await e.DB.prepare("UPDATE admin_broadcast_drafts SET status=?,media_kind=NULL,media_file_id=NULL,media_mime_type=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(status, draft.id).run();
-  await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,details) VALUES(?,?,?)").bind(actor, "admin_broadcast_" + status, "Broadcast draft " + draft.id + ": sent=" + sent + ", failed=" + failed + ", recipients=" + recipients.length).run();
-  await say(e, chat, (failed ? "⚠️" : "✅") + " Broadcast finished. Sent: <b>" + sent + "</b>; failed: <b>" + failed + "</b>. The draft is locked against duplicate sends.");
-  return failed === 0;
+  const snapshotCounts = await broadcastRecipientCounts(e, draft.id);
+  if (!snapshotCounts.total) {
+    await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='draft',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending' AND admin_telegram_id=?").bind(draft.id, actor).run();
+    await say(e, chat, "There are no saved client chats from profile requests or service orders. Nothing was sent.");
+    return false;
+  }
+  const counts = await processBroadcastBatch(e, sendingDraft, { chat, notifyProgress: true });
+  return counts.pending === 0 && counts.sending === 0 && counts.failed === 0 && counts.uncertain === 0 && counts.cancelled === 0;
 }
 
 async function executeSupportDraft(e: Env, actor: string, chat: string | number, draftId: string): Promise<boolean> {
@@ -2606,11 +2769,25 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   }
   if (data.startsWith("broadcast:")) {
     if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin private chat only." });
-    const match = data.match(/^broadcast:(preview|send|cancel):([0-9a-f-]{36})$/i);
+    const match = data.match(/^broadcast:(preview|send|cancel|continue|stop):([0-9a-f-]{36})$/i);
     if (!match) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Invalid broadcast action." });
     const action = match[1].toLowerCase(), id = match[2];
     const draft = await e.DB.prepare("SELECT id,admin_telegram_id,message_text,media_kind,media_file_id,media_mime_type,status,expires_at FROM admin_broadcast_drafts WHERE id=?").bind(id).first<AdminBroadcastDraft>();
     if (!draft || draft.admin_telegram_id !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast draft not found." });
+    if (draft.status === "sending" && (action === "preview" || action === "continue" || action === "stop")) {
+      const counts = await broadcastRecipientCounts(e, id);
+      if (!counts.total) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "This older broadcast has no recipient ledger. Inspect /drafts; do not blind-retry." });
+      if (action === "preview") {
+        await say(e, chat, "📣 <b>Broadcast progress</b>\n" + formatBroadcastRecipientCounts(counts) + "\nCompleted clients will not receive duplicates.", broadcastProgressKeyboard(id));
+        return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast progress loaded." });
+      }
+      if (action === "stop") {
+        await stopBroadcastRemaining(e, actor, chat, draft);
+        return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast stop processed." });
+      }
+      await processBroadcastBatch(e, draft, { chat, notifyProgress: true });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast batch processed." });
+    }
     if (draft.status !== "draft") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: inactiveDraftMessage(draft.status, "This broadcast draft") });
     if (Date.parse(draft.expires_at.replace(" ", "T") + (draft.expires_at.endsWith("Z") ? "" : "Z")) < Date.now()) {
       await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='expired',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft'").bind(id).run();
@@ -2621,10 +2798,12 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       await say(e, chat, "✖️ Broadcast cancelled. Nothing was sent.");
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast cancelled." });
     }
-    const audience = await e.DB.prepare("SELECT telegram_chat_id FROM contact_requests WHERE status IN ('pending_payment','payment_verified','approved') UNION SELECT telegram_chat_id FROM service_orders WHERE status IN ('pending_payment','payment_verified','fulfilled')").all<any>();
-    const recipients = [...new Set((audience.results || []).map((r:any) => String(r.telegram_chat_id)).filter(Boolean))].slice(0, 100);
+    if (action === "continue" || action === "stop") {
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "This broadcast has not started. Preview and confirm sending first." });
+    }
+    const recipientTotal = await broadcastAudienceCount(e, actor);
     if (action === "preview") {
-      await say(e, chat, "👀 <b>Broadcast preview</b>\nRecipients: " + recipients.length + " (maximum 100 per broadcast)\nMessage: " + (draft.message_text ? esc(draft.message_text) : "—") + "\nMedia: " + (draft.media_kind ? esc(draft.media_mime_type || draft.media_kind) : "none") + "\n\nNo messages sent.", { inline_keyboard: [[{ text: "✅ Confirm and send", callback_data: "broadcast:send:" + id }], [{ text: "✖️ Cancel", callback_data: "broadcast:cancel:" + id }]] });
+      await say(e, chat, "👀 <b>Broadcast preview</b>\nRecipients: " + recipientTotal + " unique saved client chats from all profile requests and service orders (your admin chat is excluded).\nDelivery: batches of " + BROADCAST_BATCH_SIZE + " with a saved per-client ledger; no client is sent this broadcast twice.\nMessage: " + (draft.message_text ? esc(draft.message_text) : "—") + "\nMedia: " + (draft.media_kind ? esc(draft.media_mime_type || draft.media_kind) : "none") + "\n\nNo messages sent.", { inline_keyboard: [[{ text: "✅ Confirm and send", callback_data: "broadcast:send:" + id }], [{ text: "✖️ Cancel", callback_data: "broadcast:cancel:" + id }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Preview only." });
     }
     await executeBroadcast(e, actor, chat, draft);
@@ -2856,6 +3035,14 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
         lines.push("", "• <b>" + esc(adminComposerLabel(state.kind)) + "</b> — <b>" + esc(state.status) + "</b> · <code>" + esc(String(state.checkoutCode || state.orderId || "broadcast audience")) + "</code>", "  Draft ID: <code>" + esc(state.draftId) + "</code> · updated " + esc(String(state.updatedAt || "unknown")) + " UTC");
         if (state.status === "draft" && buttons.length < 8) buttons.push([{ text: "✖️ Cancel " + adminComposerLabel(state.kind), callback_data: adminComposerCancelCallback(state) }]);
         if (state.status === "sending") {
+          if (state.kind === "broadcast") {
+            const counts = await broadcastRecipientCounts(e, state.draftId);
+            if (counts.total) {
+              lines.push("  Broadcast delivery: sent " + counts.sent + ", failed " + counts.failed + ", uncertain " + counts.uncertain + ", remaining " + counts.pending + ", in flight " + counts.sending + ", cancelled " + counts.cancelled + ", total " + counts.total + ". Completed clients will not receive duplicates.");
+              if (buttons.length < 8) buttons.push([{ text: "▶️ Continue broadcast", callback_data: "broadcast:continue:" + state.draftId }, { text: "⏹️ Stop remaining", callback_data: "broadcast:stop:" + state.draftId }]);
+              continue;
+            }
+          }
           const lockedAt = draftExpiryMs(state.updatedAt);
           lines.push(Number.isFinite(lockedAt) && lockedAt <= Date.now() - 5 * 60 * 1000
             ? "  Inspect Telegram first; only if not delivered use <code>" + esc(adminComposerRecoveryCommand(state)) + "</code>."
@@ -2867,6 +3054,11 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       await say(e, chat, lines.join("\n"), { inline_keyboard: buttons });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Drafts loaded." });
     }
+    if (action === "broadcast_help") {
+      const recipientTotal = await broadcastAudienceCount(e, actor);
+      await say(e, chat, "<b>Broadcast to all clients</b>\nCurrent audience: <b>" + recipientTotal + "</b> unique saved client chats from all profile requests and service orders. Your admin chat is excluded.\n\nStart with:\n<code>/broadcast Your message here</code>\n\nYou can then replace the text or attach one photo, video, or PDF/image document. Nothing is sent while composing. Tap <b>Preview audience and content</b>, then <b>Confirm and send</b>.\n\nAt confirmation, the audience is snapshotted into a per-client delivery ledger and sent in batches of " + BROADCAST_BATCH_SIZE + ". Remaining batches continue automatically; /drafts also lets you continue or stop the remaining clients. Completed clients will not receive duplicates.\n\nFor one customer only, open their order and tap <b>Message this customer</b>, or use <code>/message FL-ABC123 Your message</code>.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast instructions opened." });
+    }
     if (action === "message_help") {
       await say(e, chat, "<b>Message a customer</b>\nUse their FL- order code or full order UUID to open a private, expiring support draft. You can include text immediately or add it next; you may also attach one Telegram photo, video, or PDF/image document.\n\nExamples:\n<code>/message FL-ABC123 Hi, I’m checking your request and will update you here.</code>\n<code>/message FL-ABC123</code> — then send the text and/or attachment.\n\nNothing is sent while composing. Review the preview, then tap <b>Send to customer</b> or <b>Cancel</b>. This does not change payment, approval, delivery, or fulfilment status.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Customer-message instructions opened." });
@@ -2876,8 +3068,16 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin guide opened." });
     }
     if (action === "home") {
-      await say(e, chat, "<b>Admin Desk</b>\nChoose an action:", { inline_keyboard: [[{ text: "📥 Review requests", callback_data: "admin:pending" }], [{ text: "🧾 Review service orders", callback_data: "admin:orders" }], [{ text: "📝 Drafts & recovery", callback_data: "admin:drafts" }], [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }], [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]] });
+      await say(e, chat, "<b>Admin Desk</b>\nChoose an action:", { inline_keyboard: [[{ text: "📥 Review requests", callback_data: "admin:pending" }], [{ text: "🧾 Review service orders", callback_data: "admin:orders" }], [{ text: "📝 Drafts & recovery", callback_data: "admin:drafts" }], [{ text: "📣 Broadcast to all clients", callback_data: "admin:broadcast_help" }], [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }], [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin menu." });
+    }
+    const customerMessageMatch = action.match(/^message:(contact|service):([0-9a-f-]{36})$/i);
+    if (customerMessageMatch) {
+      const kind = customerMessageMatch[1].toLowerCase() as OrderKind;
+      const order = await loadCustomerOrderByKind(e, kind, customerMessageMatch[2]);
+      if (!order) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Order not found." });
+      await createOrReopenAdminMessageDraft(e, { chat: { id: Number(chat) }, from: { id: Number(actor) } } as Msg, order.id, "");
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Customer-message composer processed. Nothing sent yet." });
     }
     const requestMatch = action.match(/^request:([0-9a-f-]{36})$/i);
     if (requestMatch) {
@@ -3169,8 +3369,14 @@ async function expireOldPendingOrders(e: Env) {
 }
 
 export default {
-  async scheduled(_controller: unknown, env: Env): Promise<void> {
-    await expireOldPendingOrders(env);
+  async scheduled(controller: unknown, env: Env): Promise<void> {
+    const cron = String((controller as { cron?: unknown } | null)?.cron || "");
+    if (!cron || cron === "0 * * * *") await expireOldPendingOrders(env);
+    try {
+      await processScheduledBroadcasts(env);
+    } catch (err) {
+      console.error("Scheduled broadcast batch failed", String(err));
+    }
   },
   async fetch(request: Request, env: Env): Promise<Response> {
     const u = new URL(request.url);

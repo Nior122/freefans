@@ -185,6 +185,14 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0018_clear_delivered_media_references.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0019_admin_broadcast_recipients',
+    description: 'Durable broadcast recipient snapshots and per-client delivery ledger',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0019_admin_broadcast_recipients.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
@@ -334,6 +342,10 @@ export const EXPECTED_SCHEMA = {
   admin_broadcast_drafts: [
     'id', 'admin_telegram_id', 'message_text', 'media_kind', 'media_file_id',
     'media_mime_type', 'status', 'expires_at', 'created_at', 'updated_at'
+  ],
+  admin_broadcast_recipients: [
+    'broadcast_id', 'telegram_chat_id', 'status', 'attempted_at',
+    'completed_at', 'created_at', 'updated_at'
   ],
   hidden_profiles: ['profile_id', 'hidden_by_admin', 'reason', 'hidden_at'],
   admin_pending_actions: ['id', 'admin_telegram_id', 'action', 'payload', 'status', 'expires_at', 'created_at', 'updated_at']

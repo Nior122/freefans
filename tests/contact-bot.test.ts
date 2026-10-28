@@ -30,6 +30,7 @@ function createTestDb() {
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0016_admin_draft_recovery_actions.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0017_limit_unverified_service_orders.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0018_clear_delivered_media_references.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0019_admin_broadcast_recipients.sql'), 'utf8'));
 
   return {
     raw: db,
@@ -1467,7 +1468,15 @@ test('Admin Desk support draft sends plain text only after explicit confirmation
     assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM admin_message_drafts').get().cnt, 0);
     assert.equal(customerTelegramCalls(sentTelegramMessages, '8101').length, 0);
 
-    await tgPost(env, adminMsg('/message fl-supp01 Hello, I am checking your request and will update you here.'));
+    await tgPost(env, adminMsg('/order FL-SUPP01'));
+    const inspection = messagesTo(sentTelegramMessages, '10001').find(m => {
+      const buttons = ((m.data.reply_markup as any)?.inline_keyboard || []).flat();
+      return buttons.some((button: any) => button.callback_data === `admin:message:contact:${orderId}`);
+    });
+    assert.ok(inspection, 'Order inspection must offer a direct Message this customer button');
+    await tgPost(env, callbackFrom(10001, `admin:message:contact:${orderId}`, 'cb-support-direct-open'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8101').length, 0, 'Opening the individual composer must not message the customer');
+    await tgPost(env, adminMsg('Hello, I am checking your request and will update you here.'));
     const draft = latestSupportDraft(db, orderId);
     assert.ok(draft);
     assert.equal(draft.status, 'draft');
@@ -1811,22 +1820,144 @@ test('Admin natural-language profile deletion waits for YES, then hides profile 
   }
 });
 
-test('Admin broadcast requires explicit confirmation and sends to recent-order customers once', async () => {
+test('Admin broadcast requires explicit confirmation and sends once to every saved client chat', async () => {
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
-    const id = crypto.randomUUID();
-    db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,'8102','8102','anaimiya','pending_payment','FL-BCAST1')").run(id);
-    await tgPost(env, adminMsg('/broadcast Service update: your order status is available.'));
+    const insertContact = db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,?,?,?,?,?)");
+    insertContact.run(crypto.randomUUID(), '8102', '8102', 'anaimiya', 'pending_payment', 'FL-BCAST1');
+    insertContact.run(crypto.randomUUID(), '8103', '8103', 'anaimiya', 'rejected', 'FL-BCAST2');
+    insertContact.run(crypto.randomUUID(), '8104', '8104', 'anaimiya', 'awaiting_email', 'FL-BCAST3');
+    insertContact.run(crypto.randomUUID(), '10001', '10001', 'anaimiya', 'approved', 'FL-BCASTA');
+    const insertService = db.raw.prepare("INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,status,checkout_code) VALUES(?,?,?,?,?,?)");
+    insertService.run(crypto.randomUUID(), 'telegram_channel', '8102', '8102', 'fulfilled', 'FL-BCAST4');
+    insertService.run(crypto.randomUUID(), 'telegram_channel', '8105', '8105', 'awaiting_request', 'FL-BCAST5');
+    insertService.run(crypto.randomUUID(), 'telegram_channel', '8106', '8106', 'cancelled', 'FL-BCAST6');
+    insertService.run(crypto.randomUUID(), 'telegram_channel', '8107', '8107', 'payment_review', 'FL-BCAST7');
+    const expectedRecipients = ['8102', '8103', '8104', '8105', '8106', '8107'];
+
+    await tgPost(env, adminMsg('/admin'));
+    const adminHome = messagesTo(sentTelegramMessages, '10001').find(m => String(m.data.text).includes('Admin Desk'));
+    const adminButtons = ((adminHome?.data.reply_markup as any)?.inline_keyboard || []).flat();
+    assert.ok(adminButtons.some((button: any) => button.text === '📣 Broadcast to all clients' && button.callback_data === 'admin:broadcast_help'));
+    await tgPost(env, callbackFrom(10001, 'admin:broadcast_help', 'cb-broadcast-help'));
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('Current audience: <b>6</b> unique saved client chats')));
+
+    await tgPost(env, userMsg(9999, '/broadcast This must not be sent'));
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM admin_broadcast_drafts').get().cnt, 0);
+
+    await tgPost(env, adminMsg('send mass message to all clients: Service update: your order status is available.'));
     const draft = db.raw.prepare("SELECT id,status FROM admin_broadcast_drafts WHERE admin_telegram_id='10001'").get() as any;
     assert.ok(draft);
     assert.equal(draft.status, 'draft');
-    assert.equal(customerTelegramCalls(sentTelegramMessages, '8102').length, 0);
-    await tgPost(env, adminMsg('yes'));
+    for (const recipient of expectedRecipients) {
+      assert.equal(customerTelegramCalls(sentTelegramMessages, recipient).length, 0, 'Composing a broadcast must not message clients');
+    }
+
+    await tgPost(env, callbackFrom(10001, `broadcast:preview:${draft.id}`, 'cb-broadcast-preview'));
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('Recipients: 6 unique saved client chats')));
+    for (const recipient of expectedRecipients) {
+      assert.equal(customerTelegramCalls(sentTelegramMessages, recipient).length, 0, 'Preview must not message clients');
+    }
+
+    await tgPost(env, callbackFrom(10001, `broadcast:send:${draft.id}`, 'cb-broadcast-send'));
     assert.equal(db.raw.prepare("SELECT status FROM admin_broadcast_drafts WHERE id=?").get(draft.id).status, 'sent');
-    assert.equal(customerTelegramCalls(sentTelegramMessages, '8102').length, 1);
+    for (const recipient of expectedRecipients) {
+      assert.equal(customerTelegramCalls(sentTelegramMessages, recipient).length, 1, `Client ${recipient} must receive the broadcast exactly once`);
+    }
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_broadcast_recipients WHERE broadcast_id=? AND telegram_chat_id='10001'").get(draft.id).cnt, 0, 'The admin chat must be excluded from the client audience');
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_broadcast_recipients WHERE broadcast_id=? AND status='sent'").get(draft.id).cnt, expectedRecipients.length);
+    const audit = db.raw.prepare("SELECT action,details FROM admin_audit WHERE action='admin_broadcast_sent'").get() as any;
+    assert.ok(audit);
+    assert.ok(String(audit.details).includes('recipients=6'));
+    assert.equal(String(audit.details).includes('Service update:'), false, 'Broadcast audit must not store the message body');
+
+    await tgPost(env, callbackFrom(10001, `broadcast:send:${draft.id}`, 'cb-broadcast-send-repeat'));
     await tgPost(env, adminMsg('yes'));
-    assert.equal(customerTelegramCalls(sentTelegramMessages, '8102').length, 1, 'A completed broadcast cannot be resent by a second yes');
+    for (const recipient of expectedRecipients) {
+      assert.equal(customerTelegramCalls(sentTelegramMessages, recipient).length, 1, 'A completed broadcast cannot be resent');
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('Admin broadcast is batched through the recipient ledger and scheduled continuation sends the remainder once', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const insertContact = db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,?,?,?,?,?)");
+    const recipients: string[] = [];
+    for (let i = 0; i < 26; i++) {
+      const chatId = String(9000 + i);
+      recipients.push(chatId);
+      insertContact.run(crypto.randomUUID(), chatId, chatId, 'anaimiya', i % 2 ? 'rejected' : 'pending_payment', `FL-B${String(i).padStart(5, '0')}`);
+    }
+
+    await tgPost(env, adminMsg('/broadcast Batch update for every client.'));
+    const draft = db.raw.prepare("SELECT id FROM admin_broadcast_drafts WHERE admin_telegram_id='10001'").get() as any;
+    await tgPost(env, callbackFrom(10001, `broadcast:send:${draft.id}`, 'cb-broadcast-batch-send'));
+
+    assert.equal(db.raw.prepare("SELECT status FROM admin_broadcast_drafts WHERE id=?").get(draft.id).status, 'sending');
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_broadcast_recipients WHERE broadcast_id=? AND status='sent'").get(draft.id).cnt, 25);
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_broadcast_recipients WHERE broadcast_id=? AND status='pending'").get(draft.id).cnt, 1);
+    assert.equal(recipients.filter(recipient => customerTelegramCalls(sentTelegramMessages, recipient).length === 1).length, 25);
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('Broadcast in progress')));
+
+    await worker.scheduled({ cron: '*/5 * * * *' } as any, env);
+    assert.equal(db.raw.prepare("SELECT status FROM admin_broadcast_drafts WHERE id=?").get(draft.id).status, 'sent');
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_broadcast_recipients WHERE broadcast_id=? AND status='sent'").get(draft.id).cnt, 26);
+    for (const recipient of recipients) {
+      assert.equal(customerTelegramCalls(sentTelegramMessages, recipient).length, 1, `Scheduled continuation must not duplicate client ${recipient}`);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('Admin can stop remaining broadcast recipients without resending completed clients', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const insertContact = db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,?,?,?,?,?)");
+    for (let i = 0; i < 26; i++) {
+      const chatId = String(9100 + i);
+      insertContact.run(crypto.randomUUID(), chatId, chatId, 'anaimiya', 'pending_payment', `FL-S${String(i).padStart(5, '0')}`);
+    }
+
+    await tgPost(env, adminMsg('/broadcast Stop after the first batch.'));
+    const draft = db.raw.prepare("SELECT id FROM admin_broadcast_drafts WHERE admin_telegram_id='10001'").get() as any;
+    await tgPost(env, callbackFrom(10001, `broadcast:send:${draft.id}`, 'cb-broadcast-stop-send'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '9125').length, 0);
+
+    await tgPost(env, callbackFrom(10001, `broadcast:stop:${draft.id}`, 'cb-broadcast-stop'));
+    assert.equal(db.raw.prepare("SELECT status FROM admin_broadcast_drafts WHERE id=?").get(draft.id).status, 'partial');
+    assert.equal(db.raw.prepare("SELECT status FROM admin_broadcast_recipients WHERE broadcast_id=? AND telegram_chat_id='9125'").get(draft.id).status, 'cancelled');
+
+    await worker.scheduled({ cron: '*/5 * * * *' } as any, env);
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '9125').length, 0, 'A stopped broadcast must not later send cancelled recipients');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '9100').length, 1, 'Stopping must not resend completed recipients');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Stale in-flight broadcast recipient becomes uncertain and is never blind-retried', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const draftId = crypto.randomUUID();
+    db.raw.prepare("INSERT INTO admin_broadcast_drafts(id,admin_telegram_id,message_text,status,expires_at) VALUES(?,'10001','Ledger safety update','sending',datetime('now','+30 minutes'))").run(draftId);
+    db.raw.prepare("INSERT INTO admin_broadcast_recipients(broadcast_id,telegram_chat_id,status,attempted_at) VALUES(?, '9201','sending',datetime('now','-11 minutes'))").run(draftId);
+    db.raw.prepare("INSERT INTO admin_broadcast_recipients(broadcast_id,telegram_chat_id,status) VALUES(?, '9202','pending')").run(draftId);
+
+    await worker.scheduled({ cron: '*/5 * * * *' } as any, env);
+
+    assert.equal(db.raw.prepare("SELECT status FROM admin_broadcast_recipients WHERE broadcast_id=? AND telegram_chat_id='9201'").get(draftId).status, 'uncertain');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '9201').length, 0, 'The stale in-flight recipient must not be blind-retried by the test process');
+    assert.equal(db.raw.prepare("SELECT status FROM admin_broadcast_recipients WHERE broadcast_id=? AND telegram_chat_id='9202'").get(draftId).status, 'sent');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '9202').length, 1);
+    assert.equal(db.raw.prepare("SELECT status FROM admin_broadcast_drafts WHERE id=?").get(draftId).status, 'partial');
   } finally {
     cleanup();
   }
