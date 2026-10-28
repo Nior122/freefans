@@ -257,7 +257,7 @@ test('Direct /start opens Annie welcome, service menu, and channel checkout usin
       /New channel subscription order|Source: Telegram bot → View our services/
     );
     assert.match(String(checkoutMessage?.data.text), /👉 <b>Unique code = FL-[0-9A-Z]{6}<\/b> 👈/);
-    assert.match(String(checkoutMessage?.data.text), /Example:\n<code>John Doe FL-[0-9A-Z]{6}<\/code>/);
+    assert.match(String(checkoutMessage?.data.text), /<b>Example:<\/b>\n<code>John Doe FL-[0-9A-Z]{6}<\/code>/);
     assert.match(String(checkoutMessage?.data.text), /You're about to join our channel/);
   } finally {
     cleanup();
