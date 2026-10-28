@@ -322,6 +322,29 @@ async function sayBestEffort(e: Env, chat: string | number, text: string) {
   // delivery and service fulfilment deliberately do NOT use this.
   try { await say(e, chat, text); } catch { /* best effort */ }
 }
+
+// Plain AI chat replies (which have no workflow action buttons of their own)
+// always carry the two customer navigation buttons.
+function customerNavKeyboard(e: Env) {
+  const siteUrl = (e.SITE_URL || "https://fansleak.pages.dev").replace(/\/$/, "");
+  return {
+    inline_keyboard: [
+      [{ text: "📸 View website", url: siteUrl }],
+      [{ text: "🔥 Telegram Channel", callback_data: "services:join" }]
+    ]
+  };
+}
+
+// Persistent reply keyboard shown beside the message box. Once sent it stays
+// in the chat, so a confused customer can always get back to the main menu.
+const CUSTOMER_START_BUTTON_TEXT = "🚀 Start";
+function persistentStartKeyboard() {
+  return {
+    keyboard: [[{ text: CUSTOMER_START_BUTTON_TEXT }]],
+    resize_keyboard: true,
+    is_persistent: true
+  };
+}
 async function fetchPublicCatalogue(e: Env): Promise<Profile[]> {
   const r = await fetch(`${(e.SITE_URL || "https://fansleak.pages.dev").replace(/\/$/, "")}/contact-catalogue.json`, { signal: AbortSignal.timeout(5000) });
   if (!r.ok) throw new Error("profile catalogue unavailable");
@@ -391,7 +414,7 @@ async function clearPaymentPrompts(e: Env, user: string, orderId: string) {
   await e.DB.prepare("DELETE FROM receipt_review_prompts WHERE telegram_user_id=? AND order_id=?").bind(user, orderId).run();
 }
 
-function receiptReviewCallback(action: "verify" | "reject" | "cancel", order: Pick<CustomerOrder, "kind" | "id">): string {
+function receiptReviewCallback(action: "verify" | "reject" | "rejectnow" | "confirmreject" | "cancel", order: Pick<CustomerOrder, "kind" | "id">): string {
   return "receipt:" + action + ":" + (order.kind === "contact" ? "c" : "s") + ":" + order.id;
 }
 
@@ -400,8 +423,9 @@ function receiptReviewKeyboard(order: CustomerOrder) {
     inline_keyboard: [
       [
         { text: "✅ Verify", callback_data: receiptReviewCallback("verify", order) },
-        { text: "🚫 Reject", callback_data: receiptReviewCallback("reject", order) }
+        { text: "🚫 Reject & message", callback_data: receiptReviewCallback("reject", order) }
       ],
+      [{ text: "⛔ Just reject", callback_data: receiptReviewCallback("rejectnow", order) }],
       [{ text: "🔎 Inspect order", callback_data: order.kind === "contact" ? "admin:request:" + order.id : "admin:service:" + order.id }]
     ]
   };
@@ -696,16 +720,20 @@ function adminMessagePurpose(draft: AdminMessageDraft): AdminMessagePurpose {
   return draft.purpose === "rejection" ? "rejection" : "support";
 }
 
-function adminMessageKeyboard(draftId: string, purpose: AdminMessagePurpose = "support") {
-  return {
-    inline_keyboard: [
-      [{ text: "👀 Preview", callback_data: "support-message:preview:" + draftId }],
-      [
-        { text: purpose === "rejection" ? "🚫 Reject & send follow-up" : "✅ Send to customer", callback_data: "support-message:send:" + draftId },
-        { text: "✖️ Cancel", callback_data: "support-message:cancel:" + draftId }
-      ]
+function adminMessageKeyboard(draftId: string, purpose: AdminMessagePurpose = "support", order?: Pick<CustomerOrder, "kind" | "id"> | null) {
+  const rows: Record<string, unknown>[][] = [
+    [{ text: "👀 Preview", callback_data: "support-message:preview:" + draftId }],
+    [
+      { text: purpose === "rejection" ? "🚫 Reject & send follow-up" : "✅ Send to customer", callback_data: "support-message:send:" + draftId },
+      { text: "✖️ Cancel", callback_data: "support-message:cancel:" + draftId }
     ]
-  };
+  ];
+  // From inside the rejection composer the admin can also skip composing and
+  // reject immediately (a separate confirmation panel is shown first).
+  if (purpose === "rejection" && order) {
+    rows.push([{ text: "⛔ Reject now (no follow-up)", callback_data: receiptReviewCallback("rejectnow", order) }]);
+  }
+  return { inline_keyboard: rows };
 }
 
 function adminMessageBody(draft: AdminMessageDraft): string {
@@ -1006,7 +1034,7 @@ async function sendAdminMessageDraftSummary(
     }
   }
   const summary = adminMessageDraftSummary(draft, order, options.heading) + (options.note ? "\n\n" + esc(options.note) : "");
-  return say(e, chat, summary, adminMessageKeyboard(draft.id, adminMessagePurpose(draft)));
+  return say(e, chat, summary, adminMessageKeyboard(draft.id, adminMessagePurpose(draft), order));
 }
 
 async function createOrReopenAdminMessageDraft(e: Env, m: Msg, rawRef: string, initialBody: string, media?: ReceiptMedia, purpose: AdminMessagePurpose = "support") {
@@ -1103,7 +1131,7 @@ function receiptAdminCaption(order: CustomerOrder, submissionId: string): string
     `Telegram user: <code>${esc(order.telegram_user_id)}</code>${username ? ` (@${esc(username)})` : ""}`,
     "",
     "No matching backend sale was attached when this fallback was used. The receipt is customer-supplied evidence only and has NOT changed the order status.",
-    "Use the buttons below after checking Selar: <b>Verify</b> asks for the exact reference if one is not attached; <b>Reject</b> opens a follow-up message/media composer for this client."
+    "Use the buttons below after checking Selar: <b>Verify</b> asks for the exact reference if one is not attached; <b>Reject &amp; message</b> opens a follow-up composer; <b>Just reject</b> cancels now and tells the client payment wasn't made."
   ].join("\n");
   if (caption.length <= 1024) return caption;
 
@@ -1116,7 +1144,7 @@ function receiptAdminCaption(order: CustomerOrder, submissionId: string): string
     `Order: <code>${esc(order.id)}</code>`,
     `Checkout code: <code>${esc(receiptContextValue(order.checkout_code, "not recorded", 32))}</code>`,
     `Telegram user: <code>${esc(order.telegram_user_id)}</code>${username ? ` (@${esc(username)})` : ""}`,
-    "Receipt evidence only; order status unchanged. Check Selar, then use Verify or Reject below. Verify asks for the exact reference; Reject opens a client follow-up composer."
+    "Receipt evidence only; order status unchanged. Check Selar, then use Verify, Reject &amp; message, or Just reject below."
   ].join("\n");
 }
 
@@ -1297,7 +1325,11 @@ Ready to unlock it all? 🔥`;
 }
 
 async function aiReply(e: Env, chat: string, userText: string, reminder = "", voiceReply = false) {
-  if (!e.AI) return say(e, chat, reminder || "👋 I'm Annie. I can help with your requests, billing, payment checks, and next steps. What can I help you with?");
+  // Plain AI chat replies carry the website/channel navigation buttons.
+  // Deterministic workflow/action messages elsewhere keep their own buttons,
+  // and the admin's own chat never gets customer navigation.
+  const navMarkup = e.ADMIN_TELEGRAM_ID && String(chat) === String(e.ADMIN_TELEGRAM_ID) ? undefined : customerNavKeyboard(e);
+  if (!e.AI) return say(e, chat, reminder || "👋 I'm Annie. I can help with your requests, billing, payment checks, and next steps. What can I help you with?", navMarkup);
   try {
     // Supply read-only context from this customer's own request history. The
     // model cannot execute SQL/admin actions; payment checks are deterministic.
@@ -1317,10 +1349,10 @@ async function aiReply(e: Env, chat: string, userText: string, reminder = "", vo
       ]
     });
     const answer = String(result?.response || "").trim().slice(0, 3500);
-    return say(e, chat, answer ? esc(answer) : (reminder || "I couldn't answer that just now. Please try again shortly."));
+    return say(e, chat, answer ? esc(answer) : (reminder || "I couldn't answer that just now. Please try again shortly."), navMarkup);
   } catch (err) {
     console.error("AI support reply failed", String(err));
-    return say(e, chat, reminder || "I can't answer that just now. Please try again shortly or contact support.");
+    return say(e, chat, reminder || "I can't answer that just now. Please try again shortly or contact support.", navMarkup);
   }
 }
 
@@ -1490,6 +1522,9 @@ async function manuallyVerifyOrderByReference(e: Env, actor: string, chat: strin
 async function message(e: Env, m: Msg) {
   let t = (m.text || "").trim();
   const caption = (m.caption || "").trim(), chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
+  // The persistent customer reply-keyboard button sends its label as text;
+  // treat it exactly like typing /start so a confused customer can restart.
+  if (user !== e.ADMIN_TELEGRAM_ID && t === CUSTOMER_START_BUTTON_TEXT) t = "/start";
   const isBroadcastCaption = user === e.ADMIN_TELEGRAM_ID && /^\/broadcast(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(caption);
   const hasReceiptCandidateMedia = Boolean((Array.isArray(m.photo) && m.photo.length > 0) || m.document || m.video);
   if (hasReceiptCandidateMedia && user === e.ADMIN_TELEGRAM_ID && !isBroadcastCaption) {
@@ -1643,7 +1678,7 @@ async function message(e: Env, m: Msg) {
   if (Array.isArray(m.photo) && m.photo.length > 0 && !t) {
     try {
       const answer = await analysePhoto(e, m, caption);
-      await say(e, chat, "🖼️ " + esc(answer));
+      await say(e, chat, "🖼️ " + esc(answer), user !== e.ADMIN_TELEGRAM_ID ? customerNavKeyboard(e) : undefined);
       return;
     } catch (error) {
       console.error("Image analysis failed", String(error));
@@ -1665,8 +1700,11 @@ async function message(e: Env, m: Msg) {
       if (pendingAction || editableComposers.length > 0) {
         await deleteReceiptVerifyPrompt(e, user, { kind: receiptVerifyPrompt.order_kind, id: receiptVerifyPrompt.order_id });
       } else {
+        // Keep the escape hatch on the newest message: the original prompt
+        // panel is easy to lose once the admin chat scrolls.
+        const cancelVerificationKeyboard = { inline_keyboard: [[{ text: "✖️ Cancel verification", callback_data: receiptReviewCallback("cancel", { kind: receiptVerifyPrompt.order_kind, id: receiptVerifyPrompt.order_id }) }]] };
         if (voiceReply) {
-          return say(e, chat, "I will not accept a Selar payment reference from a voice transcript. Type or paste the exact reference, or tap Cancel verification.");
+          return say(e, chat, "I will not accept a Selar payment reference from a voice transcript. Type or paste the exact reference, or tap <b>Cancel verification</b> below.", cancelVerificationKeyboard);
         }
         if (/^cancel(?:\s+verification)?[.! ]*$/i.test(t)) {
           await deleteReceiptVerifyPrompt(e, user, { kind: receiptVerifyPrompt.order_kind, id: receiptVerifyPrompt.order_id });
@@ -1674,7 +1712,7 @@ async function message(e: Env, m: Msg) {
         }
         const reference = t.trim();
         if (!reference || reference.length > 200 || /[\s<>]/.test(reference)) {
-          return say(e, chat, "Send the <b>exact Selar reference only</b> — one reference with no spaces. The receipt-verification prompt is still open; send <b>cancel</b> to stop without changing the order.");
+          return say(e, chat, "Send the <b>exact Selar reference only</b> — one reference with no spaces. The receipt-verification prompt is still open; tap <b>Cancel verification</b> below to stop without changing the order.", cancelVerificationKeyboard);
         }
         const claimedPrompt = await e.DB.prepare("DELETE FROM admin_receipt_verify_prompts WHERE admin_telegram_id=? AND order_id=? AND order_kind=? AND datetime(expires_at) > datetime('now')")
           .bind(user, receiptVerifyPrompt.order_id, receiptVerifyPrompt.order_kind)
@@ -1704,7 +1742,7 @@ async function message(e: Env, m: Msg) {
     }
     if (composer.kind === "support") {
       if (composer.purpose === "rejection") {
-        return say(e, chat, "YES did not reject this order or send the follow-up. Preview the rejection draft, then tap its explicit <b>Reject &amp; send follow-up</b> button.", adminMessageKeyboard(composer.draftId, "rejection"));
+        return say(e, chat, "YES did not reject this order or send the follow-up. Preview the rejection draft, then tap its explicit <b>Reject &amp; send follow-up</b> button — or <b>Reject now (no follow-up)</b> to reject immediately.", adminMessageKeyboard(composer.draftId, "rejection", composer.orderId && composer.orderKind ? { kind: composer.orderKind, id: composer.orderId } : null));
       }
       await executeSupportDraft(e, user, chat, composer.draftId);
       return;
@@ -1809,12 +1847,16 @@ async function message(e: Env, m: Msg) {
     }
     const welcome = "💋 <b>Hey babe, what do you want?</b>\n\n<b>1.📸 Website Photo Previews</b>\nGo to our website and see hot photo previews. Look at sexy girls with perfect bodies and naughty poses. These photos are fire and will make you hard. Only photos. No videos.💋\n\n<b>2.🔥 Telegram Channel</b>\nWant the real hot stuff? Join our Telegram channel right now. You get all the OnlyFans videos, fresh leaks, dirty chats, full videos, and new nasty drops every day. This is where it gets wild and addictive.🔞";
     const siteUrl = (e.SITE_URL || "https://fansleak.pages.dev").replace(/\/$/, "");
-    return say(e, chat, welcome, {
+    await say(e, chat, welcome, {
       inline_keyboard: [
         [{ text: "📸 Website Photo Previews", url: siteUrl }],
         [{ text: "🔥 Telegram Channel", callback_data: "services:join" }]
       ]
     });
+    // A message can carry only one markup type, so the persistent Start
+    // reply keyboard is set by this short follow-up. Once sent it stays
+    // beside the customer's message box for the whole chat.
+    return say(e, chat, "⌨️ <b>Tip:</b> tap <b>🚀 Start</b> by your message box anytime to return to this menu.", persistentStartKeyboard());
   }
   if (t === "/creators" || /^\/profiles(?:\s|$)/i.test(t)) {
     if (user !== e.ADMIN_TELEGRAM_ID) {
@@ -2429,11 +2471,13 @@ function adminOrderInspectionKeyboard(order: CustomerOrder) {
   if (order.status === "pending_payment" && !order.payment_reference) {
     rows.push([
       { text: "✅ Verify", callback_data: receiptReviewCallback("verify", order) },
-      { text: "🚫 Reject", callback_data: receiptReviewCallback("reject", order) }
+      { text: "🚫 Reject & message", callback_data: receiptReviewCallback("reject", order) }
     ]);
+    rows.push([{ text: "⛔ Just reject", callback_data: receiptReviewCallback("rejectnow", order) }]);
   }
   if (order.status === "pending_payment" && order.payment_reference) {
     rows.push([{ text: "🚫 Reject & message client", callback_data: receiptReviewCallback("reject", order) }]);
+    rows.push([{ text: "⛔ Just reject", callback_data: receiptReviewCallback("rejectnow", order) }]);
   }
   if (order.kind === "contact" && order.status === "pending_payment" && order.payment_reference) {
     rows.push([{ text: "✅ I checked Selar — confirm payment", callback_data: "selarverify:" + order.id }]);
@@ -2830,6 +2874,44 @@ async function executeBroadcast(e: Env, actor: string, chat: string | number, dr
   return counts.pending === 0 && counts.sending === 0 && counts.failed === 0 && counts.uncertain === 0 && counts.cancelled === 0;
 }
 
+// "Just reject": the admin rejects a still-pending order immediately without
+// composing a follow-up. It applies the exact same final state as the
+// rejection composer (contact → rejected, service → cancelled), writes its
+// own audit action, and tells the client the order was cancelled because
+// payment wasn't made. It never sends when a rejection draft is mid-send.
+async function executeImmediateReceiptRejection(e: Env, actor: string, chat: string | number, order: CustomerOrder): Promise<void> {
+  const inspectKeyboard = { inline_keyboard: [[{ text: "🔎 Inspect order", callback_data: order.kind === "contact" ? "admin:request:" + order.id : "admin:service:" + order.id }]] };
+  const sending = await e.DB.prepare("SELECT id FROM admin_message_drafts WHERE order_id=? AND order_kind=? AND status='sending' LIMIT 1").bind(order.id, order.kind).first<any>();
+  if (sending) {
+    await say(e, chat, "A message for this order is already sending, so <b>Just reject</b> was not applied. Inspect the order and the customer conversation first.", inspectKeyboard);
+    return;
+  }
+  const orderTable = order.kind === "contact" ? "contact_requests" : "service_orders";
+  const nextStatus = order.kind === "contact" ? "rejected" : "cancelled";
+  const changed = await e.DB.prepare("UPDATE " + orderTable + " SET status=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment' AND telegram_user_id=? AND telegram_chat_id=?")
+    .bind(nextStatus, order.id, order.telegram_user_id, order.telegram_chat_id)
+    .run();
+  if (!changed.meta?.changes) {
+    await say(e, chat, "This order changed before <b>Just reject</b> could apply, so nothing was rejected by this tap. Inspect the order.", inspectKeyboard);
+    return;
+  }
+  await deleteReceiptVerifyPrompt(e, actor, order);
+  // Any open rejection composer for this order is now obsolete; cancel it so a
+  // stale draft cannot later message the client as if it rejected them.
+  await e.DB.prepare("UPDATE admin_message_drafts SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE order_id=? AND order_kind=? AND purpose='rejection' AND status='draft'").bind(order.id, order.kind).run();
+  await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,?,?,?,?)")
+    .bind(actor, "admin_receipt_rejected_without_followup", order.id, order.kind === "contact" ? (order.target_id || null) : null, "Admin rejected " + order.kind + " order " + String(order.checkout_code || order.id) + " immediately from receipt review (Just reject); no follow-up was composed")
+    .run();
+  const code = esc(String(order.checkout_code || order.id));
+  const noun = order.kind === "contact" ? "request" : "order";
+  const clientText = "🚫 <b>" + (order.kind === "contact" ? "Request" : "Order") + " cancelled</b>\n\nYour " + noun + " <code>" + code + "</code> was cancelled because payment wasn't made.\n\nIf you did pay, please reply here and we'll check it for you.";
+  let notified = false;
+  try { await say(e, order.telegram_chat_id, clientText); notified = true; } catch { notified = false; }
+  await say(e, chat, notified
+    ? "⛔ " + (order.kind === "contact" ? "Request" : "Order") + " <code>" + code + "</code> rejected now, and the client was told it was cancelled because payment wasn't made."
+    : "⛔ " + (order.kind === "contact" ? "Request" : "Order") + " <code>" + code + "</code> rejected now, but the cancellation notice to the client could not be confirmed as delivered. Check the customer conversation.", inspectKeyboard);
+}
+
 async function executeSupportDraft(e: Env, actor: string, chat: string | number, draftId: string): Promise<boolean> {
   const context = await loadAdminMessageDraftContext(e, draftId);
   if (!context || String(context.draft.admin_telegram_id) !== actor) { await say(e, chat, "Support draft not found for this admin."); return false; }
@@ -2956,7 +3038,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   }
   if (data.startsWith("receipt:")) {
     if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin private chat only." });
-    const match = data.match(/^receipt:(verify|reject|cancel):([cs]):([0-9a-f-]{36})$/i);
+    const match = data.match(/^receipt:(verify|reject|rejectnow|confirmreject|cancel):([cs]):([0-9a-f-]{36})$/i);
     if (!match) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Invalid receipt-review action." });
     const action = match[1].toLowerCase();
     const kind: OrderKind = match[2].toLowerCase() === "c" ? "contact" : "service";
@@ -2965,7 +3047,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
 
     if (action === "cancel") {
       const deleted = await deleteReceiptVerifyPrompt(e, actor, order);
-      await say(e, chat, deleted ? "Receipt verification cancelled. The order was not changed." : "That receipt-verification prompt is no longer active. The order was not changed.");
+      await say(e, chat, deleted ? "Receipt verification cancelled. The order was not changed." : "Verification closed. The order was not changed.");
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Verification prompt closed." });
     }
 
@@ -2977,10 +3059,32 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "This order is no longer pending payment." });
     }
 
+    if (action === "rejectnow") {
+      // First tap never rejects: it shows exactly what will happen and asks
+      // for an explicit confirmation tap.
+      const attached = await attachedSaleReference(e, order);
+      const code = esc(String(order.checkout_code || order.id));
+      await say(e, chat, "⛔ <b>Just reject — no follow-up</b>\n" + (order.kind === "contact" ? "Request" : "Order") + ": <code>" + code + "</code>\n\nThis rejects the " + (order.kind === "contact" ? "request" : "order") + " immediately and tells the client it was cancelled because payment wasn't made. No custom message is composed." + (attached ? "\n\n⚠️ A Selar sale reference (<code>" + esc(attached) + "</code>) is attached to this order. Only continue if you have checked Selar and the payment really was not made." : "") + "\n\nNothing has changed yet.", {
+        inline_keyboard: [
+          [{ text: "⛔ Yes, reject now", callback_data: receiptReviewCallback("confirmreject", order) }],
+          [{ text: "✖️ Cancel — keep order open", callback_data: receiptReviewCallback("cancel", order) }],
+          [{ text: "🔎 Inspect order", callback_data: order.kind === "contact" ? "admin:request:" + order.id : "admin:service:" + order.id }]
+        ]
+      });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Confirm the immediate rejection. Nothing changed yet." });
+    }
+
+    if (action === "confirmreject") {
+      await executeImmediateReceiptRejection(e, actor, chat, order);
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Immediate rejection processed." });
+    }
+
     if (action === "reject") {
       const existingPrompt = await activeReceiptVerifyPrompt(e, actor);
       if (existingPrompt && (existingPrompt.order_id !== order.id || existingPrompt.order_kind !== order.kind)) {
-        await say(e, chat, "A receipt-verification prompt is already open for another order (<code>" + esc(existingPrompt.order_id) + "</code>). Send that exact reference or <b>cancel</b> before opening this rejection composer. Nothing was changed.");
+        await say(e, chat, "A receipt-verification prompt is already open for another order (<code>" + esc(existingPrompt.order_id) + "</code>). Send that exact reference or tap <b>Cancel verification</b> below before opening this rejection composer. Nothing was changed.", {
+          inline_keyboard: [[{ text: "✖️ Cancel verification", callback_data: receiptReviewCallback("cancel", { kind: existingPrompt.order_kind, id: existingPrompt.order_id }) }]]
+        });
         return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Another verification prompt is open." });
       }
       await deleteReceiptVerifyPrompt(e, actor, order);
@@ -2995,6 +3099,8 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
         inline_keyboard: [
           [{ text: "✅ I checked Selar — verify payment", callback_data: (order.kind === "contact" ? "selarverify:" : "serviceverify:") + order.id }],
           [{ text: "🚫 Reject & message client", callback_data: receiptReviewCallback("reject", order) }],
+          [{ text: "⛔ Just reject", callback_data: receiptReviewCallback("rejectnow", order) }],
+          [{ text: "✖️ Cancel verification", callback_data: receiptReviewCallback("cancel", order) }],
           [{ text: "🔎 Inspect order", callback_data: order.kind === "contact" ? "admin:request:" + order.id : "admin:service:" + order.id }]
         ]
       });
@@ -3003,7 +3109,9 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
 
     const existingPrompt = await activeReceiptVerifyPrompt(e, actor);
     if (existingPrompt && (existingPrompt.order_id !== order.id || existingPrompt.order_kind !== order.kind)) {
-      await say(e, chat, "A receipt-verification prompt is already open for another order (<code>" + esc(existingPrompt.order_id) + "</code>). Send that exact reference or <b>cancel</b> before opening another prompt. Nothing was verified.");
+      await say(e, chat, "A receipt-verification prompt is already open for another order (<code>" + esc(existingPrompt.order_id) + "</code>). Send that exact reference or tap <b>Cancel verification</b> below before opening another prompt. Nothing was verified.", {
+        inline_keyboard: [[{ text: "✖️ Cancel verification", callback_data: receiptReviewCallback("cancel", { kind: existingPrompt.order_kind, id: existingPrompt.order_id }) }]]
+      });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Another verification prompt is open." });
     }
     const pendingAction = await e.DB.prepare("SELECT id FROM admin_pending_actions WHERE admin_telegram_id=? AND status='pending' AND datetime(expires_at) > datetime('now') LIMIT 1").bind(actor).first<any>();
@@ -3023,6 +3131,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       inline_keyboard: [
         [{ text: "✖️ Cancel verification", callback_data: receiptReviewCallback("cancel", order) }],
         [{ text: "🚫 Reject & message client", callback_data: receiptReviewCallback("reject", order) }],
+        [{ text: "⛔ Just reject", callback_data: receiptReviewCallback("rejectnow", order) }],
         [{ text: "🔎 Inspect order", callback_data: order.kind === "contact" ? "admin:request:" + order.id : "admin:service:" + order.id }]
       ]
     });
