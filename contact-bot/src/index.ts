@@ -3119,7 +3119,40 @@ async function abandonedCart(request: Request, e: Env) {
   return json({ ok: true, matched: true, reminder_sent: true });
 }
 
+
+async function expireOldPendingOrders(e: Env) {
+  const contacts = await e.DB.prepare("SELECT id,telegram_chat_id,checkout_code FROM contact_requests WHERE status IN('awaiting_email','pending_payment','awaiting_bank_reference') AND payment_reference IS NULL AND manual_payment_reference IS NULL AND datetime(created_at)<=datetime('now','-48 hours') ORDER BY created_at ASC LIMIT 100").all<any>();
+  const services = await e.DB.prepare("SELECT id,telegram_chat_id,checkout_code FROM service_orders WHERE status IN('awaiting_request','awaiting_email','pending_payment') AND payment_reference IS NULL AND datetime(created_at)<=datetime('now','-48 hours') ORDER BY created_at ASC LIMIT 100").all<any>();
+  for (const order of contacts.results || []) {
+    try {
+      await say(e, order.telegram_chat_id, "⏰ Hey babe, your order <code>" + esc(String(order.checkout_code || order.id)) + "</code> has been deleted because checkout wasn't completed within 48 hours. No worries — if you'd still like to continue, open the website and start a new request. 💌");
+    } catch { continue; }
+    await e.DB.prepare("DELETE FROM checkout_name_prompts WHERE order_id=?").bind(order.id).run();
+    await e.DB.prepare("DELETE FROM receipt_review_prompts WHERE order_id=?").bind(order.id).run();
+    await e.DB.prepare("DELETE FROM payment_receipt_submissions WHERE order_id=?").bind(order.id).run();
+    await e.DB.prepare("DELETE FROM delivery_drafts WHERE request_id=?").bind(order.id).run();
+    await e.DB.prepare("DELETE FROM admin_message_drafts WHERE order_id=? AND order_kind='contact'").bind(order.id).run();
+    await e.DB.prepare("DELETE FROM processed_sales WHERE request_id=?").bind(order.id).run();
+    await e.DB.prepare("DELETE FROM contact_requests WHERE id=? AND payment_reference IS NULL AND manual_payment_reference IS NULL AND status IN('awaiting_email','pending_payment','awaiting_bank_reference')").bind(order.id).run();
+  }
+  for (const order of services.results || []) {
+    try {
+      await say(e, order.telegram_chat_id, "⏰ Hey babe, your order <code>" + esc(String(order.checkout_code || order.id)) + "</code> has been deleted because checkout wasn't completed within 48 hours. No worries — tap <b>👀 View our services 🔞</b> in Annie's chat whenever you're ready to start again. 💋");
+    } catch { continue; }
+    await e.DB.prepare("DELETE FROM checkout_name_prompts WHERE order_id=?").bind(order.id).run();
+    await e.DB.prepare("DELETE FROM receipt_review_prompts WHERE order_id=?").bind(order.id).run();
+    await e.DB.prepare("DELETE FROM payment_receipt_submissions WHERE order_id=?").bind(order.id).run();
+    await e.DB.prepare("DELETE FROM service_delivery_drafts WHERE service_order_id=?").bind(order.id).run();
+    await e.DB.prepare("DELETE FROM admin_message_drafts WHERE order_id=? AND order_kind='service'").bind(order.id).run();
+    await e.DB.prepare("DELETE FROM processed_sales WHERE request_id=?").bind(order.id).run();
+    await e.DB.prepare("DELETE FROM service_orders WHERE id=? AND payment_reference IS NULL AND status IN('awaiting_request','awaiting_email','pending_payment')").bind(order.id).run();
+  }
+}
+
 export default {
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    await expireOldPendingOrders(env);
+  },
   async fetch(request: Request, env: Env): Promise<Response> {
     const u = new URL(request.url);
     if (request.method === "GET" && u.pathname === "/health") return json({ ok: true, service: "fansleak-contact-bot", provider: provider(env), methods: enabledMethods(env) });
