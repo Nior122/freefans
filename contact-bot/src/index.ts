@@ -1628,15 +1628,14 @@ async function message(e: Env, m: Msg) {
     if (user === e.ADMIN_TELEGRAM_ID && chat === user) {
       return say(e, chat, "Welcome back. Open /admin for the Admin Desk or /profiles to view and search website profiles.");
     }
-    const welcomes = [
-      "Hey handsome… 😘🔥 I’m Annie, babe. Looking for a little excitement? I can show you hot photo previews or help you join our channel. Tap below, darling. 💋",
-      "Well hello, hot boy 😏💖 Annie’s here, just for you. Want to peek at some spicy photo previews or check out the channel? You know what to do, babe. 👀🔥",
-      "Hey darling 💋😉 You made it! I’m Annie. Let’s make this interesting — browse some hot photo previews or explore the channel option below. Come on, handsome. 😘",
-      "Oh hey, babe… 😈💗 I’m Annie, and I was hoping you’d stop by. Ready for a little tease? Check out the photo previews or tap below to see the channel option. 🔥👀"
-    ];
-    const welcomeIndex = crypto.getRandomValues(new Uint32Array(1))[0] % welcomes.length;
-    const welcome = welcomes[welcomeIndex];
-    return say(e, chat, welcome + "\n\n⚠️ <i>Never send passwords, PINs or OTPs here.</i>", { inline_keyboard: [[{ text: "👀 View our services 🔞", callback_data: "services:view" }]] });
+    const welcome = "💋 <b>Hey babe, what do you want?</b>\n\n<b>1.📸 Website Photo Previews</b>\nGo to our website and see hot photo previews. Look at sexy girls with perfect bodies and naughty poses. These photos are fire and will make you hard. Only photos. No videos.💋\n\n<b>2.🔥 Telegram Channel</b>\nWant the real hot stuff? Join our Telegram channel right now. You get all the OnlyFans videos, fresh leaks, dirty chats, full videos, and new nasty drops every day. This is where it gets wild and addictive.🔞";
+    const siteUrl = (e.SITE_URL || "https://fansleak.pages.dev").replace(/\/$/, "");
+    return say(e, chat, welcome, {
+      inline_keyboard: [
+        [{ text: "📸 Website Photo Previews", url: siteUrl }],
+        [{ text: "🔥 Telegram Channel", callback_data: "services:join" }]
+      ]
+    });
   }
   if (t === "/creators" || /^\/profiles(?:\s|$)/i.test(t)) {
     if (user !== e.ADMIN_TELEGRAM_ID) {
