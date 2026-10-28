@@ -1329,7 +1329,8 @@ test('Missing sale prompts for a Selar receipt photo, forwards it once, and neve
 
     const submission = db.raw.prepare('SELECT * FROM payment_receipt_submissions WHERE order_id=?').get(order.id) as any;
     assert.equal(submission.status, 'forwarded');
-    assert.equal(submission.telegram_file_unique_id, 'photo-unique-1');
+    assert.equal(submission.telegram_file_id, '', 'Telegram file pointer must be cleared after the receipt reaches the admin');
+    assert.equal(submission.telegram_file_unique_id, null, 'Duplicate-media identifier must also be cleared after forwarding');
     assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM receipt_review_prompts WHERE telegram_user_id='5211'").get().cnt, 0);
 
     await tgPost(env, receipt);
