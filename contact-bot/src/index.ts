@@ -1199,9 +1199,24 @@ async function start(e: Env, m: Msg, payload: string) {
     }
   }
   if (!inserted) return say(e, chat, "I couldn't start your request just now. Please try again in a moment.");
-  const intro = `Hi! I’m Annie for ${esc(profile.name)}. I’ve started your request and created your unique order code: <code>${esc(code)}</code>.`;
-  const instructions = `Tap the Pay now button below to open the checkout. In the customer name field, enter your full name followed by this code exactly, for example: <code>John Doe ${esc(code)}</code>. This lets me match your payment to the correct request. An email address cannot match or verify payment. After verification, I will send you your requests here.`;
-  return say(e, chat, `${intro}\n\n${instructions}`, paymentKeyboard(e, requestId));
+  const greeting = `Hi babe! I’m Annie for ${esc(profile.name)}.
+
+I’ve started your hot request. Your code is:
+<b>${esc(code)}</b>
+
+Tap the <b>Pay now</b> button below to open checkout.
+
+In the customer name field, write your full name and the code exactly like this:
+<b>John Doe ${esc(code)}</b>
+
+This lets me match your payment fast. Do not use email — it will not work.
+
+After I confirm your payment, I will send your custom order here. You also get full access to our Telegram channel. There you will see all her sexy videos, creator-approved videos, way more hot photos of her, dirty chats, and new nasty drops every single day. Everything is updated daily and very addictive.
+
+This is where the real fun lives.
+
+Ready to unlock it all? 🔥`;
+  return say(e, chat, greeting, paymentKeyboard(e, requestId));
 }
 
 async function aiReply(e: Env, chat: string, userText: string, reminder = "", voiceReply = false) {
