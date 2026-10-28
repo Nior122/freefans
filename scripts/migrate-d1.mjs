@@ -297,6 +297,21 @@ export function migrateRemote() {
     runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0020_receipt_review_actions')");
   }
 
+  // Migration 21: widen durable admin confirmations for permanent order deletion.
+  // Inspect the table definition so an already-rebuilt table is not rebuilt again
+  // if a prior run stopped before recording the version.
+  if (!applied.has('0021_admin_order_deletion_actions')) {
+    console.log('[migrate-d1] Applying 0021_admin_order_deletion_actions migration...');
+    const pendingActionSchema21 = runWranglerCommand("SELECT sql FROM sqlite_master WHERE type='table' AND name='admin_pending_actions' LIMIT 1");
+    const pendingActionSql21 = String(pendingActionSchema21[0]?.sql || '');
+    if (!pendingActionSql21.includes("'delete_orders_bulk'")) {
+      runWranglerFile(path.join(ROOT, 'contact-bot', 'migrations', '0021_admin_order_deletion_actions.sql'));
+    } else {
+      runWranglerCommand("CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_pending_actions_one_pending_per_admin ON admin_pending_actions(admin_telegram_id) WHERE status='pending'");
+    }
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0021_admin_order_deletion_actions')");
+  }
+
   // Final complete schema verification. These expectations are shared with the
   // local migration verifier to prevent the two definitions drifting apart.
   console.log('[migrate-d1] Verifying complete schema...');

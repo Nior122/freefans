@@ -32,6 +32,7 @@ function createTestDb() {
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0018_clear_delivered_media_references.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0019_admin_broadcast_recipients.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0020_receipt_review_actions.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0021_admin_order_deletion_actions.sql'), 'utf8'));
 
   return {
     raw: db,
@@ -2026,13 +2027,22 @@ test('A backend sale arriving after the receipt prompt supersedes receipt forwar
 
 
 
-test('Admin natural-language profile deletion waits for YES, then hides profile persistently', async () => {
+test('Admin natural-language profile deletion is refused; explicit /hideprofile remains confirmation-gated', async () => {
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
     await tgPost(env, adminMsg('delete profile Anaimiya'));
-    const pending = db.raw.prepare("SELECT id,action,payload,status FROM admin_pending_actions WHERE admin_telegram_id='10001'").get() as any;
-    assert.ok(pending);
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_pending_actions WHERE admin_telegram_id='10001' AND status='pending'").get().cnt, 0, 'Natural-language profile deletion must not prepare a hide action');
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM hidden_profiles").get().cnt, 0);
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('not an AI or natural-language action') && String(m.data.text).includes('/hideprofile')));
+
+    await tgPost(env, adminMsg('please remove the Anaimiya profile'));
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_pending_actions WHERE admin_telegram_id='10001' AND status='pending'").get().cnt, 0, 'Assistant phrasing must not prepare profile deletion either');
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM hidden_profiles").get().cnt, 0);
+
+    await tgPost(env, adminMsg('/hideprofile anaimiya'));
+    const pending = db.raw.prepare("SELECT id,action,payload,status FROM admin_pending_actions WHERE admin_telegram_id='10001' AND status='pending'").get() as any;
+    assert.ok(pending, 'Explicit /hideprofile should still prepare the manual reversible hide');
     assert.equal(pending.action, 'hide_profile');
     assert.equal(pending.payload, 'anaimiya');
     assert.equal(pending.status, 'pending');
@@ -2342,6 +2352,339 @@ test('Bulk pending closure is snapshot-bound and excludes verified and payment-r
     assert.equal(status('service_orders', serviceReview), 'payment_review');
     assert.equal(status('admin_pending_actions', pending.id), 'completed');
   } finally {
+    cleanup();
+  }
+});
+
+test('Permanent single-order deletion requires confirmation, removes child records, and retains payment/audit ledgers', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,?,?,?,?,?)")
+      .run(orderId, '9101', '9101', 'anaimiya', 'pending_payment', 'FL-DEL001');
+    db.raw.prepare("INSERT INTO checkout_name_prompts(telegram_user_id,order_id,order_kind) VALUES('9101',?,'contact')").run(orderId);
+    db.raw.prepare("INSERT INTO receipt_review_prompts(telegram_user_id,order_id,order_kind) VALUES('9101',?,'contact')").run(orderId);
+    db.raw.prepare(`INSERT INTO payment_receipt_submissions
+      (id,order_id,order_kind,telegram_user_id,telegram_chat_id,telegram_message_id,media_kind,telegram_file_id,telegram_file_unique_id,mime_type,file_size,status,admin_telegram_id)
+      VALUES(?,?,'contact','9101','9101',91001,'photo','synthetic-file-id','synthetic-unique-id','image/jpeg',123,'forwarded','10001')`)
+      .run(crypto.randomUUID(), orderId);
+    db.raw.prepare(`INSERT INTO delivery_drafts(id,request_id,admin_telegram_id,checkout_code,message_text,status,expires_at)
+      VALUES(?,?,'10001','FL-DEL001','Synthetic cancelled delivery','cancelled','2999-01-01 00:00:00')`)
+      .run(crypto.randomUUID(), orderId);
+    db.raw.prepare(`INSERT INTO admin_message_drafts(id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,message_text,status,expires_at)
+      VALUES(?,?,'contact','10001','9101','9101','FL-DEL001','Synthetic cancelled support','cancelled','2999-01-01 00:00:00')`)
+      .run(crypto.randomUUID(), orderId);
+    db.raw.prepare(`INSERT INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id)
+      VALUES('synthetic-sale-del001','buyer@example.invalid',100,'USD','synthetic-product',?)`).run(orderId);
+    db.raw.prepare(`INSERT INTO processed_abandoned_carts(event_key,product_code,request_id,abandoned_at)
+      VALUES('synthetic-cart-del001','synthetic-product',?,datetime('now'))`).run(orderId);
+    db.raw.prepare(`INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details)
+      VALUES('10001','synthetic_existing_audit',?,'anaimiya','Synthetic retained audit')`).run(orderId);
+
+    await tgPost(env, userMsg(9999, '/deleteorder FL-DEL001'));
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_pending_actions WHERE status='pending'").get().cnt, 0, 'A non-admin must not prepare deletion');
+    await tgPost(env, callbackFrom(9999, `admin:deleteorder:contact:${orderId}`, 'cb-delete-nonadmin'));
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_pending_actions WHERE status='pending'").get().cnt, 0, 'A non-admin callback must not prepare deletion');
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM contact_requests WHERE id=?').get(orderId).cnt, 1);
+
+    await tgPost(env, adminMsg('/order FL-DEL001'));
+    assert.ok(sentTelegramMessages.some(m => JSON.stringify(m.data.reply_markup || {}).includes(`admin:deleteorder:contact:${orderId}`)), 'Order inspection should expose the permanent-delete preparation button');
+
+    await tgPost(env, adminMsg('/deleteorder FL-DEL001'));
+    const pending = db.raw.prepare("SELECT id,action,payload,status FROM admin_pending_actions WHERE action='delete_order' AND status='pending'").get() as any;
+    assert.ok(pending);
+    assert.ok(String(pending.payload).includes(orderId));
+    assert.ok(String(pending.payload).includes('pending_payment'));
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM contact_requests WHERE id=?').get(orderId).cnt, 1, 'Preview alone must not delete the order');
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('Permanently delete this order?') && String(m.data.text).includes('customer will <b>not</b> be notified')));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '9101').length, 0);
+
+    db.raw.prepare(`INSERT INTO admin_receipt_verify_prompts(admin_telegram_id,order_id,order_kind,expires_at)
+      VALUES('10001',?,'contact','2999-01-01 00:00:00')`).run(orderId);
+    await tgPost(env, callbackFrom(10001, `admin-action:confirm:${pending.id}`, 'cb-delete-confirm'));
+
+    assert.equal(db.raw.prepare('SELECT status FROM admin_pending_actions WHERE id=?').get(pending.id).status, 'completed');
+    const count = (query: string, ...values: any[]) => (db.raw.prepare(query).get(...values) as any).cnt;
+    assert.equal(count('SELECT count(*) AS cnt FROM contact_requests WHERE id=?', orderId), 0);
+    assert.equal(count('SELECT count(*) AS cnt FROM checkout_name_prompts WHERE order_id=?', orderId), 0);
+    assert.equal(count('SELECT count(*) AS cnt FROM receipt_review_prompts WHERE order_id=?', orderId), 0);
+    assert.equal(count('SELECT count(*) AS cnt FROM payment_receipt_submissions WHERE order_id=?', orderId), 0);
+    assert.equal(count('SELECT count(*) AS cnt FROM admin_message_drafts WHERE order_id=?', orderId), 0);
+    assert.equal(count('SELECT count(*) AS cnt FROM admin_receipt_verify_prompts WHERE order_id=?', orderId), 0);
+    assert.equal(count('SELECT count(*) AS cnt FROM delivery_drafts WHERE request_id=?', orderId), 0);
+    assert.equal(count('SELECT count(*) AS cnt FROM processed_sales WHERE request_id=?', orderId), 1, 'Used sale references must stay blocked from reuse');
+    assert.equal(count('SELECT count(*) AS cnt FROM processed_abandoned_carts WHERE request_id=?', orderId), 1, 'Webhook event deduplication must be retained');
+    assert.equal(count("SELECT count(*) AS cnt FROM admin_audit WHERE request_id=? AND action='synthetic_existing_audit'", orderId), 1);
+    assert.equal(count("SELECT count(*) AS cnt FROM admin_audit WHERE request_id=? AND action='admin_order_permanently_deleted'", orderId), 1);
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '9101').length, 0, 'Permanent admin clearing is silent to the customer');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Permanent deletion skips orders changed after preview or with a draft mid-send', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const changedId = crypto.randomUUID();
+    db.raw.prepare("INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,status,checkout_code) VALUES(?,?,?,?,?,?)")
+      .run(changedId, 'telegram_channel', '9102', '9102', 'pending_payment', 'FL-DEL002');
+
+    await tgPost(env, adminMsg('/deleteorder FL-DEL002'));
+    let pending = db.raw.prepare("SELECT id FROM admin_pending_actions WHERE action='delete_order' AND status='pending'").get() as any;
+    assert.ok(pending);
+    db.raw.prepare("UPDATE service_orders SET status='payment_verified' WHERE id=?").run(changedId);
+    await tgPost(env, adminMsg('yes'));
+
+    assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(changedId) as any).status, 'payment_verified', 'A changed order must be skipped');
+    assert.equal(db.raw.prepare('SELECT status FROM admin_pending_actions WHERE id=?').get(pending.id).status, 'completed');
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_audit WHERE request_id=? AND action='admin_order_permanently_deleted'").get(changedId).cnt, 0);
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('changed or no longer exists')));
+
+    const sendingId = crypto.randomUUID();
+    const sendingDraftId = crypto.randomUUID();
+    db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,?,?,?,?,?)")
+      .run(sendingId, '9103', '9103', 'anaimiya', 'pending_payment', 'FL-DEL003');
+    db.raw.prepare(`INSERT INTO admin_message_drafts(id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,message_text,status,expires_at)
+      VALUES(?,?,'contact','10001','9103','9103','FL-DEL003','Synthetic uncertain support send','sending','2999-01-01 00:00:00')`)
+      .run(sendingDraftId, sendingId);
+
+    await tgPost(env, callbackFrom(10001, `admin:deleteorder:contact:${sendingId}`, 'cb-delete-sending-prepare'));
+    pending = db.raw.prepare("SELECT id FROM admin_pending_actions WHERE action='delete_order' AND status='pending'").get() as any;
+    assert.ok(pending);
+    await tgPost(env, callbackFrom(10001, `admin-action:confirm:${pending.id}`, 'cb-delete-sending-confirm'));
+
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM contact_requests WHERE id=?').get(sendingId).cnt, 1, 'A mid-send order must not be deleted');
+    assert.equal((db.raw.prepare('SELECT status FROM admin_message_drafts WHERE id=?').get(sendingDraftId) as any).status, 'sending');
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_audit WHERE request_id=? AND action='admin_order_permanently_deleted'").get(sendingId).cnt, 0);
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('mid-send')));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '9103').length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('Bulk permanent deletion is scope-bound, snapshot-bound, and silent to customers', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const ids = {
+      contactPending: crypto.randomUUID(),
+      contactAwaiting: crypto.randomUUID(),
+      contactVerified: crypto.randomUUID(),
+      contactApproved: crypto.randomUUID(),
+      contactRejected: crypto.randomUUID(),
+      contactAfterPreview: crypto.randomUUID(),
+      servicePending: crypto.randomUUID(),
+      serviceReview: crypto.randomUUID(),
+      serviceVerified: crypto.randomUUID(),
+      serviceFulfilled: crypto.randomUUID(),
+      serviceCancelled: crypto.randomUUID()
+    };
+    const insertContact = db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,?,?,?,?,?)");
+    insertContact.run(ids.contactPending, '9201', '9201', 'anaimiya', 'pending_payment', 'FL-BDEL01');
+    insertContact.run(ids.contactAwaiting, '9202', '9202', 'anaimiya', 'awaiting_email', 'FL-BDEL02');
+    insertContact.run(ids.contactVerified, '9203', '9203', 'anaimiya', 'payment_verified', 'FL-BDEL03');
+    insertContact.run(ids.contactApproved, '9204', '9204', 'anaimiya', 'approved', 'FL-BDEL04');
+    insertContact.run(ids.contactRejected, '9205', '9205', 'anaimiya', 'rejected', 'FL-BDEL05');
+    const insertService = db.raw.prepare("INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,status,checkout_code) VALUES(?,?,?,?,?,?)");
+    insertService.run(ids.servicePending, 'telegram_channel', '9301', '9301', 'pending_payment', 'FL-BDEL11');
+    insertService.run(ids.serviceReview, 'telegram_channel', '9302', '9302', 'payment_review', 'FL-BDEL12');
+    insertService.run(ids.serviceVerified, 'telegram_channel', '9303', '9303', 'payment_verified', 'FL-BDEL13');
+    insertService.run(ids.serviceFulfilled, 'telegram_channel', '9304', '9304', 'fulfilled', 'FL-BDEL14');
+    insertService.run(ids.serviceCancelled, 'telegram_channel', '9305', '9305', 'cancelled', 'FL-BDEL15');
+    const exists = (table: string, id: string) => Boolean(db.raw.prepare(`SELECT id FROM ${table} WHERE id=?`).get(id));
+
+    await tgPost(env, adminMsg('/admin'));
+    assert.ok(sentTelegramMessages.some(m => JSON.stringify(m.data.reply_markup || {}).includes('admin:clear_orders') && JSON.stringify(m.data.reply_markup || {}).includes('admin:assistant_help')), 'Admin Desk should expose clear-orders and assistant help');
+
+    await tgPost(env, callbackFrom(10001, 'admin:clear_orders', 'cb-clear-chooser'));
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('Clear orders permanently')));
+    assert.ok(sentTelegramMessages.some(m => ['admin:clearorders:pending', 'admin:clearorders:finished', 'admin:clearorders:all'].every(callback => JSON.stringify(m.data.reply_markup || {}).includes(callback))));
+
+    await tgPost(env, callbackFrom(10001, 'admin:clearorders:pending', 'cb-clear-pending'));
+    let pending = db.raw.prepare("SELECT id,payload FROM admin_pending_actions WHERE action='delete_orders_bulk' AND status='pending'").get() as any;
+    assert.ok(pending);
+    let payload = JSON.parse(pending.payload);
+    assert.equal(payload.scope, 'pending');
+    assert.deepEqual(payload.contacts.map((x: any) => x.id).sort(), [ids.contactPending, ids.contactAwaiting].sort());
+    assert.deepEqual(payload.services.map((x: any) => x.id), [ids.servicePending]);
+    assert.ok(!pending.payload.includes(ids.contactVerified));
+    assert.ok(!pending.payload.includes(ids.serviceReview));
+    assert.ok(!pending.payload.includes(ids.contactApproved));
+
+    insertContact.run(ids.contactAfterPreview, '9206', '9206', 'anaimiya', 'pending_payment', 'FL-BDEL06');
+    db.raw.prepare("UPDATE contact_requests SET status='payment_verified' WHERE id=?").run(ids.contactPending);
+    await tgPost(env, adminMsg('yes'));
+
+    assert.equal(exists('contact_requests', ids.contactAwaiting), false);
+    assert.equal(exists('service_orders', ids.servicePending), false);
+    assert.equal(exists('contact_requests', ids.contactPending), true, 'Changed snapshot order must remain');
+    assert.equal(exists('contact_requests', ids.contactAfterPreview), true, 'Order created after preview must remain');
+    assert.equal(exists('contact_requests', ids.contactVerified), true);
+    assert.equal(exists('service_orders', ids.serviceReview), true);
+    assert.equal(db.raw.prepare('SELECT status FROM admin_pending_actions WHERE id=?').get(pending.id).status, 'completed');
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_audit WHERE action='admin_orders_permanently_deleted_bulk'").get().cnt, 1);
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '9202').length, 0);
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '9301').length, 0);
+
+    await tgPost(env, adminMsg('/clearorders finished'));
+    pending = db.raw.prepare("SELECT id,payload FROM admin_pending_actions WHERE action='delete_orders_bulk' AND status='pending'").get() as any;
+    assert.ok(pending);
+    payload = JSON.parse(pending.payload);
+    assert.equal(payload.scope, 'finished');
+    assert.deepEqual(payload.contacts.map((x: any) => x.id).sort(), [ids.contactApproved, ids.contactRejected].sort());
+    assert.deepEqual(payload.services.map((x: any) => x.id).sort(), [ids.serviceFulfilled, ids.serviceCancelled].sort());
+    assert.ok(!pending.payload.includes(ids.contactVerified));
+    assert.ok(!pending.payload.includes(ids.serviceReview));
+    await tgPost(env, adminMsg('yes'));
+
+    assert.equal(exists('contact_requests', ids.contactApproved), false);
+    assert.equal(exists('contact_requests', ids.contactRejected), false);
+    assert.equal(exists('service_orders', ids.serviceFulfilled), false);
+    assert.equal(exists('service_orders', ids.serviceCancelled), false);
+    assert.equal(exists('contact_requests', ids.contactVerified), true, 'Finished scope must exclude payment_verified');
+    assert.equal(exists('service_orders', ids.serviceReview), true, 'Finished scope must exclude payment_review');
+
+    await tgPost(env, adminMsg('/clearorders all'));
+    pending = db.raw.prepare("SELECT id,payload FROM admin_pending_actions WHERE action='delete_orders_bulk' AND status='pending'").get() as any;
+    assert.ok(pending);
+    payload = JSON.parse(pending.payload);
+    assert.equal(payload.scope, 'all');
+    assert.equal(payload.contacts.length, 3);
+    assert.equal(payload.services.length, 2);
+    await tgPost(env, callbackFrom(10001, `admin-action:confirm:${pending.id}`, 'cb-clear-all-confirm'));
+
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM contact_requests').get().cnt, 0);
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM service_orders').get().cnt, 0);
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('Bulk permanent deletion finished')));
+    for (const chatId of ['9201', '9202', '9203', '9204', '9205', '9206', '9301', '9302', '9303', '9304', '9305']) {
+      assert.equal(customerTelegramCalls(sentTelegramMessages, chatId).length, 0, `Bulk clearing must not notify ${chatId}`);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('Admin assistant crafts drafts and prepares deletions but never sends, deletes, or verifies by itself', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,?,?,?,?,?)")
+      .run(orderId, '9401', '9401', 'anaimiya', 'pending_payment', 'FL-AST001');
+    const craftedSupport = 'Hi there — sorry for the delay. We are checking it now and will update you here shortly.';
+    const craftedBroadcast = 'Hello everyone, we have fresh updates for you today. Thank you for being here.';
+    const envWithAi = {
+      ...env,
+      AI: {
+        run: async (_model: string, input: any) => {
+          const system = String(input?.messages?.[0]?.content || '');
+          const user = String(input?.messages?.[1]?.content || '');
+          if (system.includes('strict intent classifier')) {
+            if (user.includes('friendly message to customer')) {
+              return { response: JSON.stringify({ action: 'message_customer', ref: 'FL-AST001', instruction: 'Apologise for the delay and say we are checking it now' }) };
+            }
+            if (user.includes('broadcast')) {
+              return { response: JSON.stringify({ action: 'broadcast', instruction: 'Tell all clients there are fresh updates today' }) };
+            }
+            if (user.includes('get rid of that test order')) {
+              return { response: JSON.stringify({ action: 'delete_order', ref: 'FL-AST001' }) };
+            }
+            return { response: JSON.stringify({ action: 'none' }) };
+          }
+          if (system.includes('You write short')) {
+            return { response: user.includes('all clients') ? craftedBroadcast : craftedSupport };
+          }
+          return { response: 'unused' };
+        }
+      }
+    };
+
+    await tgPost(envWithAi, adminMsg('Please write a friendly message to customer FL-AST001 apologising for the delay and saying we are checking it now'));
+    const supportDraft = latestSupportDraft(db, orderId);
+    assert.ok(supportDraft, 'Assistant should open the existing support draft flow');
+    assert.equal(supportDraft.status, 'draft');
+    assert.equal(supportDraft.purpose, 'support');
+    assert.equal(supportDraft.message_text, craftedSupport);
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '9401').length, 0, 'Assistant drafting must not send to the customer');
+    await tgPost(env, callbackFrom(10001, `support-message:cancel:${supportDraft.id}`, 'cb-assistant-support-cancel'));
+    assert.equal((db.raw.prepare('SELECT status FROM admin_message_drafts WHERE id=?').get(supportDraft.id) as any).status, 'cancelled');
+
+    await tgPost(envWithAi, adminMsg('Write a short broadcast telling all clients we have fresh updates today'));
+    const broadcastDraft = db.raw.prepare('SELECT * FROM admin_broadcast_drafts ORDER BY rowid DESC LIMIT 1').get() as any;
+    assert.ok(broadcastDraft, 'Assistant should open the existing broadcast draft flow');
+    assert.equal(broadcastDraft.status, 'draft');
+    assert.equal(broadcastDraft.message_text, craftedBroadcast);
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '9401').length, 0, 'Assistant broadcast drafting must not send');
+    await tgPost(env, callbackFrom(10001, `broadcast:cancel:${broadcastDraft.id}`, 'cb-assistant-broadcast-cancel'));
+    assert.equal((db.raw.prepare('SELECT status FROM admin_broadcast_drafts WHERE id=?').get(broadcastDraft.id) as any).status, 'cancelled');
+
+    await tgPost(env, adminMsg('Verify the payment for FL-AST001'));
+    const orderAfterVerifyAttempt = db.raw.prepare('SELECT status,payment_reference FROM contact_requests WHERE id=?').get(orderId) as any;
+    assert.equal(orderAfterVerifyAttempt.status, 'pending_payment');
+    assert.equal(orderAfterVerifyAttempt.payment_reference, null);
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM processed_sales WHERE request_id=?').get(orderId).cnt, 0);
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('verify or confirm payments')));
+
+    await tgPost(env, adminMsg('delete order FL-AST001'));
+    let pending = db.raw.prepare("SELECT id FROM admin_pending_actions WHERE action='delete_order' AND status='pending'").get() as any;
+    assert.ok(pending, 'Deterministic delete phrase should prepare, not execute, deletion');
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM contact_requests WHERE id=?').get(orderId).cnt, 1);
+    await tgPost(env, callbackFrom(10001, `admin-action:cancel:${pending.id}`, 'cb-assistant-delete-cancel'));
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM contact_requests WHERE id=?').get(orderId).cnt, 1, 'Cancelling a prepared deletion must leave the order intact');
+
+    await tgPost(envWithAi, adminMsg('Please get rid of that test order FL-AST001 for me'));
+    pending = db.raw.prepare("SELECT id FROM admin_pending_actions WHERE action='delete_order' AND status='pending'").get() as any;
+    assert.ok(pending, 'AI-classified delete wording should stop at a confirmation preview');
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM contact_requests WHERE id=?').get(orderId).cnt, 1, 'AI classification alone must not delete');
+    await tgPost(env, adminMsg('yes'));
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM contact_requests WHERE id=?').get(orderId).cnt, 0);
+    assert.equal(db.raw.prepare('SELECT status FROM admin_pending_actions WHERE id=?').get(pending.id).status, 'completed');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '9401').length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('A voice transcript cannot prepare permanent order deletion', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  const baseFetch = globalThis.fetch;
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,?,?,?,?,?)")
+      .run(orderId, '9501', '9501', 'anaimiya', 'pending_payment', 'FL-VCE001');
+
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const urlText = String(url);
+      if (urlText.includes('/getFile?')) {
+        return new Response(JSON.stringify({ ok: true, result: { file_path: 'voice/delete-test.ogg', file_size: 3 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      if (urlText.includes('/file/bot')) return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      return (baseFetch as any)(url, init);
+    }) as any;
+    const voiceEnv = {
+      ...env,
+      AI: {
+        run: async (model: string) => model === '@cf/openai/whisper' ? { text: 'delete order FL-VCE001' } : { response: 'unused' }
+      }
+    };
+
+    await tgPost(voiceEnv, {
+      message: {
+        chat: { id: 10001 },
+        from: { id: 10001 },
+        voice: { file_id: 'voice-delete-test', file_unique_id: 'voice-delete-unique', file_size: 3, duration: 1 }
+      }
+    });
+
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM contact_requests WHERE id=?').get(orderId).cnt, 1);
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_pending_actions WHERE status='pending'").get().cnt, 0);
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text || '').includes('will not run that consequential admin action from a voice transcript')));
+  } finally {
+    globalThis.fetch = baseFetch;
     cleanup();
   }
 });

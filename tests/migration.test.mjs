@@ -46,7 +46,8 @@ test('Migration: fresh database migrates to fully verified schema', () => {
     '0017_limit_unverified_service_orders',
     '0018_clear_delivered_media_references',
     '0019_admin_broadcast_recipients',
-    '0020_receipt_review_actions'
+    '0020_receipt_review_actions',
+    '0021_admin_order_deletion_actions'
   ]);
 
   const verified = verifySchema(db);
@@ -259,6 +260,45 @@ test('Migrations 0015-0016: service media columns and draft-recovery confirmatio
         (id,admin_telegram_id,action,payload,status,expires_at)
       VALUES (?,?,?,?,?,?)
     `).run('recovery-action-2', '10001', 'hide_profile', 'anaimiya', 'pending', '2999-01-01 00:00:00'),
+    /UNIQUE constraint failed/i,
+    'Rebuilding pending actions must preserve the one-pending-confirmation guard'
+  );
+});
+
+test('Migration 0021: order-deletion confirmations preserve existing pending actions', () => {
+  const db = new DatabaseSync(':memory:');
+  applyAllMigrations(db);
+
+  const insertAction = (id, admin, action, payload, status) => db.prepare(`
+    INSERT INTO admin_pending_actions
+      (id,admin_telegram_id,action,payload,status,expires_at)
+    VALUES (?,?,?,?,?,?)
+  `).run(id, admin, action, payload, status, '2999-01-01 00:00:00');
+
+  insertAction('existing-hide-action', '10001', 'hide_profile', 'anaimiya', 'completed');
+  insertAction('existing-recovery-action', '10001', 'recover_draft', '{"kind":"support","draftId":"draft-1","updatedAt":"2026-01-01T00:00:00.000Z"}', 'pending');
+
+  // Re-run the rebuild SQL against populated state to prove the copy path
+  // itself preserves rows, statuses, and the one-pending-action guard.
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0021_admin_order_deletion_actions.sql'), 'utf8'));
+
+  const rows = db.prepare('SELECT id,action,status FROM admin_pending_actions ORDER BY id').all();
+  assert.deepEqual(rows.map(row => [row.id, row.action, row.status]), [
+    ['existing-hide-action', 'hide_profile', 'completed'],
+    ['existing-recovery-action', 'recover_draft', 'pending']
+  ]);
+
+  insertAction('delete-one-action', '10002', 'delete_order', '{"kind":"contact","id":"00000000-0000-4000-8000-000000000001","status":"pending_payment"}', 'completed');
+  insertAction('delete-bulk-action', '10002', 'delete_orders_bulk', '{"scope":"pending","contacts":[],"services":[]}', 'completed');
+  assert.equal(db.prepare("SELECT action FROM admin_pending_actions WHERE id='delete-one-action'").get().action, 'delete_order');
+  assert.equal(db.prepare("SELECT action FROM admin_pending_actions WHERE id='delete-bulk-action'").get().action, 'delete_orders_bulk');
+
+  assert.throws(
+    () => insertAction('unsupported-action', '10002', 'delete_everything', null, 'completed'),
+    /CHECK constraint failed/i
+  );
+  assert.throws(
+    () => insertAction('second-pending-action', '10001', 'delete_order', '{"kind":"service","id":"00000000-0000-4000-8000-000000000002","status":"pending_payment"}', 'pending'),
     /UNIQUE constraint failed/i,
     'Rebuilding pending actions must preserve the one-pending-confirmation guard'
   );
