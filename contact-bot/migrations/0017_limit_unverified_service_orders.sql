@@ -1,4 +1,6 @@
--- Keep the Telegram channel subscription flow capped at three unverified orders per user.
+-- Replace the old one-active-service-order index with a three-unverified-order cap.
+DROP INDEX IF EXISTS idx_service_orders_one_active_per_user;
+
 -- Payment-linked orders remain in the review queue and cannot be cancelled as unpaid.
 CREATE TRIGGER IF NOT EXISTS trg_service_orders_max_three_unverified_insert
 BEFORE INSERT ON service_orders
