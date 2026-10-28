@@ -247,7 +247,7 @@ test('Direct /start opens Annie welcome, service menu, and channel checkout usin
     const buttons = (checkoutMessage?.data.reply_markup as any)?.inline_keyboard?.flat() || [];
     assert.ok(buttons.some((b: any) => b.text === '💳 Pay now' && String(b.url).startsWith('https://selar.com/x19128f988')));
     assert.ok(buttons.some((b: any) => b.text === '✅ Done — checkout completed'));
-    assert.ok(buttons.some((b: any) => b.text === '🔎 I've paid — check again'));
+    assert.ok(buttons.some((b: any) => b.text === "🔎 I've paid — check again"));
     assert.match(String(checkoutMessage?.data.text), new RegExp(order.checkout_code));
     const adminMessage = messagesTo(sentTelegramMessages, String(env.ADMIN_TELEGRAM_ID)).find(m => String(m.data.text).includes('New channel subscription order'));
     assert.match(String(adminMessage?.data.text), /Telegram bot → View our services → Subscribe button/);
