@@ -1040,7 +1040,7 @@ function receiptAdminCaption(order: CustomerOrder, submissionId: string): string
     `Submission: <code>${esc(submissionId)}</code>`,
     `Order: <code>${esc(order.id)}</code>`,
     `Checkout code: <code>${esc(receiptContextValue(order.checkout_code, "not recorded", 32))}</code>`,
-    `Telegram user: <code>${esc(order.telegram_user_id)}</code>`,
+    `Telegram user: <code>${esc(order.telegram_user_id)}</code>${username ? ` (@${esc(username)})` : ""}`,
     "Receipt evidence only; order status unchanged. Check Selar, then only if genuinely paid use:",
     `<code>${esc(verifyCommand)}</code>`
   ].join("\n");
