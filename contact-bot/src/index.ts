@@ -1249,6 +1249,7 @@ async function startChannelSubscription(e: Env, m: Msg) {
     return say(e, chat, "💋 Your subscription checkout is ready again. Use the same unique code so your payment can be matched correctly.\n\nOrder code: <code>" + esc(String(active.checkout_code || "")) + "</code>\n\nEnter your full name followed by this code in the checkout name field, for example <code>John Doe " + esc(String(active.checkout_code || "")) + "</code>. After checkout, return here and tap the payment-check button. Payment is not confirmed until it is checked.", {
       inline_keyboard: [
         [{ text: "💳 Pay now", url: checkout.toString() }],
+        [{ text: "✅ Done — checkout completed", callback_data: "done:" + active.id }],
         [{ text: "🔎 I've paid — check again", callback_data: "paid:" + active.id }]
       ]
     });
@@ -1269,9 +1270,10 @@ async function startChannelSubscription(e: Env, m: Msg) {
   const checkout = new URL(e.SERVICE_CHECKOUT_URL);
   checkout.searchParams.set("add_to_cart", "1");
   await notifyAdminIfConfigured(e, "<b>New channel subscription order</b>\nSource: Telegram bot → View our services → Subscribe button\nCheckout product: service checkout (<code>" + esc(e.SERVICE_PRODUCT_ID) + "</code>)\nOrder code: <code>" + esc(code) + "</code>\nOrder UUID: <code>" + esc(id) + "</code>\nPayment is not verified yet.");
-  return say(e, chat, "🔥 <b>You're one step away!</b>\n\nOpen the checkout below. In the checkout name field, enter your full name followed by this unique code exactly, for example: <code>John Doe " + esc(code) + "</code>. The code helps match your payment to this subscription.\n\nAfter checkout, come back here and tap “I've paid — check again”. Your subscription is not confirmed until payment is checked. 💌", {
+  return say(e, chat, "🔥 <b>You're one step away!</b>\n\nOpen the checkout below. In the checkout name field, enter your full name followed by this unique code exactly, for example: <code>John Doe " + esc(code) + "</code>. The code helps match your payment to this subscription.\n\nAfter checkout, come back here and tap “Done — checkout completed” or “I've paid — check again”. Your subscription is not confirmed until payment is checked. 💌", {
     inline_keyboard: [
       [{ text: "💳 Pay now", url: checkout.toString() }],
+      [{ text: "✅ Done — checkout completed", callback_data: "done:" + id }],
       [{ text: "🔎 I've paid — check again", callback_data: "paid:" + id }]
     ]
   });
