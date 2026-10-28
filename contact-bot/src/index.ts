@@ -1114,7 +1114,7 @@ async function handleReceiptMedia(e: Env, m: Msg, preliminaryOrder: CustomerOrde
       const latestSubmission = await e.DB.prepare("SELECT id,order_id,status FROM payment_receipt_submissions WHERE id=?").bind(submission.id).first<ReceiptSubmission>();
       if (latestSubmission?.status === "forwarded") {
         await clearPaymentPrompts(e, user, order.id);
-        return say(e, chat, "That receipt has already been forwarded to the administrator for manual review. You do not need to send it again.");
+        return say(e, chat, "That receipt has already been sent for review. You do not need to send it again.");
       }
       return say(e, chat, "That receipt is already being processed. Please wait a moment before trying again.");
     }
@@ -2072,7 +2072,7 @@ async function message(e: Env, m: Msg) {
       if (e.ADMIN_TELEGRAM_ID) {
         await say(e, e.ADMIN_TELEGRAM_ID, `Customer supplied an email for audit context on service order <code>${esc(serv.id)}</code>\nService: ${esc(serv.service_id || "unknown")}\nOrder code: <code>${esc(serv.checkout_code || "")}</code>\nEmail: <code>${esc(email)}</code>\nEmail cannot match, attach, verify, or fulfil this order. Use the FL code or exact saved checkout name, then verify manually.`);
       }
-      return say(e, chat, "Thanks — your email has been saved as order information for the admin's records. It cannot match or verify payment; keep your FL code and exact checkout name for the manual payment check.");
+      return say(e, chat, "Thanks — your email has been saved with your order information. It cannot match or verify payment; keep your FL code and exact checkout name for the payment check.");
     }
   }
   if (user === e.ADMIN_TELEGRAM_ID && chat === user) {
@@ -2700,7 +2700,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     if (action === "pending") {
       const rows = await e.DB.prepare("SELECT id,profile_id,status,checkout_code,payment_reference FROM contact_requests WHERE status IN('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 12").all<any>();
       const buttons = (rows.results || []).map(r => [{ text: (r.status === "payment_verified" ? "🟢 Paid — review approval" : "🟡 Check payment") + " · " + String(r.checkout_code || "request"), callback_data: "admin:request:" + r.id }]);
-      await say(e, chat, "<b>Contact requests needing attention</b>\nChoose a request to review its saved status. A sale notification is not payment verification.", { inline_keyboard: [...buttons, [{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
+      await say(e, chat, "<b>Requests needing attention</b>\nChoose a request to review its saved status. A sale notification is not payment verification.", { inline_keyboard: [...buttons, [{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Requests loaded." });
     }
     if (action === "orders") {
@@ -2796,7 +2796,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,'selar_payment_admin_verified',?,?,?)").bind(actor, id, r.profile_id, `Admin reviewed webhook-backed Selar payment before approving; reference ${paid.payment_reference}`).run();
     await sayBestEffort(e, r.telegram_chat_id, "Your payment notification has been received and checked. I will send your request here once it is ready.");
     await say(e, e.ADMIN_TELEGRAM_ID, "Selar payment verified by admin for <code>" + id + "</code>. Next, prepare your delivery message/media for this exact customer and explicitly confirm sending.", { inline_keyboard: [[{ text: "🔓 Prepare delivery", callback_data: "approve:" + id }, { text: "Reject", callback_data: "reject:" + id }]] });
-    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment verified. Review the contact request next." });
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment verified. Review the request next." });
   }
   if (action === "reject") {
     if (!["pending_payment", "payment_verified"].includes(r.status)) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request is no longer pending." });
