@@ -1202,16 +1202,18 @@ async function start(e: Env, m: Msg, payload: string) {
   const greeting = `Hi babe! I’m Annie for ${esc(profile.name)}.
 
 I’ve started your hot request. Your code is:
-<b>${esc(code)}</b>
+
+👉 <b>${esc(code)}</b> 👈
 
 Tap the <b>Pay now</b> button below to open checkout.
 
 In the customer name field, write your full name and the code exactly like this:
+
 <b>John Doe ${esc(code)}</b>
 
 This lets me match your payment fast. Do not use email — it will not work.
 
-After I confirm your payment, I will send your custom order here. You also get full access to our Telegram channel. There you will see all her sexy videos, creator-approved videos, way more hot photos of her, dirty chats, and new nasty drops every single day. Everything is updated daily and very addictive.
+After I confirm your payment, I will send your custom order here. You also get full access to our Telegram channel. There you will see all her sexy videos, fresh OnlyFans leaks, way more hot photos of her, dirty chats, and new nasty drops every single day. Everything is updated daily and very addictive.
 
 This is where the real fun lives.
 
