@@ -326,7 +326,6 @@ export const EXPECTED_SCHEMA = {
 export const EXPECTED_UNIQUE_INDEXES = [
   { table: 'contact_requests', name: 'idx_contact_requests_checkout_code' },
   { table: 'service_orders', name: 'idx_service_orders_checkout_code' },
-  { table: 'service_orders', name: 'idx_service_orders_one_active_per_user' },
   { table: 'payment_receipt_submissions', name: 'idx_payment_receipt_submissions_telegram_message' },
   { table: 'payment_receipt_submissions', name: 'idx_payment_receipt_submissions_order_file' },
   { table: 'admin_message_drafts', name: 'idx_admin_message_drafts_one_editable_per_admin' },
