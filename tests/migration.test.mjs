@@ -42,7 +42,9 @@ test('Migration: fresh database migrates to fully verified schema', () => {
     '0013_admin_pending_actions',
     '0014_remove_creator_sharing_permissions',
     '0015_service_delivery_draft_media',
-    '0016_admin_draft_recovery_actions'
+    '0016_admin_draft_recovery_actions',
+    '0017_limit_unverified_service_orders',
+    '0018_clear_delivered_media_references'
   ]);
 
   const verified = verifySchema(db);
@@ -113,7 +115,7 @@ test('Migration: partially migrated database with existing prompts table but mis
   assert.equal(verified.ok, true);
 });
 
-test('Migration 0007: contact users can keep multiple unpaid requests while service orders stay single-active', () => {
+test('Migration 0017: service customers can have up to three unverified orders, never four', () => {
   const db = new DatabaseSync(':memory:');
   applyAllMigrations(db);
 
@@ -125,14 +127,18 @@ test('Migration 0007: contact users can keep multiple unpaid requests while serv
   insertContact('req-active-2', '7001', 'pending_payment');
   insertContact('req-active-3', '7001', 'pending_payment');
   const count = db.prepare("SELECT COUNT(*) AS count FROM contact_requests WHERE telegram_user_id='7001' AND status='pending_payment'").get();
-  assert.equal(count.count, 3, 'Multiple pending contact requests must be allowed; the Worker enforces the three-request cap');
+  assert.equal(count.count, 3, 'Multiple pending contact requests remain allowed');
   insertContact('req-done-1', '7001', 'approved');
   insertContact('req-active-4', '7002', 'pending_payment');
 
-  db.prepare("INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status) VALUES ('svc-1','svc','7003','7003','pending_payment')").run();
+  for (let i = 1; i <= 3; i++) {
+    db.prepare("INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status) VALUES (?,?,?,?,'pending_payment')")
+      .run('svc-' + i, 'telegram_channel', '7003', '7003');
+  }
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM service_orders WHERE telegram_user_id='7003' AND status='pending_payment'").get().count, 3);
   assert.throws(
-    () => db.prepare("INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status) VALUES ('svc-2','svc','7003','7003','awaiting_request')").run(),
-    /UNIQUE constraint failed/i
+    () => db.prepare("INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status) VALUES ('svc-4','telegram_channel','7003','7003','pending_payment')").run(),
+    /max_three_unverified_service_orders/i
   );
 });
 
@@ -308,11 +314,11 @@ test('Remote migration verifier: fails when a required column is missing', () =>
 
 test('Remote migration verifier: fails when a required unique index is missing', () => {
   const snapshot = completeRemoteSchemaSnapshot();
-  snapshot.uniqueIndexes = snapshot.uniqueIndexes.filter(index => index.name !== 'idx_service_orders_one_active_per_user');
+  snapshot.uniqueIndexes = snapshot.uniqueIndexes.filter(index => index.name !== 'idx_service_orders_checkout_code');
 
   assert.throws(
     () => verifyRemoteSchema(snapshot),
-    /missing unique index\(es\): idx_service_orders_one_active_per_user/
+    /missing unique index\(es\): idx_service_orders_checkout_code/
   );
 });
 

@@ -169,6 +169,22 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0016_admin_draft_recovery_actions.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0017_limit_unverified_service_orders',
+    description: 'Replace the one-active-service-order index with a three-unverified-order cap',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0017_limit_unverified_service_orders.sql'), 'utf8');
+      db.exec(sql);
+    }
+  },
+  {
+    version: '0018_clear_delivered_media_references',
+    description: 'Clear Telegram media references from already delivered or closed drafts',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0018_clear_delivered_media_references.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
@@ -326,7 +342,6 @@ export const EXPECTED_SCHEMA = {
 export const EXPECTED_UNIQUE_INDEXES = [
   { table: 'contact_requests', name: 'idx_contact_requests_checkout_code' },
   { table: 'service_orders', name: 'idx_service_orders_checkout_code' },
-  { table: 'service_orders', name: 'idx_service_orders_one_active_per_user' },
   { table: 'payment_receipt_submissions', name: 'idx_payment_receipt_submissions_telegram_message' },
   { table: 'payment_receipt_submissions', name: 'idx_payment_receipt_submissions_order_file' },
   { table: 'admin_message_drafts', name: 'idx_admin_message_drafts_one_editable_per_admin' },

@@ -28,6 +28,8 @@ function createTestDb() {
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0014_remove_creator_sharing_permissions.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0015_service_delivery_draft_media.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0016_admin_draft_recovery_actions.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0017_limit_unverified_service_orders.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0018_clear_delivered_media_references.sql'), 'utf8'));
 
   return {
     raw: db,
@@ -224,13 +226,15 @@ test('Direct /start opens Annie welcome, service menu, and channel checkout usin
   try {
     await tgPost(env, userMsg(6101, '/start'));
     const welcome = messagesTo(sentTelegramMessages, '6101').at(-1);
-    assert.match(String(welcome?.data.text), /I’m Annie/);
+    assert.match(String(welcome?.data.text), /Annie/);
+    assert.match(String(welcome?.data.text), /handsome|babe|darling|hot boy/i);
+    assert.doesNotMatch(String(welcome?.data.text), /our model photo previews/i);
     assert.ok((welcome?.data.reply_markup as any)?.inline_keyboard?.flat().some((b: any) => b.text === '👀 View our services 🔞'));
 
     await tgPost(env, callbackFrom(6101, 'services:view', 'services-view'));
     const menu = messagesTo(sentTelegramMessages, '6101').at(-1);
-    assert.match(String(menu?.data.text), /website has photos only — no videos/i);
-    assert.match(String(menu?.data.text), /consensual homemade amateur videos/i);
+    assert.match(String(menu?.data.text), /photos only — no videos/i);
+    assert.match(String(menu?.data.text), /authorised content shared with permission/i);
     assert.ok((menu?.data.reply_markup as any)?.inline_keyboard?.flat().some((b: any) => b.text === '📸 Visit the website ✨' && b.url === 'https://fansleak.pages.dev'));
     assert.ok((menu?.data.reply_markup as any)?.inline_keyboard?.flat().some((b: any) => b.callback_data === 'services:join'));
 
@@ -249,9 +253,13 @@ test('Direct /start opens Annie welcome, service menu, and channel checkout usin
     assert.ok(buttons.some((b: any) => b.text === '✅ Done — checkout completed'));
     assert.ok(buttons.some((b: any) => b.text === "🔎 I've paid — check again"));
     assert.match(String(checkoutMessage?.data.text), new RegExp(order.checkout_code));
-    const adminMessage = messagesTo(sentTelegramMessages, String(env.ADMIN_TELEGRAM_ID)).find(m => String(m.data.text).includes('New channel subscription order'));
-    assert.match(String(adminMessage?.data.text), /Telegram bot → View our services → Subscribe button/);
-    assert.match(String(adminMessage?.data.text), /service checkout/);
+    assert.doesNotMatch(
+      messagesTo(sentTelegramMessages, String(env.ADMIN_TELEGRAM_ID)).map(m => String(m.data.text)).join("\n"),
+      /New channel subscription order|Source: Telegram bot → View our services/
+    );
+    assert.match(String(checkoutMessage?.data.text), /👉 <b>Unique code = FL-[0-9A-Z]{6}<\/b> 👈/);
+    assert.match(String(checkoutMessage?.data.text), /<b>Example:<\/b>\n<code>John Doe FL-[0-9A-Z]{6}<\/code>/);
+    assert.match(String(checkoutMessage?.data.text), /You're about to join our channel/);
   } finally {
     cleanup();
   }
@@ -1322,7 +1330,8 @@ test('Missing sale prompts for a Selar receipt photo, forwards it once, and neve
 
     const submission = db.raw.prepare('SELECT * FROM payment_receipt_submissions WHERE order_id=?').get(order.id) as any;
     assert.equal(submission.status, 'forwarded');
-    assert.equal(submission.telegram_file_unique_id, 'photo-unique-1');
+    assert.equal(submission.telegram_file_id, '', 'Telegram file pointer must be cleared after the receipt reaches the admin');
+    assert.equal(submission.telegram_file_unique_id, null, 'Duplicate-media identifier must also be cleared after forwarding');
     assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM receipt_review_prompts WHERE telegram_user_id='5211'").get().cnt, 0);
 
     await tgPost(env, receipt);
@@ -2328,4 +2337,76 @@ test('Release 2: stale sending draft recovery requires a separate confirmation a
   } finally {
     cleanup();
   }
+});
+
+
+test('Annie shows previous unpaid order details, cancels and deletes it, then returns to the two service options', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    await tgPost(env, userMsg(6201, '/start'));
+    await tgPost(env, callbackFrom(6201, 'services:join', 'first-join'));
+    const first = db.raw.prepare("SELECT * FROM service_orders WHERE telegram_user_id='6201'").get() as any;
+    assert.ok(first);
+    await tgPost(env, callbackFrom(6201, 'services:join', 'second-join'));
+    const prompt = messagesTo(sentTelegramMessages, '6201').at(-1);
+    assert.match(String(prompt?.data.text), new RegExp(first.checkout_code));
+    const cancelButton = ((prompt?.data.reply_markup as any)?.inline_keyboard || []).flat().find((b: any) => String(b.callback_data).startsWith('order:cancel:'));
+    assert.ok(cancelButton, 'Previous unpaid order must have a cancel button');
+    await tgPost(env, callbackFrom(6201, String(cancelButton.callback_data), 'cancel-old-order'));
+    assert.equal(db.raw.prepare("SELECT count(*) AS n FROM service_orders WHERE id=?").get(first.id).n, 0, 'Cancelled unpaid order must be deleted');
+    const afterCancel = messagesTo(sentTelegramMessages, '6201').at(-1);
+    const buttons = ((afterCancel?.data.reply_markup as any)?.inline_keyboard || []).flat();
+    assert.ok(buttons.some((b: any) => b.text === '📸 Visit the website ✨'));
+    assert.ok(buttons.some((b: any) => b.callback_data === 'services:join'));
+  } finally { cleanup(); }
+});
+
+test('Channel flow allows up to three unverified orders and blocks a fourth', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    await tgPost(env, callbackFrom(6202, 'services:join', 'join-1'));
+    for (let i = 2; i <= 3; i++) {
+      await tgPost(env, callbackFrom(6202, 'services:join', 'prompt-' + i));
+      await tgPost(env, callbackFrom(6202, 'services:continue', 'continue-' + i));
+    }
+    assert.equal(db.raw.prepare("SELECT count(*) AS n FROM service_orders WHERE telegram_user_id='6202' AND status='pending_payment'").get().n, 3);
+    await tgPost(env, callbackFrom(6202, 'services:join', 'join-at-limit'));
+    const last = messagesTo(sentTelegramMessages, '6202').at(-1);
+    assert.match(String(last?.data.text), /limit of <b>3 unpaid orders/i);
+    assert.equal(db.raw.prepare("SELECT count(*) AS n FROM service_orders WHERE telegram_user_id='6202'").get().n, 3);
+  } finally { cleanup(); }
+});
+
+test('Previously fulfilled channel order offers Start again and creates a fresh order without deleting history', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    db.raw.prepare("INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,telegram_username,status,payment_method,checkout_code) VALUES(?,?,?,?,?,'fulfilled','selar',?)")
+      .run('6203-previous-order', 'telegram_channel', '6203', '6203', 'hot_customer', 'FL-ABC123');
+    await tgPost(env, callbackFrom(6203, 'services:join', 'join-after-complete'));
+    const prompt = messagesTo(sentTelegramMessages, '6203').at(-1);
+    assert.match(String(prompt?.data.text), /previous channel order was completed/i);
+    assert.ok(((prompt?.data.reply_markup as any)?.inline_keyboard || []).flat().some((b: any) => b.callback_data === 'services:restart'));
+    await tgPost(env, callbackFrom(6203, 'services:restart', 'restart-order'));
+    assert.equal(db.raw.prepare("SELECT count(*) AS n FROM service_orders WHERE telegram_user_id='6203'").get().n, 2);
+    assert.equal(db.raw.prepare("SELECT count(*) AS n FROM service_orders WHERE id='6203-previous-order' AND status='fulfilled'").get().n, 1);
+  } finally { cleanup(); }
+});
+
+test('Hourly cleanup deletes unpaid orders older than 48 hours and tells the customer', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    db.raw.prepare("INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,telegram_username,status,payment_method,checkout_code,created_at) VALUES(?,?,?,?,?,'pending_payment','selar',?,datetime('now','-49 hours'))")
+      .run('6204-expired-service', 'telegram_channel', '6204', '6204', 'expire_me', 'FL-EXP123');
+    db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,telegram_username,profile_id,status,payment_method,checkout_code,created_at) VALUES(?,?,?,?,?,'pending_payment','selar',?,datetime('now','-49 hours'))")
+      .run('6205-expired-contact', '6205', '6205', 'expire_contact', 'anaimiya', 'FL-EXP456');
+    await worker.scheduled({} as any, env);
+    assert.equal(db.raw.prepare("SELECT count(*) AS n FROM service_orders WHERE id='6204-expired-service'").get().n, 0);
+    assert.equal(db.raw.prepare("SELECT count(*) AS n FROM contact_requests WHERE id='6205-expired-contact'").get().n, 0);
+    assert.match(messagesTo(sentTelegramMessages, '6204').map(m => String(m.data.text)).join('\n'), /deleted because checkout wasn't completed within 48 hours/i);
+    assert.match(messagesTo(sentTelegramMessages, '6205').map(m => String(m.data.text)).join('\n'), /deleted because checkout wasn't completed within 48 hours/i);
+  } finally { cleanup(); }
 });
