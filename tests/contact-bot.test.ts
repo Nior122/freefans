@@ -245,7 +245,7 @@ test('Direct /start opens Annie welcome, service menu, and channel checkout usin
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
     await tgPost(env, userMsg(6101, '/start'));
-    const welcome = messagesTo(sentTelegramMessages, '6101').at(-1);
+    const welcome = messagesTo(sentTelegramMessages, '6101').find(m => String(m.data.text).includes('Hey babe, what do you want?'));
     const welcomeText = String(welcome?.data.text);
     assert.ok(welcomeText.includes('💋 <b>Hey babe, what do you want?</b>'));
     assert.ok(welcomeText.includes('Go to our website and see hot photo previews. Look at sexy girls with perfect bodies and naughty poses. These photos are fire and will make you hard. Only photos. No videos.💋'));
@@ -253,6 +253,22 @@ test('Direct /start opens Annie welcome, service menu, and channel checkout usin
     const welcomeButtons = (welcome?.data.reply_markup as any)?.inline_keyboard?.flat() || [];
     assert.ok(welcomeButtons.some((b: any) => b.text === '📸 Website Photo Previews' && b.url === 'https://fansleak.pages.dev'));
     assert.ok(welcomeButtons.some((b: any) => b.text === '🔥 Telegram Channel' && b.callback_data === 'services:join'));
+
+    // The persistent reply keyboard is set by a short follow-up so the
+    // customer always has a 🚀 Start button beside the message box.
+    const startTip = messagesTo(sentTelegramMessages, '6101').at(-1);
+    assert.ok(String(startTip?.data.text).includes('tap <b>🚀 Start</b>'));
+    const startKeyboard = (startTip?.data.reply_markup as any) || {};
+    assert.equal(startKeyboard.is_persistent, true);
+    assert.equal(startKeyboard.resize_keyboard, true);
+    assert.ok((startKeyboard.keyboard || []).flat().some((b: any) => b.text === '🚀 Start'));
+
+    // Tapping that persistent button sends its label as text and must behave
+    // exactly like /start, even mid-conversation.
+    const beforeRestart = messagesTo(sentTelegramMessages, '6101').length;
+    await tgPost(env, userMsg(6101, '🚀 Start'));
+    const afterRestart = messagesTo(sentTelegramMessages, '6101').slice(beforeRestart);
+    assert.ok(afterRestart.some(m => String(m.data.text).includes('Hey babe, what do you want?')), '🚀 Start must reopen the welcome menu');
 
     await tgPost(env, callbackFrom(6101, 'services:view', 'services-view'));
     const menu = messagesTo(sentTelegramMessages, '6101').at(-1);
@@ -1249,6 +1265,11 @@ test('AI support output is HTML-escaped before it is sent to customers', async (
     assert.ok(reply, 'AI reply must be sent');
     assert.ok(!String(reply.data.text).includes('<a href='), 'Raw AI HTML must not reach Telegram');
     assert.ok(String(reply.data.text).includes('&lt;a href=&quot;'));
+    // A plain AI chat reply (no workflow buttons of its own) carries the
+    // website/channel navigation buttons.
+    const aiButtons = ((reply.data.reply_markup as any)?.inline_keyboard || []).flat();
+    assert.ok(aiButtons.some((b: any) => b.text === '📸 View website' && b.url === 'https://fansleak.pages.dev'));
+    assert.ok(aiButtons.some((b: any) => b.text === '🔥 Telegram Channel' && b.callback_data === 'services:join'));
   } finally {
     cleanup();
   }
@@ -1348,11 +1369,13 @@ test('Missing sale prompts for a Selar receipt photo, forwards it once, and neve
     assert.ok(caption.includes(order.checkout_code));
     assert.ok(caption.includes('Buyer Receipt'));
     assert.ok(caption.includes('<b>Verify</b> asks for the exact reference'));
-    assert.ok(caption.includes('<b>Reject</b> opens a follow-up message/media composer'));
+    assert.ok(caption.includes('<b>Reject &amp; message</b> opens a follow-up composer'));
+    assert.ok(caption.includes('<b>Just reject</b> cancels now'));
     assert.ok(!caption.includes(`/verify ${order.id} EXACT_SELAR_REFERENCE`), 'Receipt review should use buttons instead of only showing a verify command');
     const receiptButtons = ((forwards[0].data.reply_markup as any)?.inline_keyboard || []).flat();
     assert.ok(receiptButtons.some((button: any) => button.text === '✅ Verify' && button.callback_data === `receipt:verify:c:${order.id}`));
-    assert.ok(receiptButtons.some((button: any) => button.text === '🚫 Reject' && button.callback_data === `receipt:reject:c:${order.id}`));
+    assert.ok(receiptButtons.some((button: any) => button.text === '🚫 Reject & message' && button.callback_data === `receipt:reject:c:${order.id}`));
+    assert.ok(receiptButtons.some((button: any) => button.text === '⛔ Just reject' && button.callback_data === `receipt:rejectnow:c:${order.id}`));
     assert.ok(caption.includes('has NOT changed the order status'));
     assert.ok(!caption.includes('private caption must not be copied'), 'Customer captions must not be copied into the admin receipt context');
 
@@ -1399,7 +1422,8 @@ test('Service receipt fallback rejects unsupported documents and forwards a PDF 
     assert.ok(!String(forwards[0].data.caption || '').includes(`/verifyservice ${orderId} EXACT_SELAR_REFERENCE`));
     const serviceReceiptButtons = ((forwards[0].data.reply_markup as any)?.inline_keyboard || []).flat();
     assert.ok(serviceReceiptButtons.some((button: any) => button.text === '✅ Verify' && button.callback_data === `receipt:verify:s:${orderId}`));
-    assert.ok(serviceReceiptButtons.some((button: any) => button.text === '🚫 Reject' && button.callback_data === `receipt:reject:s:${orderId}`));
+    assert.ok(serviceReceiptButtons.some((button: any) => button.text === '🚫 Reject & message' && button.callback_data === `receipt:reject:s:${orderId}`));
+    assert.ok(serviceReceiptButtons.some((button: any) => button.text === '⛔ Just reject' && button.callback_data === `receipt:rejectnow:s:${orderId}`));
 
     const saved = db.raw.prepare('SELECT status,payment_reference FROM service_orders WHERE id=?').get(orderId) as any;
     assert.equal(saved.status, 'pending_payment');
@@ -1463,10 +1487,19 @@ test('Receipt Verify button requires the exact Selar reference and reuses manual
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(contactId) as any).status, 'pending_payment', 'Tapping Verify must not itself verify payment');
     assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM processed_sales').get().cnt, 0);
     assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('screenshot and this button alone have <b>not</b> verified payment')));
+    const promptPanel = messagesTo(sentTelegramMessages, '10001').find(m => String(m.data.text).includes('exact Selar reference only'));
+    const promptButtons = ((promptPanel?.data.reply_markup as any)?.inline_keyboard || []).flat();
+    assert.ok(promptButtons.some((b: any) => b.text === '✖️ Cancel verification' && b.callback_data === `receipt:cancel:c:${contactId}`));
+    assert.ok(promptButtons.some((b: any) => b.text === '⛔ Just reject' && b.callback_data === `receipt:rejectnow:c:${contactId}`));
 
     await tgPost(env, adminMsg('two words'));
     assert.ok(db.raw.prepare('SELECT * FROM admin_receipt_verify_prompts WHERE order_id=?').get(contactId), 'An invalid multi-word reply must keep the prompt open');
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(contactId) as any).status, 'pending_payment');
+    // The invalid-reference reply must keep Cancel verification visible on
+    // the newest admin message, not only on the scrolled-away prompt panel.
+    const invalidReply = messagesTo(sentTelegramMessages, '10001').filter(m => String(m.data.text).includes('Send the <b>exact Selar reference only</b>')).at(-1);
+    const invalidButtons = ((invalidReply?.data.reply_markup as any)?.inline_keyboard || []).flat();
+    assert.ok(invalidButtons.some((b: any) => b.text === '✖️ Cancel verification' && b.callback_data === `receipt:cancel:c:${contactId}`));
 
     await tgPost(env, adminMsg('SELAR-RECEIPT-REF-1'));
     const savedContact = db.raw.prepare('SELECT status,payment_reference FROM contact_requests WHERE id=?').get(contactId) as any;
@@ -1551,6 +1584,78 @@ test('Receipt Reject button opens a follow-up composer and rejects only on its e
     assert.ok(caption.includes('Please send a clearer Selar payment receipt'));
     assert.ok(db.raw.prepare("SELECT id FROM admin_audit WHERE action='admin_receipt_rejected' AND request_id=?").get(orderId));
     assert.ok(db.raw.prepare("SELECT id FROM admin_audit WHERE action='admin_rejection_message_customer' AND request_id=?").get(orderId));
+  } finally {
+    cleanup();
+  }
+});
+
+test('Receipt Just reject confirms first, then rejects immediately and tells the client payment was not made', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const contactId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests
+      (id,telegram_user_id,telegram_chat_id,profile_id,status,payment_method,checkout_code,checkout_name)
+      VALUES (?, '5241', '5241', 'anaimiya', 'pending_payment', 'selar', 'FL-RJUS01', 'Just Reject Buyer')`).run(contactId);
+
+    // Non-admin tap is refused and changes nothing.
+    await tgPost(env, callbackFrom(5241, `receipt:rejectnow:c:${contactId}`, 'cb-justreject-nonadmin'));
+    await tgPost(env, callbackFrom(5241, `receipt:confirmreject:c:${contactId}`, 'cb-justreject-nonadmin-confirm'));
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(contactId) as any).status, 'pending_payment');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '5241').length, 0);
+
+    // First admin tap only asks for confirmation.
+    await tgPost(env, callbackFrom(10001, `receipt:rejectnow:c:${contactId}`, 'cb-justreject-ask'));
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(contactId) as any).status, 'pending_payment', 'The first Just reject tap must not reject yet');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '5241').length, 0);
+    const confirmPanel = messagesTo(sentTelegramMessages, '10001').filter(m => String(m.data.text).includes('Just reject — no follow-up')).at(-1);
+    const confirmButtons = ((confirmPanel?.data.reply_markup as any)?.inline_keyboard || []).flat();
+    assert.ok(confirmButtons.some((b: any) => b.text === '⛔ Yes, reject now' && b.callback_data === `receipt:confirmreject:c:${contactId}`));
+    assert.ok(confirmButtons.some((b: any) => b.text.includes('Cancel') && b.callback_data === `receipt:cancel:c:${contactId}`));
+
+    // Confirmation rejects immediately, audits, and notifies the client.
+    await tgPost(env, callbackFrom(10001, `receipt:confirmreject:c:${contactId}`, 'cb-justreject-confirm'));
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(contactId) as any).status, 'rejected');
+    assert.ok(db.raw.prepare("SELECT id FROM admin_audit WHERE action='admin_receipt_rejected_without_followup' AND request_id=?").get(contactId));
+    const clientCalls = customerTelegramCalls(sentTelegramMessages, '5241');
+    assert.equal(clientCalls.length, 1, 'The client must receive exactly one cancellation notice');
+    assert.ok(String(clientCalls[0].data.text).includes('was cancelled because payment wasn\'t made'));
+    assert.ok(String(clientCalls[0].data.text).includes('FL-RJUS01'));
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('rejected now')));
+
+    // A repeated confirm tap cannot reject or notify twice.
+    await tgPost(env, callbackFrom(10001, `receipt:confirmreject:c:${contactId}`, 'cb-justreject-repeat'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '5241').length, 1, 'A stale confirm tap must not notify the client twice');
+
+    // Just reject from inside an open rejection composer cancels that draft.
+    const serviceId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO service_orders
+      (id,service_id,telegram_user_id,telegram_chat_id,status,payment_method,checkout_code,checkout_name)
+      VALUES (?, 'telegram_channel', '5242', '5242', 'pending_payment', 'selar', 'FL-RJUS02', 'Composer Just Reject')`).run(serviceId);
+    await tgPost(env, callbackFrom(10001, `receipt:reject:s:${serviceId}`, 'cb-justreject-open-composer'));
+    const composerDraft = latestSupportDraft(db, serviceId);
+    assert.equal(composerDraft.purpose, 'rejection');
+    assert.equal(composerDraft.status, 'draft');
+    const composerSummary = messagesTo(sentTelegramMessages, '10001').filter(m => String(m.data.text).includes('Rejection follow-up draft')).at(-1);
+    const composerButtons = ((composerSummary?.data.reply_markup as any)?.inline_keyboard || []).flat();
+    assert.ok(composerButtons.some((b: any) => b.text === '⛔ Reject now (no follow-up)' && b.callback_data === `receipt:rejectnow:s:${serviceId}`), 'The rejection composer must offer an immediate-reject escape');
+
+    await tgPost(env, callbackFrom(10001, `receipt:confirmreject:s:${serviceId}`, 'cb-justreject-composer-confirm'));
+    assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceId) as any).status, 'cancelled');
+    assert.equal((db.raw.prepare('SELECT status FROM admin_message_drafts WHERE id=?').get(composerDraft.id) as any).status, 'cancelled', 'The open rejection draft must be cancelled when Just reject executes');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '5242').length, 1);
+
+    // The attached-reference Verify panel exposes Cancel verification and Just reject.
+    const attachedId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests
+      (id,telegram_user_id,telegram_chat_id,profile_id,status,payment_method,checkout_code,checkout_name,payment_reference)
+      VALUES (?, '5243', '5243', 'rosebeck', 'pending_payment', 'selar', 'FL-RJUS03', 'Attached Buyer', 'SELAR-ATT-1')`).run(attachedId);
+    await tgPost(env, callbackFrom(10001, `receipt:verify:c:${attachedId}`, 'cb-attached-verify'));
+    const attachedPanel = messagesTo(sentTelegramMessages, '10001').filter(m => String(m.data.text).includes('Attached Selar reference')).at(-1);
+    const attachedButtons = ((attachedPanel?.data.reply_markup as any)?.inline_keyboard || []).flat();
+    assert.ok(attachedButtons.some((b: any) => b.text === '✖️ Cancel verification' && b.callback_data === `receipt:cancel:c:${attachedId}`));
+    assert.ok(attachedButtons.some((b: any) => b.text === '⛔ Just reject' && b.callback_data === `receipt:rejectnow:c:${attachedId}`));
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(attachedId) as any).status, 'pending_payment', 'Showing the attached panel must not change the order');
   } finally {
     cleanup();
   }
