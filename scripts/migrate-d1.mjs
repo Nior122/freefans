@@ -284,6 +284,19 @@ export function migrateRemote() {
     runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0019_admin_broadcast_recipients')");
   }
 
+  // Migration 20: receipt-review button state. The purpose-column check keeps
+  // a retry safe if a prior remote ALTER succeeded before version recording.
+  if (!applied.has('0020_receipt_review_actions')) {
+    console.log('[migrate-d1] Applying 0020_receipt_review_actions migration...');
+    const adminMessageDraftCols = runWranglerCommand('PRAGMA table_info(admin_message_drafts)').map(r => r.name);
+    if (!adminMessageDraftCols.includes('purpose')) {
+      runWranglerCommand("ALTER TABLE admin_message_drafts ADD COLUMN purpose TEXT NOT NULL DEFAULT 'support' CHECK (purpose IN ('support', 'rejection'))");
+    }
+    runWranglerCommand("CREATE TABLE IF NOT EXISTS admin_receipt_verify_prompts (admin_telegram_id TEXT PRIMARY KEY, order_id TEXT NOT NULL, order_kind TEXT NOT NULL CHECK (order_kind IN ('contact', 'service')), expires_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')))");
+    runWranglerCommand('CREATE INDEX IF NOT EXISTS idx_admin_receipt_verify_prompts_order ON admin_receipt_verify_prompts(order_kind, order_id)');
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0020_receipt_review_actions')");
+  }
+
   // Final complete schema verification. These expectations are shared with the
   // local migration verifier to prevent the two definitions drifting apart.
   console.log('[migrate-d1] Verifying complete schema...');
