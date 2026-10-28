@@ -317,7 +317,7 @@ test('Remote migration verifier: fails when a required unique index is missing',
 
   assert.throws(
     () => verifyRemoteSchema(snapshot),
-    /missing unique index\(es\): idx_service_orders_one_active_per_user/
+    /missing unique index\(es\): idx_service_orders_checkout_code/
   );
 });
 
