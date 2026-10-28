@@ -2373,7 +2373,7 @@ test('Channel flow allows up to three unverified orders and blocks a fourth', as
     assert.equal(db.raw.prepare("SELECT count(*) AS n FROM service_orders WHERE telegram_user_id='6202' AND status='pending_payment'").get().n, 3);
     await tgPost(env, callbackFrom(6202, 'services:join', 'join-at-limit'));
     const last = messagesTo(sentTelegramMessages, '6202').at(-1);
-    assert.match(String(last?.data.text), /limit of 3 unpaid orders/i);
+    assert.match(String(last?.data.text), /limit of <b>3 unpaid orders/i);
     assert.equal(db.raw.prepare("SELECT count(*) AS n FROM service_orders WHERE telegram_user_id='6202'").get().n, 3);
   } finally { cleanup(); }
 });
