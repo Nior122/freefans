@@ -313,7 +313,7 @@ test('Remote migration verifier: fails when a required column is missing', () =>
 
 test('Remote migration verifier: fails when a required unique index is missing', () => {
   const snapshot = completeRemoteSchemaSnapshot();
-  snapshot.uniqueIndexes = snapshot.uniqueIndexes.filter(index => index.name !== 'idx_service_orders_one_active_per_user');
+  snapshot.uniqueIndexes = snapshot.uniqueIndexes.filter(index => index.name !== 'idx_service_orders_checkout_code');
 
   assert.throws(
     () => verifyRemoteSchema(snapshot),
