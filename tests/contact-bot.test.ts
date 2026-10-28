@@ -626,7 +626,7 @@ test('Service order email is saved only as audit information and never reconcile
 
     const savedOrder = db.raw.prepare('SELECT buyer_email FROM service_orders WHERE id=?').get(serviceOrderId) as any;
     assert.equal(savedOrder.buyer_email, 'client@example.com');
-    const customerAck = sentTelegramMessages.find(m => m.data.chat_id === '9100' && String(m.data.text).includes('saved as order information') && String(m.data.text).includes('cannot match or verify payment'));
+    const customerAck = sentTelegramMessages.find(m => m.data.chat_id === '9100' && String(m.data.text).includes('saved with your order information') && String(m.data.text).includes('cannot match or verify payment'));
     assert.ok(customerAck, 'Customer should be told the email is audit information only and cannot match payment');
 
     const saleRes = await worker.fetch(new Request('https://worker.local/webhooks/selar', {
