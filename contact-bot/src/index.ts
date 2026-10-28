@@ -1285,7 +1285,7 @@ async function startChannelSubscription(e: Env, m: Msg, forceNew = false) {
     return say(e, chat, lines.join("\n"), { inline_keyboard: buttons });
   }
 
-  if (!forceNew && !unpaidRows.length) {
+  if (!forceNew && !pendingRows.length) {
     const previous = await e.DB.prepare("SELECT id,checkout_code,status,service_id,created_at FROM service_orders WHERE telegram_user_id=? AND status IN('payment_verified','fulfilled') ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
     if (previous) {
       const completedWord = String(previous.status) === "fulfilled" ? "completed" : "payment verified";
@@ -3064,7 +3064,7 @@ async function selar(request: Request, e: Env) {
       const upd = await e.DB.prepare("UPDATE service_orders SET payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(s.reference, target.id).run();
       if (!upd.meta?.changes) throw new Error("order_state_changed_before_attach");
       const markup = { inline_keyboard: [[{ text: "✅ I checked Selar — confirm service payment", callback_data: "serviceverify:" + target.id }]] };
-      await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nSource: ${String(target.profile_id) === "telegram_channel" ? "Telegram bot → View our services → Subscribe button" : "Telegram bot service chat"}\nCheckout product: service checkout (<code>${esc(e.SERVICE_PRODUCT_ID || "")}</code>)\nOrder: <code>${target.id}</code>\nService: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nOrder code: <code>${esc(effectiveCode)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}${clueNote}`, markup);
+      await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nSource: ${String(target.profile_id) === "telegram_channel" ? "Telegram bot → View our services → Subscribe button" : "Telegram bot service chat"}\nCheckout product: service checkout (<code>${esc(e.SERVICE_PRODUCT_ID || "")}</code>)\nOrder: <code>${target.id}</code>\nService: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nTelegram username: ${target.telegram_username ? "@" + esc(String(target.telegram_username).replace(/^@+/, "")) : "not provided"}\nOrder code: <code>${esc(effectiveCode)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}${clueNote}`, markup);
     }
   } catch (err) {
     // Processing failed after the dedup marker was written: remove the marker so a
