@@ -1106,7 +1106,7 @@ async function handleReceiptMedia(e: Env, m: Msg, preliminaryOrder: CustomerOrde
   if (submission) {
     if (submission.status === "forwarded") {
       await clearPaymentPrompts(e, user, order.id);
-      return say(e, chat, "That receipt has already been forwarded to the administrator for manual review. You do not need to send it again.");
+      return say(e, chat, "That receipt has already been sent for review. You do not need to send it again.");
     }
     if (submission.status === "forwarding") return say(e, chat, "That receipt is already being forwarded. Please wait a moment rather than sending it again.");
     const claimed = await e.DB.prepare("UPDATE payment_receipt_submissions SET status='forwarding',admin_telegram_id=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status IN('delivery_failed','superseded')").bind(e.ADMIN_TELEGRAM_ID, submission.id).run();
@@ -1228,7 +1228,7 @@ async function aiReply(e: Env, chat: string, userText: string, reminder = "", vo
     return say(e, chat, answer ? esc(answer) : (reminder || "I couldn't answer that just now. Please try again shortly."));
   } catch (err) {
     console.error("AI support reply failed", String(err));
-    return say(e, chat, reminder || "I can't answer that just now. Please try again shortly or contact the admin.");
+    return say(e, chat, reminder || "I can't answer that just now. Please try again shortly or contact support.");
   }
 }
 
@@ -1880,7 +1880,7 @@ async function message(e: Env, m: Msg) {
       return say(e, chat, "🚫 Request " + esc(code) + " rejected and customer notified.");
     }
     const service = await e.DB.prepare("SELECT id,telegram_chat_id,status FROM service_orders WHERE checkout_code=?").bind(code).first<any>();
-    if (!service) return say(e, chat, "No contact request or service order found for " + esc(code) + ".");
+    if (!service) return say(e, chat, "No request or service order found for " + esc(code) + ".");
     if (["fulfilled","cancelled"].includes(String(service.status))) return say(e, chat, "Service order " + esc(code) + " is already " + esc(String(service.status)) + ". No change made.");
     const changed = await e.DB.prepare("UPDATE service_orders SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status IN ('awaiting_request','awaiting_email','pending_payment','payment_verified','payment_review')").bind(service.id).run();
     if (!changed.meta?.changes) return say(e, chat, "Service order state changed before cancellation. Refresh /orders; no success was reported.");
@@ -2064,7 +2064,7 @@ async function message(e: Env, m: Msg) {
       if (e.ADMIN_TELEGRAM_ID) {
         await say(e, e.ADMIN_TELEGRAM_ID, `Customer supplied an email for audit context on profile request <code>${esc(req.id)}</code>\nProfile: ${esc(req.profile_id || "unknown")}\nOrder code: <code>${esc(req.checkout_code || "")}</code>\nEmail: <code>${esc(email)}</code>\nEmail cannot match, attach, verify, or approve this order. Use the FL code or exact saved checkout name, then verify manually.`);
       }
-      return say(e, chat, "Thanks — your email has been saved as order information for the admin's records. It cannot match or verify payment; keep your FL code and exact checkout name for the manual payment check.");
+      return say(e, chat, "Thanks — your email has been saved with your order information. It cannot match or verify payment; keep your FL code and exact checkout name for the payment check.");
     }
     const serv = await e.DB.prepare("SELECT id,status,service_id,buyer_email,checkout_code FROM service_orders WHERE telegram_user_id=? AND status='pending_payment' ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
     if (serv?.status === "pending_payment" && !serv.buyer_email) {
@@ -2701,7 +2701,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       const rows = await e.DB.prepare("SELECT id,profile_id,status,checkout_code,payment_reference FROM contact_requests WHERE status IN('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 12").all<any>();
       const buttons = (rows.results || []).map(r => [{ text: (r.status === "payment_verified" ? "🟢 Paid — review approval" : "🟡 Check payment") + " · " + String(r.checkout_code || "request"), callback_data: "admin:request:" + r.id }]);
       await say(e, chat, "<b>Contact requests needing attention</b>\nChoose a request to review its saved status. A sale notification is not payment verification.", { inline_keyboard: [...buttons, [{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
-      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Contact requests loaded." });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Requests loaded." });
     }
     if (action === "orders") {
       const rows = await e.DB.prepare("SELECT id,service_id,status,checkout_code,payment_reference FROM service_orders ORDER BY created_at DESC LIMIT 12").all<any>();
@@ -2744,7 +2744,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin guide opened." });
     }
     if (action === "home") {
-      await say(e, chat, "<b>FansLeak Admin Desk</b>\nChoose an action:", { inline_keyboard: [[{ text: "📥 Review contact requests", callback_data: "admin:pending" }], [{ text: "🧾 Review service orders", callback_data: "admin:orders" }], [{ text: "📝 Drafts & recovery", callback_data: "admin:drafts" }], [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }], [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]] });
+      await say(e, chat, "<b>Admin Desk</b>\nChoose an action:", { inline_keyboard: [[{ text: "📥 Review requests", callback_data: "admin:pending" }], [{ text: "🧾 Review service orders", callback_data: "admin:orders" }], [{ text: "📝 Drafts & recovery", callback_data: "admin:drafts" }], [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }], [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin menu." });
     }
     const requestMatch = action.match(/^request:([0-9a-f-]{36})$/i);
