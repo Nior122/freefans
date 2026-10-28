@@ -1281,7 +1281,7 @@ async function startChannelSubscription(e: Env, m: Msg, forceNew = false) {
       else buttons.push([{ text: "🔎 Check " + String(row.checkout_code || "payment"), callback_data: "paid:" + String(row.id) }]);
     }
     if (pendingRows.length < 3) buttons.push([{ text: "💋 Continue with a new order", callback_data: "services:continue" }]);
-    lines.push("", "You can have up to <b>3 unpaid orders</b> at a time. A payment record already found cannot be cancelled from here. 😉");
+    lines.push("", pendingRows.length >= 3 ? "💋 You have reached the limit of <b>3 unpaid orders</b>, babe. Cancel an unpaid one or check a payment below before starting another. 😘" : "You can have up to <b>3 unpaid orders</b> at a time. A payment record already found cannot be cancelled from here. 😉");
     return say(e, chat, lines.join("\n"), { inline_keyboard: buttons });
   }
 
@@ -1632,7 +1632,7 @@ async function message(e: Env, m: Msg) {
       "Hey handsome… 😘🔥 I’m Annie, babe. Looking for a little excitement? I can show you hot photo previews or help you join our channel. Tap below, darling. 💋",
       "Well hello, hot boy 😏💖 Annie’s here, just for you. Want to peek at some spicy photo previews or check out the channel? You know what to do, babe. 👀🔥",
       "Hey darling 💋😉 You made it! I’m Annie. Let’s make this interesting — browse some hot photo previews or explore the channel option below. Come on, handsome. 😘",
-      "Oh hey, babe… 😈💗 I was hoping you’d stop by. Ready for a little tease? Check out the photo previews or tap below to see the channel option. 🔥👀"
+      "Oh hey, babe… 😈💗 I’m Annie, and I was hoping you’d stop by. Ready for a little tease? Check out the photo previews or tap below to see the channel option. 🔥👀"
     ];
     const welcomeIndex = crypto.getRandomValues(new Uint32Array(1))[0] % welcomes.length;
     const welcome = welcomes[welcomeIndex];
