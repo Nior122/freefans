@@ -1142,7 +1142,7 @@ async function handleReceiptMedia(e: Env, m: Msg, preliminaryOrder: CustomerOrde
     return say(e, chat, "I couldn't forward that receipt for review just now. Your order remains pending and nothing was marked paid. Please send the same payment receipt again in a moment.");
   }
 
-  await e.DB.prepare("UPDATE payment_receipt_submissions SET status='forwarded',telegram_file_id=NULL,telegram_file_unique_id=NULL,media_kind=NULL,mime_type=NULL,file_size=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='forwarding'").bind(submissionId).run();
+  await e.DB.prepare("UPDATE payment_receipt_submissions SET status='forwarded',telegram_file_id='',telegram_file_unique_id=NULL,mime_type=NULL,file_size=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='forwarding'").bind(submissionId).run();
   await clearPaymentPrompts(e, user, latestOrder.id);
   return say(e, chat, "Thanks — your payment receipt has been sent for manual review with your order details. This does <b>not</b> mark your order as paid or verified. I’ll update you here after the payment has been checked. Your request or service fulfilment is sent only after verification.");
 }
