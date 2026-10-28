@@ -1272,16 +1272,16 @@ async function startChannelSubscription(e: Env, m: Msg, forceNew = false) {
 
   const pending = await e.DB.prepare("SELECT id,checkout_code,status,service_id,created_at,payment_reference FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment') ORDER BY created_at DESC LIMIT 3").bind(user).all<any>();
   const pendingRows = pending.results || [];
-  const unpaidRows = pendingRows.filter((row: any) => !row.payment_reference);
-  if (!forceNew && unpaidRows.length) {
-    const lines = ["💋 <b>Hey babe, I found an order you started earlier.</b>", "", "Here are your unpaid orders. You can cancel an order you don't want anymore, or continue if you still have room for another one."];
+  if (!forceNew && pendingRows.length) {
+    const lines = ["💋 <b>Hey babe, I found an order you started earlier.</b>", "", "Here are your orders that are still waiting. You can cancel an unpaid order or continue if you have room for another one."];
     const buttons: Record<string, unknown>[][] = [];
-    for (const row of unpaidRows) {
-      lines.push("", "🧾 <b>Previous order</b>", "Order code: <code>" + esc(String(row.checkout_code || "not assigned")) + "</code>", "Status: <b>" + esc(String(row.status)) + "</b>", "Started: " + esc(String(row.created_at || "unknown")));
-      buttons.push([{ text: "🗑️ Cancel " + String(row.checkout_code || "order"), callback_data: "order:cancel:" + String(row.id) }]);
+    for (const row of pendingRows) {
+      lines.push("", "🧾 <b>Previous order</b>", "Order code: <code>" + esc(String(row.checkout_code || "not assigned")) + "</code>", "Status: <b>" + (row.payment_reference ? "Payment record found — waiting for verification" : esc(String(row.status))) + "</b>", "Started: " + esc(String(row.created_at || "unknown")));
+      if (!row.payment_reference) buttons.push([{ text: "🗑️ Cancel " + String(row.checkout_code || "order"), callback_data: "order:cancel:" + String(row.id) }]);
+      else buttons.push([{ text: "🔎 Check " + String(row.checkout_code || "payment"), callback_data: "paid:" + String(row.id) }]);
     }
-    if (unpaidRows.length < 3) buttons.push([{ text: "💋 Continue with a new order", callback_data: "services:continue" }]);
-    lines.push("", "You can have up to <b>3 unpaid orders</b> at a time. Cancel an old one if you don't need it anymore. 😉");
+    if (pendingRows.length < 3) buttons.push([{ text: "💋 Continue with a new order", callback_data: "services:continue" }]);
+    lines.push("", "You can have up to <b>3 unpaid orders</b> at a time. A payment record already found cannot be cancelled from here. 😉");
     return say(e, chat, lines.join("\n"), { inline_keyboard: buttons });
   }
 
@@ -1294,9 +1294,11 @@ async function startChannelSubscription(e: Env, m: Msg, forceNew = false) {
       });
     }
   }
-  if (unpaidRows.length >= 3) {
-    const buttons = unpaidRows.map((row: any) => [{ text: "🗑️ Cancel " + String(row.checkout_code || "order"), callback_data: "order:cancel:" + String(row.id) }]);
-    return say(e, chat, "💋 You've reached the limit of 3 unpaid orders, babe. Cancel one below before starting another. 😘", { inline_keyboard: buttons });
+  if (pendingRows.length >= 3) {
+    const buttons = pendingRows.map((row: any) => row.payment_reference
+      ? [{ text: "🔎 Check " + String(row.checkout_code || "payment"), callback_data: "paid:" + String(row.id) }]
+      : [{ text: "🗑️ Cancel " + String(row.checkout_code || "order"), callback_data: "order:cancel:" + String(row.id) }]);
+    return say(e, chat, "💋 You've reached the limit of 3 unpaid orders, babe. Cancel an unpaid one or check a payment below before starting another. 😘", { inline_keyboard: buttons });
   }
 
   let code = "";
