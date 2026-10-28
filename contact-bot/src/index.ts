@@ -72,10 +72,19 @@ type ReceiptSubmission = {
   order_id: string;
   status: string;
 };
+type ReceiptVerifyPrompt = {
+  admin_telegram_id: string;
+  order_id: string;
+  order_kind: OrderKind;
+  expires_at: string;
+  created_at?: string;
+  updated_at?: string;
+};
 type AdminBroadcastDraft = { id: string; admin_telegram_id: string; message_text?: string | null; media_kind?: "photo" | "document" | null; media_file_id?: string | null; media_mime_type?: string | null; status: string; expires_at: string };
 type BroadcastRecipientCounts = { total: number; pending: number; sending: number; sent: number; failed: number; uncertain: number; cancelled: number };
 const BROADCAST_BATCH_SIZE = 25;
 const BROADCAST_RECIPIENT_STALE_MINUTES = 10;
+type AdminMessagePurpose = "support" | "rejection";
 type AdminMessageDraft = {
   id: string;
   order_id: string;
@@ -84,6 +93,7 @@ type AdminMessageDraft = {
   telegram_user_id: string;
   telegram_chat_id: string;
   checkout_code?: string | null;
+  purpose?: AdminMessagePurpose | string | null;
   message_text?: string | null;
   media_kind?: "photo" | "document" | null;
   media_file_id?: string | null;
@@ -123,6 +133,7 @@ type AdminComposerRef = {
   hasText: boolean;
   hasMedia: boolean;
   mediaLabel?: string | null;
+  purpose?: AdminMessagePurpose | null;
 };
 type DraftRecoveryPayload = { kind: AdminComposerKind; draftId: string; updatedAt: string };
 type AdminPendingAction = "hide_profile" | "close_pending_orders" | "recover_draft";
@@ -380,6 +391,40 @@ async function clearPaymentPrompts(e: Env, user: string, orderId: string) {
   await e.DB.prepare("DELETE FROM receipt_review_prompts WHERE telegram_user_id=? AND order_id=?").bind(user, orderId).run();
 }
 
+function receiptReviewCallback(action: "verify" | "reject" | "cancel", order: Pick<CustomerOrder, "kind" | "id">): string {
+  return "receipt:" + action + ":" + (order.kind === "contact" ? "c" : "s") + ":" + order.id;
+}
+
+function receiptReviewKeyboard(order: CustomerOrder) {
+  return {
+    inline_keyboard: [
+      [
+        { text: "✅ Verify", callback_data: receiptReviewCallback("verify", order) },
+        { text: "🚫 Reject", callback_data: receiptReviewCallback("reject", order) }
+      ],
+      [{ text: "🔎 Inspect order", callback_data: order.kind === "contact" ? "admin:request:" + order.id : "admin:service:" + order.id }]
+    ]
+  };
+}
+
+async function activeReceiptVerifyPrompt(e: Env, actor: string): Promise<ReceiptVerifyPrompt | null> {
+  await e.DB.prepare("DELETE FROM admin_receipt_verify_prompts WHERE admin_telegram_id=? AND datetime(expires_at) <= datetime('now')").bind(actor).run();
+  const prompt = await e.DB.prepare("SELECT admin_telegram_id,order_id,order_kind,expires_at,created_at,updated_at FROM admin_receipt_verify_prompts WHERE admin_telegram_id=?").bind(actor).first<ReceiptVerifyPrompt>();
+  if (!prompt) return null;
+  if (isDraftExpired(prompt.expires_at)) {
+    await e.DB.prepare("DELETE FROM admin_receipt_verify_prompts WHERE admin_telegram_id=?").bind(actor).run();
+    return null;
+  }
+  return prompt;
+}
+
+async function deleteReceiptVerifyPrompt(e: Env, actor: string, order?: Pick<CustomerOrder, "kind" | "id">): Promise<boolean> {
+  const result = order
+    ? await e.DB.prepare("DELETE FROM admin_receipt_verify_prompts WHERE admin_telegram_id=? AND order_id=? AND order_kind=?").bind(actor, order.id, order.kind).run()
+    : await e.DB.prepare("DELETE FROM admin_receipt_verify_prompts WHERE admin_telegram_id=?").bind(actor).run();
+  return Boolean(result.meta?.changes);
+}
+
 async function forwardedReceiptForOrder(e: Env, orderId: string): Promise<ReceiptSubmission | null> {
   return e.DB.prepare("SELECT id,order_id,status FROM payment_receipt_submissions WHERE order_id=? AND status='forwarded' ORDER BY created_at ASC LIMIT 1").bind(orderId).first<ReceiptSubmission>();
 }
@@ -529,6 +574,10 @@ function adminComposerLabel(kind: AdminComposerKind): string {
   return ADMIN_COMPOSER_LABELS[kind];
 }
 
+function adminComposerDisplayLabel(composer: AdminComposerRef): string {
+  return composer.kind === "support" && composer.purpose === "rejection" ? "rejection follow-up" : adminComposerLabel(composer.kind);
+}
+
 function adminComposerCancelCallback(composer: AdminComposerRef): string {
   if (composer.kind === "request_delivery") return "draft:cancel:" + composer.draftId;
   if (composer.kind === "service_delivery") return "service-delivery:cancel:" + composer.draftId;
@@ -569,7 +618,7 @@ async function listAdminDraftStates(e: Env, adminTelegramId: string, statuses: s
   const [requestRows, serviceRows, supportRows, broadcastRows] = await Promise.all([
     e.DB.prepare("SELECT d.id,d.request_id AS order_id,d.checkout_code,d.message_text,d.media_kind,d.media_file_id,d.media_mime_type,d.status,d.expires_at,d.updated_at,r.profile_id AS target_id FROM delivery_drafts d LEFT JOIN contact_requests r ON r.id=d.request_id WHERE d.admin_telegram_id=? AND d.status IN (" + placeholders + ") ORDER BY d.updated_at DESC").bind(adminTelegramId, ...statuses).all<any>(),
     e.DB.prepare("SELECT d.id,d.service_order_id AS order_id,o.checkout_code,d.message_text,d.media_kind,d.media_file_id,d.media_mime_type,d.status,d.expires_at,d.updated_at,o.service_id AS target_id FROM service_delivery_drafts d LEFT JOIN service_orders o ON o.id=d.service_order_id WHERE d.admin_telegram_id=? AND d.status IN (" + placeholders + ") ORDER BY d.updated_at DESC").bind(adminTelegramId, ...statuses).all<any>(),
-    e.DB.prepare("SELECT id,order_id,order_kind,checkout_code,message_text,media_kind,media_file_id,media_mime_type,status,expires_at,updated_at FROM admin_message_drafts WHERE admin_telegram_id=? AND status IN (" + placeholders + ") ORDER BY updated_at DESC").bind(adminTelegramId, ...statuses).all<any>(),
+    e.DB.prepare("SELECT id,order_id,order_kind,checkout_code,purpose,message_text,media_kind,media_file_id,media_mime_type,status,expires_at,updated_at FROM admin_message_drafts WHERE admin_telegram_id=? AND status IN (" + placeholders + ") ORDER BY updated_at DESC").bind(adminTelegramId, ...statuses).all<any>(),
     e.DB.prepare("SELECT id,message_text,media_kind,media_file_id,media_mime_type,status,expires_at,updated_at FROM admin_broadcast_drafts WHERE admin_telegram_id=? AND status IN (" + placeholders + ") ORDER BY updated_at DESC").bind(adminTelegramId, ...statuses).all<any>()
   ]);
   const toRef = (kind: AdminComposerKind, row: any, orderKind: OrderKind | null): AdminComposerRef => ({
@@ -584,7 +633,8 @@ async function listAdminDraftStates(e: Env, adminTelegramId: string, statuses: s
     updatedAt: row.updated_at ? String(row.updated_at) : null,
     hasText: Boolean(String(row.message_text || "").trim()),
     hasMedia: Boolean(row.media_file_id),
-    mediaLabel: row.media_file_id ? String(row.media_mime_type || row.media_kind || "media") : null
+    mediaLabel: row.media_file_id ? String(row.media_mime_type || row.media_kind || "media") : null,
+    purpose: row.purpose === "rejection" ? "rejection" : row.purpose === "support" ? "support" : null
   });
   return [
     ...(requestRows.results || []).map(row => toRef("request_delivery", row, "contact")),
@@ -617,12 +667,12 @@ async function adminComposerConflicts(e: Env, adminTelegramId: string, except?: 
 async function replyAdminComposerConflict(e: Env, chat: string | number, conflicts: AdminComposerRef[], attemptedAction: string) {
   const lines = conflicts.map(composer => {
     const reference = composer.checkoutCode || composer.orderId || composer.draftId;
-    return "• <b>" + esc(adminComposerLabel(composer.kind)) + "</b> · <code>" + esc(reference) + "</code> · expires " + esc(String(composer.expiresAt || "unknown")) + " UTC";
+    return "• <b>" + esc(adminComposerDisplayLabel(composer)) + "</b> · <code>" + esc(reference) + "</code> · expires " + esc(String(composer.expiresAt || "unknown")) + " UTC";
   });
   const keyboard = conflicts
     .filter(composer => composer.status === "draft")
     .slice(0, 4)
-    .map(composer => [{ text: "✖️ Cancel " + adminComposerLabel(composer.kind), callback_data: adminComposerCancelCallback(composer) }]);
+    .map(composer => [{ text: "✖️ Cancel " + adminComposerDisplayLabel(composer), callback_data: adminComposerCancelCallback(composer) }]);
   return say(e, chat, "⚠️ <b>Another composer is already open.</b>\n" + lines.join("\n") + "\n\nFinish, send, or cancel the current composer before " + esc(attemptedAction) + ". Ordinary text and media edit only the one open composer; nothing was changed or sent by this attempt. Use /drafts to inspect draft state.", keyboard.length ? { inline_keyboard: keyboard } : undefined);
 }
 
@@ -642,12 +692,16 @@ function adminMessageCaption(body: string): string {
   return ADMIN_MESSAGE_HEADER + "\n\n" + esc(body);
 }
 
-function adminMessageKeyboard(draftId: string) {
+function adminMessagePurpose(draft: AdminMessageDraft): AdminMessagePurpose {
+  return draft.purpose === "rejection" ? "rejection" : "support";
+}
+
+function adminMessageKeyboard(draftId: string, purpose: AdminMessagePurpose = "support") {
   return {
     inline_keyboard: [
       [{ text: "👀 Preview", callback_data: "support-message:preview:" + draftId }],
       [
-        { text: "✅ Send to customer", callback_data: "support-message:send:" + draftId },
+        { text: purpose === "rejection" ? "🚫 Reject & send follow-up" : "✅ Send to customer", callback_data: "support-message:send:" + draftId },
         { text: "✖️ Cancel", callback_data: "support-message:cancel:" + draftId }
       ]
     ]
@@ -658,18 +712,27 @@ function adminMessageBody(draft: AdminMessageDraft): string {
   return String(draft.message_text || "").trim();
 }
 
-function adminMessageContentDetails(draft: AdminMessageDraft): string {
+function adminMessageOutgoingBody(draft: AdminMessageDraft, order?: CustomerOrder | null): string {
   const body = adminMessageBody(draft);
-  return "media=" + (draft.media_file_id ? String(draft.media_kind || "file") : "none") + "; text_length=" + body.length;
+  if (adminMessagePurpose(draft) !== "rejection") return body;
+  const code = String(order?.checkout_code || draft.checkout_code || draft.order_id);
+  const intro = "Your order " + code + " was rejected after payment review.";
+  return body ? intro + "\n\n" + body : intro + "\n\nPlease reply here if you need help.";
 }
 
-function adminMessageSendProblem(draft: AdminMessageDraft): string {
+function adminMessageContentDetails(draft: AdminMessageDraft): string {
   const body = adminMessageBody(draft);
+  return "purpose=" + adminMessagePurpose(draft) + "; media=" + (draft.media_file_id ? String(draft.media_kind || "file") : "none") + "; text_length=" + body.length;
+}
+
+function adminMessageSendProblem(draft: AdminMessageDraft, order?: CustomerOrder | null): string {
+  const body = adminMessageBody(draft);
+  const outgoingBody = adminMessageOutgoingBody(draft, order);
   if (!body && !draft.media_file_id) return "Add a message or attach one photo/document before sending.";
   if (body.length > ADMIN_MESSAGE_TEXT_LIMIT) return "Support message text is too long. Shorten it to " + ADMIN_MESSAGE_TEXT_LIMIT + " characters or fewer.";
   if (draft.media_file_id && draft.media_kind !== "photo" && draft.media_kind !== "document") return "The attached media type is not supported. Nothing was sent.";
-  if (draft.media_file_id && body && adminMessageCaption(body).length > ADMIN_MESSAGE_CAPTION_LIMIT) {
-    return "The text is too long to use as a Telegram media caption (" + adminMessageCaption(body).length + "/" + ADMIN_MESSAGE_CAPTION_LIMIT + "). Shorten the text, then preview again.";
+  if (draft.media_file_id && outgoingBody && adminMessageCaption(outgoingBody).length > ADMIN_MESSAGE_CAPTION_LIMIT) {
+    return "The text is too long to use as a Telegram media caption (" + adminMessageCaption(outgoingBody).length + "/" + ADMIN_MESSAGE_CAPTION_LIMIT + "). Shorten the text, then preview again.";
   }
   return "";
 }
@@ -694,7 +757,7 @@ async function resolveCustomerOrderReference(e: Env, rawRef: string): Promise<{ 
 }
 
 async function loadAdminMessageDraft(e: Env, draftId: string): Promise<AdminMessageDraft | null> {
-  return e.DB.prepare("SELECT id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,message_text,media_kind,media_file_id,media_mime_type,status,expires_at,delivered_at,created_at,updated_at FROM admin_message_drafts WHERE id=?").bind(draftId).first<AdminMessageDraft>();
+  return e.DB.prepare("SELECT id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,purpose,message_text,media_kind,media_file_id,media_mime_type,status,expires_at,delivered_at,created_at,updated_at FROM admin_message_drafts WHERE id=?").bind(draftId).first<AdminMessageDraft>();
 }
 
 async function loadAdminMessageDraftContext(e: Env, draftId: string): Promise<{ draft: AdminMessageDraft; order: CustomerOrder | null } | null> {
@@ -715,7 +778,7 @@ async function activeBroadcastDraft(e: Env, adminTelegramId: string): Promise<Ad
   return e.DB.prepare("SELECT id,admin_telegram_id,message_text,media_kind,media_file_id,media_mime_type,status,expires_at FROM admin_broadcast_drafts WHERE admin_telegram_id=? AND status IN ('draft','sending') ORDER BY created_at DESC LIMIT 1").bind(adminTelegramId).first<AdminBroadcastDraft>();
 }
 async function activeAdminMessageDraft(e: Env, adminTelegramId: string): Promise<AdminMessageDraft | null> {
-  const draft = await e.DB.prepare("SELECT id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,message_text,media_kind,media_file_id,media_mime_type,status,expires_at,delivered_at,created_at,updated_at FROM admin_message_drafts WHERE admin_telegram_id=? AND status='draft' ORDER BY updated_at DESC LIMIT 1").bind(adminTelegramId).first<AdminMessageDraft>();
+  const draft = await e.DB.prepare("SELECT id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,purpose,message_text,media_kind,media_file_id,media_mime_type,status,expires_at,delivered_at,created_at,updated_at FROM admin_message_drafts WHERE admin_telegram_id=? AND status='draft' ORDER BY updated_at DESC LIMIT 1").bind(adminTelegramId).first<AdminMessageDraft>();
   if (!draft) return null;
   return (await expireAdminMessageDraftIfNeeded(e, draft)) ? null : draft;
 }
@@ -886,19 +949,24 @@ async function auditAdminMessageDraft(e: Env, adminTelegramId: string, action: s
     .run();
 }
 
-function adminMessageDraftSummary(draft: AdminMessageDraft, order: CustomerOrder, heading = "💬 <b>Customer support draft</b>"): string {
+function adminMessageDraftSummary(draft: AdminMessageDraft, order: CustomerOrder, heading?: string): string {
+  const purpose = adminMessagePurpose(draft);
   const body = adminMessageBody(draft);
-  const problem = adminMessageSendProblem(draft);
+  const outgoingBody = adminMessageOutgoingBody(draft, order);
+  const problem = adminMessageSendProblem(draft, order);
   const mediaLabel = draft.media_file_id
     ? "One " + esc(String(draft.media_kind || "file")) + " attached" + (draft.media_mime_type ? " (" + esc(String(draft.media_mime_type)) + ")" : "")
     : "None";
   const messageSection = body
-    ? esc(body)
+    ? esc(outgoingBody)
     : draft.media_file_id
-      ? "<i>Media only — no message text.</i>"
+      ? purpose === "rejection"
+        ? esc(outgoingBody)
+        : "<i>Media only — no message text.</i>"
       : "<i>No text or attachment yet. Send text and/or one photo/document in this private chat.</i>";
   const lines = [
-    heading,
+    heading || (purpose === "rejection" ? "🚫 <b>Rejection follow-up draft</b>" : "💬 <b>Customer support draft</b>"),
+    "Purpose: <b>" + (purpose === "rejection" ? "Reject this pending order and message the client" : "Customer support") + "</b>",
     "Order type: <b>" + (order.kind === "contact" ? "Request" : "Service order") + "</b>",
     "Order code: <code>" + esc(String(order.checkout_code || draft.checkout_code || "not recorded")) + "</code>",
     "Order UUID: <code>" + esc(order.id) + "</code>",
@@ -910,7 +978,9 @@ function adminMessageDraftSummary(draft: AdminMessageDraft, order: CustomerOrder
     messageSection
   ];
   if (problem && (body || draft.media_file_id)) lines.push("", "⚠️ " + esc(problem));
-  lines.push("", "<i>Preview only — nothing has been sent. Draft expires at " + esc(String(draft.expires_at || "unknown")) + " UTC. Sending this support message will not change payment, approval, delivery, or fulfilment status.</i>");
+  lines.push("", purpose === "rejection"
+    ? "<i>Preview only — nothing has been sent and the order is <b>not rejected yet</b>. Draft expires at " + esc(String(draft.expires_at || "unknown")) + " UTC. Tapping <b>Reject &amp; send follow-up</b> will reject/cancel this still-pending order and send this message/media. Cancelling this composer leaves the order unchanged.</i>"
+    : "<i>Preview only — nothing has been sent. Draft expires at " + esc(String(draft.expires_at || "unknown")) + " UTC. Sending this support message will not change payment, approval, delivery, or fulfilment status.</i>");
   return lines.join("\n");
 }
 
@@ -936,10 +1006,10 @@ async function sendAdminMessageDraftSummary(
     }
   }
   const summary = adminMessageDraftSummary(draft, order, options.heading) + (options.note ? "\n\n" + esc(options.note) : "");
-  return say(e, chat, summary, adminMessageKeyboard(draft.id));
+  return say(e, chat, summary, adminMessageKeyboard(draft.id, adminMessagePurpose(draft)));
 }
 
-async function createOrReopenAdminMessageDraft(e: Env, m: Msg, rawRef: string, initialBody: string, media?: ReceiptMedia) {
+async function createOrReopenAdminMessageDraft(e: Env, m: Msg, rawRef: string, initialBody: string, media?: ReceiptMedia, purpose: AdminMessagePurpose = "support") {
   const chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
   if (user !== e.ADMIN_TELEGRAM_ID) return say(e, chat, "Admin access only. Nothing was sent.");
   if (chat !== user) return say(e, chat, "Open the private Admin Desk chat to compose a customer support message. Nothing was sent.");
@@ -957,6 +1027,9 @@ async function createOrReopenAdminMessageDraft(e: Env, m: Msg, rawRef: string, i
   if (resolved.error === "ambiguous") return say(e, chat, "That reference matches more than one order, so no draft was opened. Use the exact full order UUID after checking the records.");
   if (resolved.error === "missing" || !resolved.order) return say(e, chat, "No request or service order matched that UUID or FL- order code. Nothing was sent.");
   const order = resolved.order;
+  if (purpose === "rejection" && order.status !== "pending_payment") {
+    return say(e, chat, "This order is no longer pending payment, so a receipt-rejection follow-up was not opened. Inspect the current order before taking another action.", { inline_keyboard: [[{ text: "🔎 Inspect order", callback_data: order.kind === "contact" ? "admin:request:" + order.id : "admin:service:" + order.id }]] });
+  }
 
   const uncertain = await e.DB.prepare("SELECT id FROM admin_message_drafts WHERE order_kind=? AND order_id=? AND status='sending' ORDER BY updated_at DESC LIMIT 1").bind(order.kind, order.id).first<any>();
   if (uncertain) {
@@ -970,11 +1043,14 @@ async function createOrReopenAdminMessageDraft(e: Env, m: Msg, rawRef: string, i
 
   const existing = await activeAdminMessageDraft(e, user);
   if (existing && (existing.order_kind !== order.kind || existing.order_id !== order.id)) {
-    return say(e, chat, "Finish or cancel the current customer support draft for <code>" + esc(String(existing.checkout_code || existing.order_id)) + "</code> before composing a message for another order.", adminMessageKeyboard(existing.id));
+    return say(e, chat, "Finish or cancel the current customer support draft for <code>" + esc(String(existing.checkout_code || existing.order_id)) + "</code> before composing a message for another order.", adminMessageKeyboard(existing.id, adminMessagePurpose(existing)));
   }
   if (existing) {
+    if (adminMessagePurpose(existing) !== purpose) {
+      return say(e, chat, "A different kind of customer-message draft is already open for this order. Finish or cancel that draft before opening a " + (purpose === "rejection" ? "rejection follow-up" : "support message") + "; its purpose was not changed.", adminMessageKeyboard(existing.id, adminMessagePurpose(existing)));
+    }
     if (String(existing.telegram_user_id) !== String(order.telegram_user_id) || String(existing.telegram_chat_id) !== String(order.telegram_chat_id)) {
-      return say(e, chat, "The customer destination saved on the existing support draft no longer matches this order. Cancel that draft and inspect the order before composing again.", adminMessageKeyboard(existing.id));
+      return say(e, chat, "The customer destination saved on the existing support draft no longer matches this order. Cancel that draft and inspect the order before composing again.", adminMessageKeyboard(existing.id, adminMessagePurpose(existing)));
     }
     const updated = await e.DB.prepare("UPDATE admin_message_drafts SET checkout_code=?,message_text=?,media_kind=?,media_file_id=?,media_mime_type=?,expires_at=datetime('now','+30 minutes'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?")
       .bind(order.checkout_code || null, body || existing.message_text || null, media?.kind || existing.media_kind || null, media?.fileId || existing.media_file_id || null, media?.mimeType || existing.media_mime_type || null, existing.id, user)
@@ -982,17 +1058,17 @@ async function createOrReopenAdminMessageDraft(e: Env, m: Msg, rawRef: string, i
     if (!updated.meta?.changes) return say(e, chat, "The support draft changed while it was being reopened. Nothing was sent.");
     const context = await loadAdminMessageDraftContext(e, existing.id);
     if (!context?.order) return say(e, chat, "The support draft could not be reloaded. Nothing was sent.");
-    return sendAdminMessageDraftSummary(e, chat, context.draft, context.order, { heading: "💬 <b>Customer support draft updated</b>" });
+    return sendAdminMessageDraftSummary(e, chat, context.draft, context.order, { heading: purpose === "rejection" ? "🚫 <b>Rejection follow-up draft updated</b>" : "💬 <b>Customer support draft updated</b>" });
   }
 
   const draftId = crypto.randomUUID();
   try {
-    await e.DB.prepare("INSERT INTO admin_message_drafts(id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,message_text,media_kind,media_file_id,media_mime_type,status,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'draft',datetime('now','+30 minutes'))")
-      .bind(draftId, order.id, order.kind, user, order.telegram_user_id, order.telegram_chat_id, order.checkout_code || null, body || null, media?.kind || null, media?.fileId || null, media?.mimeType || null)
+    await e.DB.prepare("INSERT INTO admin_message_drafts(id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,purpose,message_text,media_kind,media_file_id,media_mime_type,status,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'draft',datetime('now','+30 minutes'))")
+      .bind(draftId, order.id, order.kind, user, order.telegram_user_id, order.telegram_chat_id, order.checkout_code || null, purpose, body || null, media?.kind || null, media?.fileId || null, media?.mimeType || null)
       .run();
   } catch {
     const raced = await activeAdminMessageDraft(e, user);
-    if (raced) return say(e, chat, "Another customer support draft was opened at the same time. Finish or cancel it before composing a different support message.", adminMessageKeyboard(raced.id));
+    if (raced) return say(e, chat, "Another customer support draft was opened at the same time. Finish or cancel it before composing a different support message.", adminMessageKeyboard(raced.id, adminMessagePurpose(raced)));
     throw new Error("admin_message_draft_create_failed");
   }
 
@@ -1004,7 +1080,7 @@ async function createOrReopenAdminMessageDraft(e: Env, m: Msg, rawRef: string, i
 
   const context = await loadAdminMessageDraftContext(e, draftId);
   if (!context?.order) return say(e, chat, "The support draft could not be reloaded. Nothing was sent.");
-  await auditAdminMessageDraft(e, user, "admin_support_draft_created", context.draft, context.order, "Admin created customer support draft for " + order.kind + " order " + String(order.checkout_code || order.id) + "; " + adminMessageContentDetails(context.draft));
+  await auditAdminMessageDraft(e, user, purpose === "rejection" ? "admin_rejection_draft_created" : "admin_support_draft_created", context.draft, context.order, "Admin created " + (purpose === "rejection" ? "receipt-rejection follow-up" : "customer support") + " draft for " + order.kind + " order " + String(order.checkout_code || order.id) + "; " + adminMessageContentDetails(context.draft));
   return sendAdminMessageDraftSummary(e, chat, context.draft, context.order);
 }
 
@@ -1014,9 +1090,6 @@ function receiptContextValue(value: unknown, fallback: string, maxLength: number
 }
 
 function receiptAdminCaption(order: CustomerOrder, submissionId: string): string {
-  const verifyCommand = order.kind === "contact"
-    ? `/verify ${order.id} EXACT_SELAR_REFERENCE`
-    : `/verifyservice ${order.id} EXACT_SELAR_REFERENCE`;
   const username = receiptContextValue(order.telegram_username, "", 64).replace(/^@+/, "");
   const caption = [
     "<b>Selar receipt submitted for manual review</b>",
@@ -1030,22 +1103,20 @@ function receiptAdminCaption(order: CustomerOrder, submissionId: string): string
     `Telegram user: <code>${esc(order.telegram_user_id)}</code>${username ? ` (@${esc(username)})` : ""}`,
     "",
     "No matching backend sale was attached when this fallback was used. The receipt is customer-supplied evidence only and has NOT changed the order status.",
-    "Check the payment in Selar. Only if it is genuinely paid, use:",
-    `<code>${esc(verifyCommand)}</code>`
+    "Use the buttons below after checking Selar: <b>Verify</b> asks for the exact reference if one is not attached; <b>Reject</b> opens a follow-up message/media composer for this client."
   ].join("\n");
   if (caption.length <= 1024) return caption;
 
   // HTML escaping can expand customer-provided clues. Telegram media captions
-  // are limited to 1024 characters, so retain the identifiers and command the
-  // administrator needs and omit the longer reconciliation clues.
+  // are limited to 1024 characters, so retain the identifiers and button
+  // guidance the administrator needs and omit longer reconciliation clues.
   return [
     "<b>Selar receipt submitted for manual review</b>",
     `Submission: <code>${esc(submissionId)}</code>`,
     `Order: <code>${esc(order.id)}</code>`,
     `Checkout code: <code>${esc(receiptContextValue(order.checkout_code, "not recorded", 32))}</code>`,
     `Telegram user: <code>${esc(order.telegram_user_id)}</code>${username ? ` (@${esc(username)})` : ""}`,
-    "Receipt evidence only; order status unchanged. Check Selar, then only if genuinely paid use:",
-    `<code>${esc(verifyCommand)}</code>`
+    "Receipt evidence only; order status unchanged. Check Selar, then use Verify or Reject below. Verify asks for the exact reference; Reject opens a client follow-up composer."
   ].join("\n");
 }
 
@@ -1134,7 +1205,8 @@ async function handleReceiptMedia(e: Env, m: Msg, preliminaryOrder: CustomerOrde
     const payload: Record<string, unknown> = {
       chat_id: e.ADMIN_TELEGRAM_ID,
       caption: receiptAdminCaption(latestOrder, submissionId),
-      parse_mode: "HTML"
+      parse_mode: "HTML",
+      reply_markup: receiptReviewKeyboard(latestOrder)
     };
     payload[media.kind] = media.fileId;
     await tg(e, media.kind === "photo" ? "sendPhoto" : "sendDocument", payload);
@@ -1375,11 +1447,52 @@ async function startService(e: Env, m: Msg, serviceId: string) {
   return say(e, chat, "Hi! I’m Annie. Tell me what you need, and I’ll ask a few questions so I understand your request.\n\nOrder reference: <code>" + id + "</code>\n\nWhen you’re ready to pay, type PAY and I’ll send the checkout link.");
 }
 
+async function manuallyVerifyOrderByReference(e: Env, actor: string, chat: string | number, isService: boolean, rawOrderId: string, rawReference: string): Promise<void> {
+  if (actor !== e.ADMIN_TELEGRAM_ID || String(chat) !== actor) {
+    await say(e, chat, "Admin private chat only. Nothing was changed.");
+    return;
+  }
+  const oid = String(rawOrderId || "").trim().toLowerCase();
+  const reference = String(rawReference || "").trim();
+  if (!/^[0-9a-f-]{36}$/i.test(oid) || !reference || reference.length > 200 || /[\s<>]/.test(reference)) {
+    await say(e, chat, isService
+      ? "Usage: /verifyservice ORDER_UUID SELAR_REFERENCE — first check the payment in Selar, then paste its exact reference."
+      : "Usage: /verify REQUEST_UUID SELAR_REFERENCE — first check the payment in Selar, then paste its exact reference.");
+    return;
+  }
+  const table = isService ? "service_orders" : "contact_requests";
+  const row = await e.DB.prepare(`SELECT id,telegram_chat_id,status,payment_reference,buyer_email,${isService ? "service_id" : "profile_id"} AS target_id FROM ${table} WHERE id=?`).bind(oid).first<any>();
+  if (!row) { await say(e, chat, "Order not found. Nothing was changed."); return; }
+  await deleteReceiptVerifyPrompt(e, actor, { kind: isService ? "service" : "contact", id: oid });
+  if (row.status === "payment_verified" && row.payment_reference === reference) { await say(e, chat, "Already verified with that reference. No change made."); return; }
+  if (row.status !== "pending_payment") { await say(e, chat, `Cannot verify: order status is ${esc(String(row.status))}. Only pending_payment orders can be verified. Nothing was changed.`); return; }
+  if (row.payment_reference && row.payment_reference !== reference) { await say(e, chat, "A different sale reference is already attached to this order. Resolve the mismatch in Selar first. Nothing was changed."); return; }
+  const usedSale = await e.DB.prepare("SELECT request_id FROM processed_sales WHERE provider_reference=?").bind(reference).first<any>();
+  if (usedSale && String(usedSale.request_id) !== oid) { await say(e, chat, "That reference is already recorded for a different order. Nothing was changed."); return; }
+  const usedContact = await e.DB.prepare("SELECT id FROM contact_requests WHERE payment_reference=? AND id<>?").bind(reference, oid).first<any>();
+  const usedService = await e.DB.prepare("SELECT id FROM service_orders WHERE payment_reference=? AND id<>?").bind(reference, oid).first<any>();
+  if (usedContact || usedService) { await say(e, chat, "That reference is already attached to a different order. Nothing was changed."); return; }
+  const productId = isService ? (e.SERVICE_PRODUCT_ID || "") : (e.SELAR_PRODUCT_ID || "");
+  if (!productId) { await say(e, chat, "The Selar product code is not configured for this flow. Nothing was changed."); return; }
+  const upd = await e.DB.prepare(`UPDATE ${table} SET status='payment_verified',payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'`).bind(reference, oid).run();
+  if (!upd.meta?.changes) { await say(e, chat, "Order status changed while verifying. No change made."); return; }
+  await e.DB.prepare("INSERT OR IGNORE INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id) VALUES(?,?,?,?,?,?)").bind(reference, row.buyer_email || "", 0, "UNK", productId, oid).run();
+  await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,?,?,?,?)").bind(actor, isService ? "service_payment_admin_verified_manual_reference" : "selar_payment_admin_verified_manual_reference", oid, row.target_id || null, `Admin manually verified after checking Selar directly; reference ${reference}`).run();
+  if (isService) {
+    await sayBestEffort(e, row.telegram_chat_id, "The admin has manually confirmed your payment. Your service order is awaiting fulfilment.");
+    await say(e, chat, "Payment manually verified for service order <code>" + esc(oid) + "</code>. Use /deliver " + esc(oid) + " your service details when ready.");
+    return;
+  }
+  await sayBestEffort(e, row.telegram_chat_id, "Your payment has been confirmed. I will send your requested fulfilment here once it is ready.");
+  await say(e, chat, "Payment manually verified for profile request <code>" + esc(oid) + "</code>. Prepare your delivery message/media and explicitly confirm sending when ready.", { inline_keyboard: [[{ text: "📝 Prepare delivery", callback_data: "approve:" + oid }, { text: "Reject", callback_data: "reject:" + oid }]] });
+}
+
 async function message(e: Env, m: Msg) {
   let t = (m.text || "").trim();
   const caption = (m.caption || "").trim(), chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
+  const isBroadcastCaption = user === e.ADMIN_TELEGRAM_ID && /^\/broadcast(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(caption);
   const hasReceiptCandidateMedia = Boolean((Array.isArray(m.photo) && m.photo.length > 0) || m.document || m.video);
-  if (hasReceiptCandidateMedia && user === e.ADMIN_TELEGRAM_ID) {
+  if (hasReceiptCandidateMedia && user === e.ADMIN_TELEGRAM_ID && !isBroadcastCaption) {
     if (chat !== user) return say(e, chat, "Open the private Admin Desk chat to manage customer drafts or attach admin media. Nothing was changed or sent.");
     const normalizedCaption = caption.replace(/^(\/[A-Za-z0-9_]+)@[A-Za-z0-9_]+(?=\s|$)/, "$1");
     if (normalizedCaption === "/message" || normalizedCaption.startsWith("/message ")) {
@@ -1412,9 +1525,20 @@ async function message(e: Env, m: Msg) {
     if (activeComposer?.kind === "broadcast" && broadcastDraft && broadcastDraft.status === "draft" && broadcastDraft.id === activeComposer.draftId) {
       const extracted = extractSupportMedia(m);
       if (!extracted.media) return say(e, chat, extracted.unsupported || "Attach one photo, video, or PDF/image document under 20 MB.");
-      const updated = await e.DB.prepare("UPDATE admin_broadcast_drafts SET media_kind=?,media_file_id=?,media_mime_type=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(extracted.media.kind, extracted.media.fileId, extracted.media.mimeType, broadcastDraft.id, user).run();
+      let nextText = String(broadcastDraft.message_text || "").trim();
+      let captionNote = nextText ? "Existing broadcast text was kept and will be sent as the media caption." : "No broadcast text is saved yet.";
+      if (caption && !caption.startsWith("/")) {
+        if (caption.length > 900) return say(e, chat, "The media caption is too long to use as broadcast text, so the media was not attached. Shorten it to 900 characters or fewer.");
+        // A Telegram media message's caption is the text sent with that media.
+        // Save it with the attachment instead of silently dropping it.
+        nextText = caption;
+        captionNote = "The media caption was saved as the broadcast text and will be sent with the media.";
+      } else if (caption.startsWith("/")) {
+        captionNote = "The slash-command caption was not used as broadcast text." + (nextText ? " Existing broadcast text was kept." : "");
+      }
+      const updated = await e.DB.prepare("UPDATE admin_broadcast_drafts SET message_text=?,media_kind=?,media_file_id=?,media_mime_type=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(nextText || null, extracted.media.kind, extracted.media.fileId, extracted.media.mimeType, broadcastDraft.id, user).run();
       if (!updated.meta?.changes) return say(e, chat, "Broadcast draft changed; media was not attached.");
-      return say(e, chat, "📎 Media attached. Nothing has been sent.", { inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + broadcastDraft.id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + broadcastDraft.id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + broadcastDraft.id }]] });
+      return say(e, chat, "📎 <b>Broadcast media attached</b>\nText: " + (nextText ? esc(nextText) : "none") + "\nMedia: " + esc(String(extracted.media.mimeType || extracted.media.kind)) + "\n" + esc(captionNote) + "\n\nNothing has been sent. Preview to see the exact media and caption before confirming.", { inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + broadcastDraft.id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + broadcastDraft.id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + broadcastDraft.id }]] });
     }
     const deliveryDraft = activeComposer?.kind === "request_delivery" ? await activeDeliveryDraft(e, user) : null;
     const serviceDraft = activeComposer?.kind === "service_delivery" ? await activeServiceDeliveryDraft(e, user) : null;
@@ -1463,7 +1587,7 @@ async function message(e: Env, m: Msg) {
       if (chat !== user) return say(e, chat, "Open the private Admin Desk chat to attach media to a customer support draft. Nothing was sent.");
       const contextBefore = await loadAdminMessageDraftContext(e, supportDraft.id);
       if (!contextBefore?.order || String(contextBefore.order.telegram_user_id) !== String(supportDraft.telegram_user_id) || String(contextBefore.order.telegram_chat_id) !== String(supportDraft.telegram_chat_id)) {
-        return say(e, chat, "The support draft no longer matches the selected order's Telegram destination, so the media was not attached.", adminMessageKeyboard(supportDraft.id));
+        return say(e, chat, "The support draft no longer matches the selected order's Telegram destination, so the media was not attached.", adminMessageKeyboard(supportDraft.id, adminMessagePurpose(supportDraft)));
       }
       const extracted = extractSupportMedia(m);
       if (!extracted.media) return say(e, chat, extracted.unsupported || "Attach one photo, video, or PDF/image document under 20 MB. The support draft was not changed.");
@@ -1482,10 +1606,10 @@ async function message(e: Env, m: Msg) {
       if (!updated.meta?.changes) return say(e, chat, "The support draft changed while media was being attached. Nothing was sent.");
       const context = await loadAdminMessageDraftContext(e, supportDraft.id);
       if (!context?.order) return say(e, chat, "The support draft could not be reloaded. Nothing was sent.");
-      return sendAdminMessageDraftSummary(e, chat, context.draft, context.order, { heading: "📎 <b>Customer support draft updated</b>", note: note || undefined });
+      return sendAdminMessageDraftSummary(e, chat, context.draft, context.order, { heading: adminMessagePurpose(context.draft) === "rejection" ? "📎 <b>Rejection follow-up draft updated</b>" : "📎 <b>Customer support draft updated</b>", note: note || undefined });
     }
   }
-  if (hasReceiptCandidateMedia) {
+  if (hasReceiptCandidateMedia && !isBroadcastCaption) {
     const receiptPrompt = await e.DB.prepare("SELECT order_id,order_kind FROM receipt_review_prompts WHERE telegram_user_id=?").bind(user).first<any>();
     let order = receiptPrompt ? await loadCustomerOrderById(e, String(receiptPrompt.order_id)) : null;
     if (receiptPrompt && (!order || String(order.telegram_user_id) !== user)) {
@@ -1504,6 +1628,7 @@ async function message(e: Env, m: Msg) {
     // the existing text flow; it is not treated as a payment receipt.
     t = caption;
   }
+  if (hasReceiptCandidateMedia && isBroadcastCaption) t = caption;
   let voiceReply = false;
   if (m.voice || m.audio) {
     try {
@@ -1529,6 +1654,36 @@ async function message(e: Env, m: Msg) {
   if (voiceReply && user === e.ADMIN_TELEGRAM_ID && isVoiceConsequentialAdminText(t)) {
     return say(e, chat, "I will not run that consequential admin action from a voice transcript. Tap the confirmation button if one is shown, or type the exact command or YES to confirm deliberately.");
   }
+  if (user === e.ADMIN_TELEGRAM_ID && chat === user && !t.startsWith("/")) {
+    const receiptVerifyPrompt = await activeReceiptVerifyPrompt(e, user);
+    if (receiptVerifyPrompt) {
+      const pendingAction = await e.DB.prepare("SELECT id FROM admin_pending_actions WHERE admin_telegram_id=? AND status='pending' AND datetime(expires_at) > datetime('now') ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
+      const editableComposers = await listEditableAdminComposers(e, user);
+      // A durable confirmation or an open composer keeps its existing meaning.
+      // If another workflow has taken over since the prompt opened, cancel the
+      // short-lived receipt prompt instead of letting it capture later text.
+      if (pendingAction || editableComposers.length > 0) {
+        await deleteReceiptVerifyPrompt(e, user, { kind: receiptVerifyPrompt.order_kind, id: receiptVerifyPrompt.order_id });
+      } else {
+        if (voiceReply) {
+          return say(e, chat, "I will not accept a Selar payment reference from a voice transcript. Type or paste the exact reference, or tap Cancel verification.");
+        }
+        if (/^cancel(?:\s+verification)?[.! ]*$/i.test(t)) {
+          await deleteReceiptVerifyPrompt(e, user, { kind: receiptVerifyPrompt.order_kind, id: receiptVerifyPrompt.order_id });
+          return say(e, chat, "Receipt verification cancelled. The order remains unchanged and unpaid unless it was verified separately.");
+        }
+        const reference = t.trim();
+        if (!reference || reference.length > 200 || /[\s<>]/.test(reference)) {
+          return say(e, chat, "Send the <b>exact Selar reference only</b> — one reference with no spaces. The receipt-verification prompt is still open; send <b>cancel</b> to stop without changing the order.");
+        }
+        const claimedPrompt = await e.DB.prepare("DELETE FROM admin_receipt_verify_prompts WHERE admin_telegram_id=? AND order_id=? AND order_kind=? AND datetime(expires_at) > datetime('now')")
+          .bind(user, receiptVerifyPrompt.order_id, receiptVerifyPrompt.order_kind)
+          .run();
+        if (!claimedPrompt.meta?.changes) return say(e, chat, "That receipt-verification prompt expired or changed. Nothing was verified; tap Verify on the receipt again if you still need it.");
+        return manuallyVerifyOrderByReference(e, user, chat, receiptVerifyPrompt.order_kind === "service", receiptVerifyPrompt.order_id, reference);
+      }
+    }
+  }
   if (user === e.ADMIN_TELEGRAM_ID && chat === user && /^(?:yes|yes please|confirm|confirm it|go ahead|do it)[.! ]*$/i.test(t)) {
     const pending = await e.DB.prepare("SELECT id,admin_telegram_id,action,payload,status,expires_at FROM admin_pending_actions WHERE admin_telegram_id=? AND status='pending' ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
     if (pending) { await confirmPendingAdminAction(e, user, chat, String(pending.id)); return; }
@@ -1548,10 +1703,13 @@ async function message(e: Env, m: Msg) {
       return;
     }
     if (composer.kind === "support") {
+      if (composer.purpose === "rejection") {
+        return say(e, chat, "YES did not reject this order or send the follow-up. Preview the rejection draft, then tap its explicit <b>Reject &amp; send follow-up</b> button.", adminMessageKeyboard(composer.draftId, "rejection"));
+      }
       await executeSupportDraft(e, user, chat, composer.draftId);
       return;
     }
-    return say(e, chat, "YES was <b>not</b> added as delivery text and did not send the open <b>" + esc(adminComposerLabel(composer.kind)) + "</b> draft for <code>" + esc(String(composer.checkoutCode || composer.orderId || composer.draftId)) + "</code>. Fulfilment sends require Preview and the draft's explicit <b>Send</b> button.");
+    return say(e, chat, "YES was <b>not</b> added as delivery text and did not send the open <b>" + esc(adminComposerDisplayLabel(composer)) + "</b> draft for <code>" + esc(String(composer.checkoutCode || composer.orderId || composer.draftId)) + "</code>. Fulfilment sends require Preview and the draft's explicit <b>Send</b> button.");
   }
   if (user === e.ADMIN_TELEGRAM_ID && !t.startsWith("/") && chat === user) {
     const editableComposers = await listEditableAdminComposers(e, user);
@@ -1594,13 +1752,13 @@ async function message(e: Env, m: Msg) {
       if (t.length > ADMIN_MESSAGE_TEXT_LIMIT) return say(e, chat, "Support message text is too long. Keep it to " + ADMIN_MESSAGE_TEXT_LIMIT + " characters or fewer. The draft was not changed.");
       const contextBefore = await loadAdminMessageDraftContext(e, supportDraft.id);
       if (!contextBefore?.order || String(contextBefore.order.telegram_user_id) !== String(supportDraft.telegram_user_id) || String(contextBefore.order.telegram_chat_id) !== String(supportDraft.telegram_chat_id)) {
-        return say(e, chat, "The support draft no longer matches the selected order's Telegram destination, so the text was not added.", adminMessageKeyboard(supportDraft.id));
+        return say(e, chat, "The support draft no longer matches the selected order's Telegram destination, so the text was not added.", adminMessageKeyboard(supportDraft.id, adminMessagePurpose(supportDraft)));
       }
       const updated = await e.DB.prepare("UPDATE admin_message_drafts SET message_text=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(t, supportDraft.id, user).run();
       if (!updated.meta?.changes) return say(e, chat, "The support draft changed while it was being updated. Nothing was sent.");
       const context = await loadAdminMessageDraftContext(e, supportDraft.id);
       if (!context?.order) return say(e, chat, "The support draft could not be reloaded. Nothing was sent.");
-      return sendAdminMessageDraftSummary(e, chat, context.draft, context.order, { heading: "📝 <b>Customer support draft updated</b>" });
+      return sendAdminMessageDraftSummary(e, chat, context.draft, context.order, { heading: adminMessagePurpose(context.draft) === "rejection" ? "📝 <b>Rejection follow-up draft updated</b>" : "📝 <b>Customer support draft updated</b>" });
     }
   }
   // Telegram may append @BotName to slash commands. Normalize only the command token.
@@ -1670,6 +1828,12 @@ async function message(e: Env, m: Msg) {
   if (user === e.ADMIN_TELEGRAM_ID && /^\/broadcast(?:\s|$)/i.test(t)) {
     const text = t.replace(/^\/broadcast(?:@[A-Za-z0-9_]+)?\s*/i, "").trim();
     if (text.length > 900) return say(e, chat, "Broadcast text must be 900 characters or fewer.");
+    const hasAttachedMedia = Boolean((Array.isArray(m.photo) && m.photo.length > 0) || m.document || m.video || (m as any).animation || (m as any).video_note || (m as any).sticker);
+    const extractedBroadcastMedia = hasAttachedMedia ? extractSupportMedia(m) : null;
+    if (extractedBroadcastMedia && !extractedBroadcastMedia.media) {
+      return say(e, chat, (extractedBroadcastMedia.unsupported || "Attach one photo, video, or PDF/image document under 20 MB.") + " No broadcast draft was created or changed.");
+    }
+    const attachedMedia = extractedBroadcastMedia?.media;
     const active = await activeBroadcastDraft(e, user);
     if (active?.status === "sending") {
       const counts = await broadcastRecipientCounts(e, active.id);
@@ -1678,12 +1842,22 @@ async function message(e: Env, m: Msg) {
       }
       return say(e, chat, "⚠️ A broadcast is already sending or has an uncertain outcome. Use /drafts to inspect it before any recovery; do not blind-retry.");
     }
-    if (active?.status === "draft") return say(e, chat, "You already have the one open broadcast composer. Send text to update it, attach one photo/video/document, preview it, or use /broadcastcancel.", { inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + active.id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + active.id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + active.id }]] });
+    if (active?.status === "draft") {
+      if (attachedMedia) {
+        const nextText = text || String(active.message_text || "").trim();
+        const updated = await e.DB.prepare("UPDATE admin_broadcast_drafts SET message_text=?,media_kind=?,media_file_id=?,media_mime_type=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?")
+          .bind(nextText || null, attachedMedia.kind, attachedMedia.fileId, attachedMedia.mimeType, active.id, user)
+          .run();
+        if (!updated.meta?.changes) return say(e, chat, "Broadcast draft changed; media was not attached.");
+        return say(e, chat, "📎 <b>Broadcast media attached</b>\nText: " + (nextText ? esc(nextText) : "none") + "\nMedia: " + esc(String(attachedMedia.mimeType || attachedMedia.kind)) + "\nThe saved text will be sent as the media caption.\n\nNothing has been sent. Preview to see the exact media and caption before confirming.", { inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + active.id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + active.id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + active.id }]] });
+      }
+      return say(e, chat, "You already have the one open broadcast composer. Send text to update it, attach one photo/video/document, preview it, or use /broadcastcancel.", { inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + active.id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + active.id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + active.id }]] });
+    }
     const conflicts = await adminComposerConflicts(e, user, { kind: "broadcast" });
     if (conflicts.length) return replyAdminComposerConflict(e, chat, conflicts, "opening a broadcast composer");
     const id = crypto.randomUUID();
     try {
-      await e.DB.prepare("INSERT INTO admin_broadcast_drafts(id,admin_telegram_id,message_text,status,expires_at) VALUES(?,?,?,'draft',datetime('now','+30 minutes'))").bind(id, user, text || null).run();
+      await e.DB.prepare("INSERT INTO admin_broadcast_drafts(id,admin_telegram_id,message_text,media_kind,media_file_id,media_mime_type,status,expires_at) VALUES(?,?,?,?,?,?,'draft',datetime('now','+30 minutes'))").bind(id, user, text || null, attachedMedia?.kind || null, attachedMedia?.fileId || null, attachedMedia?.mimeType || null).run();
     } catch {
       const raced = await activeBroadcastDraft(e, user);
       if (raced?.status === "draft") return say(e, chat, "A broadcast composer was opened at the same time. Use that one composer; no second draft was created.", { inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + raced.id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + raced.id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + raced.id }]] });
@@ -1694,7 +1868,7 @@ async function message(e: Env, m: Msg) {
       await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(id, user).run();
       return replyAdminComposerConflict(e, chat, racedConflicts, "opening a broadcast composer");
     }
-    return say(e, chat, "📣 <b>Broadcast draft created</b>\nAudience: every unique saved client chat from profile requests and service orders, excluding your admin chat. Delivery is batched with a saved per-client ledger so nobody is sent the same broadcast twice.\n\n" + (text ? esc(text) : "No message text yet. Send text or attach media.") + "\n\nNothing has been sent. Preview and confirm when ready.", {
+    return say(e, chat, "📣 <b>Broadcast draft created</b>\nAudience: every unique saved client chat from profile requests and service orders, excluding your admin chat. Delivery is batched with a saved per-client ledger so nobody is sent the same broadcast twice.\n\nText: " + (text ? esc(text) : "No message text yet. Send text or attach media.") + "\nMedia: " + (attachedMedia ? esc(String(attachedMedia.mimeType || attachedMedia.kind)) + " attached" : "none") + (attachedMedia && text ? "\nThe text will be sent as the media caption." : "") + "\n\nNothing has been sent. Preview and confirm when ready.", {
       inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + id }]]
     });
   }
@@ -1720,7 +1894,7 @@ async function message(e: Env, m: Msg) {
       const reference = state.checkoutCode || state.orderId || "broadcast audience";
       lines.push(
         "",
-        "• <b>" + esc(adminComposerLabel(state.kind)) + "</b> — <b>" + esc(state.status) + "</b>",
+        "• <b>" + esc(adminComposerDisplayLabel(state)) + "</b> — <b>" + esc(state.status) + "</b>",
         "  Reference: <code>" + esc(reference) + "</code>",
         "  Draft ID: <code>" + esc(state.draftId) + "</code>",
         "  Text: " + (state.hasText ? "yes" : "no") + " · Media: " + (state.hasMedia ? esc(String(state.mediaLabel || "attached")) : "none"),
@@ -1728,7 +1902,7 @@ async function message(e: Env, m: Msg) {
       );
       if (state.status === "draft") {
         lines.push("  This is editable. Ordinary text/media should go only to this composer when it is the sole editable draft.");
-        if (keyboard.length < 8) keyboard.push([{ text: "✖️ Cancel " + adminComposerLabel(state.kind), callback_data: adminComposerCancelCallback(state) }]);
+        if (keyboard.length < 8) keyboard.push([{ text: "✖️ Cancel " + adminComposerDisplayLabel(state), callback_data: adminComposerCancelCallback(state) }]);
       } else if (state.status === "sending") {
         if (state.kind === "broadcast") {
           const counts = await broadcastRecipientCounts(e, state.draftId);
@@ -2019,6 +2193,7 @@ async function message(e: Env, m: Msg) {
       if (["approved","rejected","expired"].includes(String(contact.status))) return say(e, chat, "Request " + esc(code) + " is already " + esc(String(contact.status)) + ". No change made.");
       const changed = await e.DB.prepare("UPDATE contact_requests SET status='rejected',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status IN ('awaiting_email','pending_payment','awaiting_bank_reference','pending_manual_payment','payment_verified')").bind(contact.id).run();
       if (!changed.meta?.changes) return say(e, chat, "Request state changed before rejection. Refresh /orders; no success was reported.");
+      await deleteReceiptVerifyPrompt(e, user, { kind: "contact", id: String(contact.id) });
       await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'admin_request_rejected',?,?)").bind(user, contact.id, "Admin rejected request " + code).run();
       await sayBestEffort(e, contact.telegram_chat_id, "Your request " + code + " was rejected. If you think this is a mistake, reply here and I’ll help you.");
       return say(e, chat, "🚫 Request " + esc(code) + " rejected and customer notified.");
@@ -2028,6 +2203,7 @@ async function message(e: Env, m: Msg) {
     if (["fulfilled","cancelled"].includes(String(service.status))) return say(e, chat, "Service order " + esc(code) + " is already " + esc(String(service.status)) + ". No change made.");
     const changed = await e.DB.prepare("UPDATE service_orders SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status IN ('awaiting_request','awaiting_email','pending_payment','payment_verified','payment_review')").bind(service.id).run();
     if (!changed.meta?.changes) return say(e, chat, "Service order state changed before cancellation. Refresh /orders; no success was reported.");
+    await deleteReceiptVerifyPrompt(e, user, { kind: "service", id: String(service.id) });
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'admin_service_order_cancelled',?,?)").bind(user, service.id, "Admin cancelled service order " + code).run();
     await sayBestEffort(e, service.telegram_chat_id, "Your service order " + code + " was cancelled. Reply here if you need help.");
     return say(e, chat, "🚫 Service order " + esc(code) + " cancelled and customer notified.");
@@ -2070,11 +2246,11 @@ async function message(e: Env, m: Msg) {
       "/verifyservice ORDER_UUID SELAR_REFERENCE — manually verify a service payment after checking it in Selar",
       "/deliver ORDER_CODE_OR_UUID [fulfilment text] — open a service fulfilment draft; then add/replace text and/or one photo, video, or document before preview and explicit confirmation",
       "/message ORDER_CODE_OR_UUID [text] — open a customer support draft; add text and/or one photo, video, or document, then preview and explicitly send or cancel",
-      "/broadcast [text] — open an all-client broadcast draft for every unique saved profile/service order chat; preview and confirm before batched, ledger-tracked sending",
+      "/broadcast [text] — open an all-client broadcast draft for every unique saved profile/service order chat; a media caption is saved as its text, then preview and confirm before batched, ledger-tracked sending",
       "/hideprofile PROFILE_ID — preview reversibly hiding a website profile (legacy alias: /deleteprofile)",
       "/restoreprofile PROFILE_ID — remove a reversible hidden-profile override",
       "/expirepending — preview the exact unpaid orders that would close, then confirm",
-      "/reject FL-ABC123 — reject/cancel one selected order and notify its customer",
+      "/reject FL-ABC123 — reject/cancel one selected order and notify its customer; on a forwarded receipt, Reject instead opens a follow-up text/media composer and rejects only when you send it",
       "",
       "Clients do not receive a creator list in this bot; profiles stay on the website. There is no stored creator contact to share. After manually verifying payment, use Prepare delivery to send the customer your chosen message, media, or other fulfilment here.",
       "Only one editable admin composer can be open across request delivery, service fulfilment, customer support, and broadcast. Ordinary text/media edits only that composer; YES never becomes delivery text and never sends request/service fulfilment.",
@@ -2088,35 +2264,12 @@ async function message(e: Env, m: Msg) {
     // it never approves a profile request or sends request fulfilment by itself.
     const isService = t.startsWith("/verifyservice ");
     const parts = t.split(/\s+/);
-    const oid = parts[1] || "", reference = parts[2] || "";
-    if (parts.length !== 3 || !/^[0-9a-f-]{36}$/i.test(oid) || !reference || reference.length > 200 || /[\s<>]/.test(reference)) {
+    if (parts.length !== 3) {
       return say(e, chat, isService
         ? "Usage: /verifyservice ORDER_UUID SELAR_REFERENCE — first check the payment in Selar, then paste its exact reference."
         : "Usage: /verify REQUEST_UUID SELAR_REFERENCE — first check the payment in Selar, then paste its exact reference.");
     }
-    const table = isService ? "service_orders" : "contact_requests";
-    const row = await e.DB.prepare(`SELECT id,telegram_chat_id,status,payment_reference,buyer_email,${isService ? "service_id" : "profile_id"} AS target_id FROM ${table} WHERE id=?`).bind(oid).first<any>();
-    if (!row) return say(e, chat, "Order not found. Nothing was changed.");
-    if (row.status === "payment_verified" && row.payment_reference === reference) return say(e, chat, "Already verified with that reference. No change made.");
-    if (row.status !== "pending_payment") return say(e, chat, `Cannot verify: order status is ${esc(String(row.status))}. Only pending_payment orders can be verified. Nothing was changed.`);
-    if (row.payment_reference && row.payment_reference !== reference) return say(e, chat, "A different sale reference is already attached to this order. Resolve the mismatch in Selar first. Nothing was changed.");
-    const usedSale = await e.DB.prepare("SELECT request_id FROM processed_sales WHERE provider_reference=?").bind(reference).first<any>();
-    if (usedSale && usedSale.request_id !== oid) return say(e, chat, "That reference is already recorded for a different order. Nothing was changed.");
-    const usedContact = await e.DB.prepare("SELECT id FROM contact_requests WHERE payment_reference=? AND id<>?").bind(reference, oid).first<any>();
-    const usedService = await e.DB.prepare("SELECT id FROM service_orders WHERE payment_reference=? AND id<>?").bind(reference, oid).first<any>();
-    if (usedContact || usedService) return say(e, chat, "That reference is already attached to a different order. Nothing was changed.");
-    const productId = isService ? (e.SERVICE_PRODUCT_ID || "") : (e.SELAR_PRODUCT_ID || "");
-    if (!productId) return say(e, chat, "The Selar product code is not configured for this flow. Nothing was changed.");
-    const upd = await e.DB.prepare(`UPDATE ${table} SET status='payment_verified',payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'`).bind(reference, oid).run();
-    if (!upd.meta?.changes) return say(e, chat, "Order status changed while verifying. No change made.");
-    await e.DB.prepare("INSERT OR IGNORE INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id) VALUES(?,?,?,?,?,?)").bind(reference, row.buyer_email || "", 0, "UNK", productId, oid).run();
-    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,?,?,?,?)").bind(user, isService ? "service_payment_admin_verified_manual_reference" : "selar_payment_admin_verified_manual_reference", oid, row.target_id || null, `Admin manually verified after checking Selar directly; reference ${reference}`).run();
-    if (isService) {
-      await sayBestEffort(e, row.telegram_chat_id, "The admin has manually confirmed your payment. Your service order is awaiting fulfilment.");
-      return say(e, chat, "Payment manually verified for service order <code>" + esc(oid) + "</code>. Use /deliver " + esc(oid) + " your service details when ready.");
-    }
-    await sayBestEffort(e, row.telegram_chat_id, "Your payment has been confirmed. I will send your requested fulfilment here once it is ready.");
-    return say(e, chat, "Payment manually verified for profile request <code>" + esc(oid) + "</code>. Prepare your delivery message/media and explicitly confirm sending when ready.", { inline_keyboard: [[{ text: "📝 Prepare delivery", callback_data: "approve:" + oid }, { text: "Reject", callback_data: "reject:" + oid }]] });
+    return manuallyVerifyOrderByReference(e, user, chat, isService, parts[1] || "", parts[2] || "");
   }
 
   if (user === e.ADMIN_TELEGRAM_ID && t.startsWith("/")) return say(e, chat, "I don't recognise that admin command. Open /admin for the button menu or /help for the available commands.");
@@ -2273,6 +2426,15 @@ function adminInspectionValue(value: unknown, fallback = "not recorded"): string
 
 function adminOrderInspectionKeyboard(order: CustomerOrder) {
   const rows: Record<string, unknown>[][] = [];
+  if (order.status === "pending_payment" && !order.payment_reference) {
+    rows.push([
+      { text: "✅ Verify", callback_data: receiptReviewCallback("verify", order) },
+      { text: "🚫 Reject", callback_data: receiptReviewCallback("reject", order) }
+    ]);
+  }
+  if (order.status === "pending_payment" && order.payment_reference) {
+    rows.push([{ text: "🚫 Reject & message client", callback_data: receiptReviewCallback("reject", order) }]);
+  }
   if (order.kind === "contact" && order.status === "pending_payment" && order.payment_reference) {
     rows.push([{ text: "✅ I checked Selar — confirm payment", callback_data: "selarverify:" + order.id }]);
   }
@@ -2315,8 +2477,8 @@ async function formatAdminOrderInspection(e: Env, order: CustomerOrder): Promise
       ? "<b>" + esc(String(draft.status)) + "</b> · text " + (String(draft.message_text || "").trim() ? "yes" : "no") + " · media " + (draft.media_file_id ? esc(String(draft.media_mime_type || draft.media_kind || "attached")) : "none") + " · updated " + esc(String(draft.updated_at || "unknown"))
       : "none"));
   }
-  const supportDraft = await e.DB.prepare("SELECT status,message_text,media_file_id,media_mime_type,media_kind,expires_at,updated_at FROM admin_message_drafts WHERE order_id=? AND order_kind=? ORDER BY updated_at DESC LIMIT 1").bind(order.id, order.kind).first<any>();
-  draftLines.push("Latest customer-support draft: " + (supportDraft
+  const supportDraft = await e.DB.prepare("SELECT status,purpose,message_text,media_file_id,media_mime_type,media_kind,expires_at,updated_at FROM admin_message_drafts WHERE order_id=? AND order_kind=? ORDER BY updated_at DESC LIMIT 1").bind(order.id, order.kind).first<any>();
+  draftLines.push((supportDraft?.purpose === "rejection" ? "Latest rejection follow-up draft: " : "Latest customer-support draft: ") + (supportDraft
     ? "<b>" + esc(String(supportDraft.status)) + "</b> · text " + (String(supportDraft.message_text || "").trim() ? "yes" : "no") + " · media " + (supportDraft.media_file_id ? esc(String(supportDraft.media_mime_type || supportDraft.media_kind || "attached")) : "none") + " · updated " + esc(String(supportDraft.updated_at || "unknown"))
     : "none"));
 
@@ -2556,10 +2718,12 @@ async function finalizeBroadcastIfComplete(e: Env, draft: AdminBroadcastDraft, n
 }
 
 async function sendBroadcastToRecipient(e: Env, draft: AdminBroadcastDraft, recipient: string): Promise<void> {
-  const body = String(draft.message_text || "");
-  if (draft.media_file_id && draft.media_kind === "photo") await tg(e, "sendPhoto", { chat_id: recipient, photo: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
-  else if (draft.media_file_id && draft.media_kind === "document" && /^video\//i.test(draft.media_mime_type || "")) await tg(e, "sendVideo", { chat_id: recipient, video: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
-  else if (draft.media_file_id && draft.media_kind === "document") await tg(e, "sendDocument", { chat_id: recipient, document: draft.media_file_id, ...(body ? { caption: body.slice(0, 900) } : {}) });
+  const body = String(draft.message_text || "").trim();
+  const caption = body ? { caption: body.slice(0, 900) } : {};
+  if (draft.media_file_id && draft.media_kind === "photo") await tg(e, "sendPhoto", { chat_id: recipient, photo: draft.media_file_id, ...caption });
+  else if (draft.media_file_id && draft.media_kind === "document" && /^video\//i.test(draft.media_mime_type || "")) await tg(e, "sendVideo", { chat_id: recipient, video: draft.media_file_id, ...caption });
+  else if (draft.media_file_id && draft.media_kind === "document") await tg(e, "sendDocument", { chat_id: recipient, document: draft.media_file_id, ...caption });
+  else if (draft.media_file_id) throw new Error("broadcast_media_kind_unsupported");
   else await say(e, recipient, esc(body));
 }
 
@@ -2670,43 +2834,66 @@ async function executeSupportDraft(e: Env, actor: string, chat: string | number,
   const context = await loadAdminMessageDraftContext(e, draftId);
   if (!context || String(context.draft.admin_telegram_id) !== actor) { await say(e, chat, "Support draft not found for this admin."); return false; }
   const draft = context.draft, order = context.order;
+  const purpose = adminMessagePurpose(draft);
   if (await expireAdminMessageDraftIfNeeded(e, draft)) { await say(e, chat, "Support draft expired. Nothing was sent."); return false; }
   if (draft.status !== "draft") { await say(e, chat, inactiveDraftMessage(draft.status, "This customer-support draft")); return false; }
   if (!order || String(order.telegram_user_id) !== String(draft.telegram_user_id) || String(order.telegram_chat_id) !== String(draft.telegram_chat_id)) { await say(e, chat, "The selected order or customer destination changed. Nothing was sent."); return false; }
-  const problem = adminMessageSendProblem(draft);
+  if (purpose === "rejection" && order.status !== "pending_payment") { await say(e, chat, "This order is no longer pending payment, so the rejection follow-up was not sent and its status was not changed by this draft. Inspect the order before taking another action."); return false; }
+  const problem = adminMessageSendProblem(draft, order);
   if (problem) { await say(e, chat, problem); return false; }
   const orderTable = draft.order_kind === "contact" ? "contact_requests" : "service_orders";
-  const claimed = await e.DB.prepare("UPDATE admin_message_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=? AND message_text IS ? AND media_kind IS ? AND media_file_id IS ? AND media_mime_type IS ? AND EXISTS(SELECT 1 FROM " + orderTable + " o WHERE o.id=admin_message_drafts.order_id AND o.telegram_user_id=admin_message_drafts.telegram_user_id AND o.telegram_chat_id=admin_message_drafts.telegram_chat_id)")
-    .bind(draftId, actor, draft.message_text || null, draft.media_kind || null, draft.media_file_id || null, draft.media_mime_type || null).run();
+  const rejectionStatusGuard = purpose === "rejection" ? " AND o.status='pending_payment'" : "";
+  const claimed = await e.DB.prepare("UPDATE admin_message_drafts SET status='sending',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=? AND purpose=? AND message_text IS ? AND media_kind IS ? AND media_file_id IS ? AND media_mime_type IS ? AND EXISTS(SELECT 1 FROM " + orderTable + " o WHERE o.id=admin_message_drafts.order_id AND o.telegram_user_id=admin_message_drafts.telegram_user_id AND o.telegram_chat_id=admin_message_drafts.telegram_chat_id" + rejectionStatusGuard + ")")
+    .bind(draftId, actor, purpose, draft.message_text || null, draft.media_kind || null, draft.media_file_id || null, draft.media_mime_type || null).run();
   if (!claimed.meta?.changes) {
     const current = await loadAdminMessageDraft(e, draftId);
     await say(e, chat, current && current.status !== "draft"
       ? inactiveDraftMessage(current.status, "This customer-support draft")
-      : "Support draft content or destination changed before sending. Nothing was sent; preview the current draft again.");
+      : purpose === "rejection"
+        ? "The rejection draft, destination, or still-pending order status changed before sending. Nothing was sent and the order was not rejected by this tap; preview or inspect it again."
+        : "Support draft content or destination changed before sending. Nothing was sent; preview the current draft again.");
     return false;
   }
-  const body = adminMessageBody(draft);
+  if (purpose === "rejection") {
+    const nextStatus = draft.order_kind === "contact" ? "rejected" : "cancelled";
+    const rejected = await e.DB.prepare("UPDATE " + orderTable + " SET status=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment' AND telegram_user_id=? AND telegram_chat_id=?")
+      .bind(nextStatus, draft.order_id, draft.telegram_user_id, draft.telegram_chat_id)
+      .run();
+    if (!rejected.meta?.changes) {
+      await say(e, chat, "⚠️ The order changed after this rejection draft was claimed, so the follow-up was not sent. The draft is locked to prevent a blind retry; inspect the order and customer conversation before recovery.");
+      return false;
+    }
+    await deleteReceiptVerifyPrompt(e, actor, order);
+    await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,?,?,?,?)")
+      .bind(actor, "admin_receipt_rejected", draft.order_id, draft.order_kind === "contact" ? (order.target_id || null) : null, "Admin rejected " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + " from receipt review; follow-up draft " + draft.id + "; " + adminMessageContentDetails(draft))
+      .run();
+  }
+  const body = adminMessageOutgoingBody(draft, order);
   try {
     if (draft.media_file_id && draft.media_kind === "photo") await tg(e, "sendPhoto", { chat_id: draft.telegram_chat_id, photo: draft.media_file_id, ...(body ? { caption: adminMessageCaption(body), parse_mode: "HTML" } : {}) });
     else if (draft.media_file_id && draft.media_kind === "document" && /^video\//i.test(draft.media_mime_type || "")) await tg(e, "sendVideo", { chat_id: draft.telegram_chat_id, video: draft.media_file_id, ...(body ? { caption: adminMessageCaption(body), parse_mode: "HTML" } : {}) });
     else if (draft.media_file_id && draft.media_kind === "document") await tg(e, "sendDocument", { chat_id: draft.telegram_chat_id, document: draft.media_file_id, ...(body ? { caption: adminMessageCaption(body), parse_mode: "HTML" } : {}) });
     else await say(e, draft.telegram_chat_id, ADMIN_MESSAGE_HEADER + "\n\n" + esc(body));
   } catch {
-    try { await auditAdminMessageDraft(e, actor, "admin_support_message_uncertain", draft, order, "Telegram support-message outcome uncertain for " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + "; draft locked as sending; " + adminMessageContentDetails(draft)); } catch {}
-    try { await notifyAdminIfConfigured(e, "⚠️ Customer support message outcome is uncertain for " + draft.order_kind + " order <code>" + esc(String(order.checkout_code || draft.checkout_code || draft.order_id)) + "</code>. The draft remains locked to prevent duplicates. Inspect the customer conversation before any retry."); } catch {}
-    await say(e, chat, "⚠️ Message outcome uncertain. The draft is locked to prevent duplicate sends; inspect the customer conversation before retrying.");
+    try { await auditAdminMessageDraft(e, actor, purpose === "rejection" ? "admin_rejection_message_uncertain" : "admin_support_message_uncertain", draft, order, "Telegram " + (purpose === "rejection" ? "rejection follow-up" : "support-message") + " outcome uncertain for " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + "; draft locked as sending; " + adminMessageContentDetails(draft)); } catch {}
+    try { await notifyAdminIfConfigured(e, "⚠️ " + (purpose === "rejection" ? "Rejection follow-up" : "Customer support message") + " outcome is uncertain for " + draft.order_kind + " order <code>" + esc(String(order.checkout_code || draft.checkout_code || draft.order_id)) + "</code>. The draft remains locked to prevent duplicates. Inspect the customer conversation before any retry."); } catch {}
+    await say(e, chat, purpose === "rejection"
+      ? "⚠️ The order was rejected, but the follow-up message outcome is uncertain. The draft is locked to prevent duplicate sends; inspect the customer conversation before retrying."
+      : "⚠️ Message outcome uncertain. The draft is locked to prevent duplicate sends; inspect the customer conversation before retrying.");
     return false;
   }
   const sent = await e.DB.prepare("UPDATE admin_message_drafts SET status='sent',media_kind=NULL,media_file_id=NULL,media_mime_type=NULL,delivered_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='sending'").bind(draftId).run();
-  await auditAdminMessageDraft(e, actor, "admin_message_customer", draft, order, "Admin sent customer support message for " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + "; " + adminMessageContentDetails(draft));
+  await auditAdminMessageDraft(e, actor, purpose === "rejection" ? "admin_rejection_message_customer" : "admin_message_customer", draft, order, "Admin sent " + (purpose === "rejection" ? "receipt-rejection follow-up" : "customer support message") + " for " + draft.order_kind + " order " + String(order.checkout_code || draft.checkout_code || draft.order_id) + "; " + adminMessageContentDetails(draft));
   if (!sent.meta?.changes) await notifyAdminIfConfigured(e, "A customer support message was sent for <code>" + esc(String(order.checkout_code || draft.order_id)) + "</code>, but the draft status changed concurrently. Inspect the audit before any retry.");
-  await say(e, chat, "✅ Support message sent for order <code>" + esc(String(order.checkout_code || order.id)) + "</code>.");
+  await say(e, chat, purpose === "rejection"
+    ? "🚫 Order <code>" + esc(String(order.checkout_code || order.id)) + "</code> rejected and your follow-up was sent to the client."
+    : "✅ Support message sent for order <code>" + esc(String(order.checkout_code || order.id)) + "</code>.");
   return true;
 }
 
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
-  const isAdminCallback = /^(?:admin-action:|profiledelete:|broadcast:|draft:|service-delivery:|support-message:|admin:|approve:|reject:|selarverify:|serviceverify:)/.test(data);
+  const isAdminCallback = /^(?:admin-action:|profiledelete:|receipt:|broadcast:|draft:|service-delivery:|support-message:|admin:|approve:|reject:|selarverify:|serviceverify:)/.test(data);
   if (data === "services:view") {
     if (!u.message) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Please open the bot chat to view services." });
     await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Here are the services 💋" });
@@ -2767,6 +2954,80 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     });
     return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Review the current confirmation. Nothing changed yet." });
   }
+  if (data.startsWith("receipt:")) {
+    if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin private chat only." });
+    const match = data.match(/^receipt:(verify|reject|cancel):([cs]):([0-9a-f-]{36})$/i);
+    if (!match) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Invalid receipt-review action." });
+    const action = match[1].toLowerCase();
+    const kind: OrderKind = match[2].toLowerCase() === "c" ? "contact" : "service";
+    const order = await loadCustomerOrderByKind(e, kind, match[3].toLowerCase());
+    if (!order) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "That order could not be found." });
+
+    if (action === "cancel") {
+      const deleted = await deleteReceiptVerifyPrompt(e, actor, order);
+      await say(e, chat, deleted ? "Receipt verification cancelled. The order was not changed." : "That receipt-verification prompt is no longer active. The order was not changed.");
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Verification prompt closed." });
+    }
+
+    if (order.status !== "pending_payment") {
+      await deleteReceiptVerifyPrompt(e, actor, order);
+      await say(e, chat, "This receipt review is closed because the order is now <b>" + esc(order.status) + "</b>. No payment or rejection change was made by this tap.", {
+        inline_keyboard: [[{ text: "🔎 Inspect order", callback_data: order.kind === "contact" ? "admin:request:" + order.id : "admin:service:" + order.id }]]
+      });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "This order is no longer pending payment." });
+    }
+
+    if (action === "reject") {
+      const existingPrompt = await activeReceiptVerifyPrompt(e, actor);
+      if (existingPrompt && (existingPrompt.order_id !== order.id || existingPrompt.order_kind !== order.kind)) {
+        await say(e, chat, "A receipt-verification prompt is already open for another order (<code>" + esc(existingPrompt.order_id) + "</code>). Send that exact reference or <b>cancel</b> before opening this rejection composer. Nothing was changed.");
+        return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Another verification prompt is open." });
+      }
+      await deleteReceiptVerifyPrompt(e, actor, order);
+      await createOrReopenAdminMessageDraft(e, { chat: { id: Number(chat) }, from: { id: Number(actor) } }, order.id, "", undefined, "rejection");
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Rejection follow-up checked. The order is not rejected yet." });
+    }
+
+    const attachedReference = await attachedSaleReference(e, order);
+    if (attachedReference && String(order.payment_reference || "") === attachedReference) {
+      await deleteReceiptVerifyPrompt(e, actor, order);
+      await say(e, chat, "🧾 <b>Verify receipt payment</b>\nOrder: <code>" + esc(String(order.checkout_code || order.id)) + "</code>\nAttached Selar reference: <code>" + esc(attachedReference) + "</code>\n\nCheck that exact sale in Selar first. The receipt screenshot and backend record do not verify payment by themselves. Tap the confirmation button only after your manual Selar check.", {
+        inline_keyboard: [
+          [{ text: "✅ I checked Selar — verify payment", callback_data: (order.kind === "contact" ? "selarverify:" : "serviceverify:") + order.id }],
+          [{ text: "🚫 Reject & message client", callback_data: receiptReviewCallback("reject", order) }],
+          [{ text: "🔎 Inspect order", callback_data: order.kind === "contact" ? "admin:request:" + order.id : "admin:service:" + order.id }]
+        ]
+      });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Check Selar, then confirm verification." });
+    }
+
+    const existingPrompt = await activeReceiptVerifyPrompt(e, actor);
+    if (existingPrompt && (existingPrompt.order_id !== order.id || existingPrompt.order_kind !== order.kind)) {
+      await say(e, chat, "A receipt-verification prompt is already open for another order (<code>" + esc(existingPrompt.order_id) + "</code>). Send that exact reference or <b>cancel</b> before opening another prompt. Nothing was verified.");
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Another verification prompt is open." });
+    }
+    const pendingAction = await e.DB.prepare("SELECT id FROM admin_pending_actions WHERE admin_telegram_id=? AND status='pending' AND datetime(expires_at) > datetime('now') LIMIT 1").bind(actor).first<any>();
+    if (pendingAction) {
+      await say(e, chat, "Finish or cancel the current Admin Desk confirmation before opening receipt verification. Nothing was verified.");
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Another admin confirmation is pending." });
+    }
+    const composers = await listEditableAdminComposers(e, actor);
+    if (composers.length) {
+      await replyAdminComposerConflict(e, chat, composers, "opening receipt verification");
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Finish the open composer first." });
+    }
+    await e.DB.prepare("INSERT INTO admin_receipt_verify_prompts(admin_telegram_id,order_id,order_kind,expires_at) VALUES(?,?,?,datetime('now','+10 minutes')) ON CONFLICT(admin_telegram_id) DO UPDATE SET order_id=excluded.order_id,order_kind=excluded.order_kind,expires_at=excluded.expires_at,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')")
+      .bind(actor, order.id, order.kind)
+      .run();
+    await say(e, chat, "🧾 <b>Verify receipt payment</b>\nOrder: <code>" + esc(String(order.checkout_code || order.id)) + "</code>\n" + (attachedReference ? "Backend sale clue: <code>" + esc(attachedReference) + "</code>\n" : "No backend Selar sale reference is attached yet.\n") + "\nCheck the payment in Selar, then send the <b>exact Selar reference only</b> as your next typed message. I will run the same duplicate/reuse checks as /verify. The screenshot and this button alone have <b>not</b> verified payment. This prompt expires in 10 minutes.", {
+      inline_keyboard: [
+        [{ text: "✖️ Cancel verification", callback_data: receiptReviewCallback("cancel", order) }],
+        [{ text: "🚫 Reject & message client", callback_data: receiptReviewCallback("reject", order) }],
+        [{ text: "🔎 Inspect order", callback_data: order.kind === "contact" ? "admin:request:" + order.id : "admin:service:" + order.id }]
+      ]
+    });
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Send the exact Selar reference after checking Selar." });
+  }
   if (data.startsWith("broadcast:")) {
     if (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin private chat only." });
     const match = data.match(/^broadcast:(preview|send|cancel|continue|stop):([0-9a-f-]{36})$/i);
@@ -2803,7 +3064,16 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     }
     const recipientTotal = await broadcastAudienceCount(e, actor);
     if (action === "preview") {
-      await say(e, chat, "👀 <b>Broadcast preview</b>\nRecipients: " + recipientTotal + " unique saved client chats from all profile requests and service orders (your admin chat is excluded).\nDelivery: batches of " + BROADCAST_BATCH_SIZE + " with a saved per-client ledger; no client is sent this broadcast twice.\nMessage: " + (draft.message_text ? esc(draft.message_text) : "—") + "\nMedia: " + (draft.media_kind ? esc(draft.media_mime_type || draft.media_kind) : "none") + "\n\nNo messages sent.", { inline_keyboard: [[{ text: "✅ Confirm and send", callback_data: "broadcast:send:" + id }], [{ text: "✖️ Cancel", callback_data: "broadcast:cancel:" + id }]] });
+      let mediaPreviewNote = "";
+      if (draft.media_file_id) {
+        try {
+          await sendBroadcastToRecipient(e, draft, String(chat));
+          mediaPreviewNote = "\nThe media and caption immediately above are the exact client preview. It was sent only to you.";
+        } catch {
+          mediaPreviewNote = "\n⚠️ Telegram could not preview the attached media. Check or replace it before sending.";
+        }
+      }
+      await say(e, chat, "👀 <b>Broadcast preview</b>\nRecipients: " + recipientTotal + " unique saved client chats from all profile requests and service orders (your admin chat is excluded).\nDelivery: batches of " + BROADCAST_BATCH_SIZE + " with a saved per-client ledger; no client is sent this broadcast twice.\nMessage: " + (draft.message_text ? esc(draft.message_text) : "—") + "\nMedia: " + (draft.media_kind ? esc(draft.media_mime_type || draft.media_kind) : "none") + mediaPreviewNote + "\n\nNo client messages sent.", { inline_keyboard: [[{ text: "✅ Confirm and send", callback_data: "broadcast:send:" + id }], [{ text: "✖️ Cancel", callback_data: "broadcast:cancel:" + id }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Preview only." });
     }
     await executeBroadcast(e, actor, chat, draft);
@@ -2928,6 +3198,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support draft not found for this admin." });
     }
     const draft = context.draft, order = context.order;
+    const purpose = adminMessagePurpose(draft);
 
     if (await expireAdminMessageDraftIfNeeded(e, draft)) {
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support draft expired. Nothing was sent." });
@@ -2937,9 +3208,9 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       if (draft.status !== "draft") return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: inactiveDraftMessage(draft.status, "This customer-support draft") });
       const cancelled = await e.DB.prepare("UPDATE admin_message_drafts SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(draftId, actor).run();
       if (!cancelled.meta?.changes) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support draft state changed; nothing was sent." });
-      await auditAdminMessageDraft(e, actor, "admin_support_draft_cancelled", draft, order, "Admin cancelled unsent customer support draft for " + draft.order_kind + " order " + String(order?.checkout_code || draft.checkout_code || draft.order_id) + "; " + adminMessageContentDetails(draft));
-      await say(e, chat, "✖️ Customer support draft cancelled. Nothing was sent.");
-      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support draft cancelled." });
+      await auditAdminMessageDraft(e, actor, purpose === "rejection" ? "admin_rejection_draft_cancelled" : "admin_support_draft_cancelled", draft, order, "Admin cancelled unsent " + (purpose === "rejection" ? "rejection follow-up" : "customer support") + " draft for " + draft.order_kind + " order " + String(order?.checkout_code || draft.checkout_code || draft.order_id) + "; " + adminMessageContentDetails(draft));
+      await say(e, chat, purpose === "rejection" ? "✖️ Rejection follow-up cancelled. Nothing was sent and the order was not rejected." : "✖️ Customer support draft cancelled. Nothing was sent.");
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: purpose === "rejection" ? "Rejection draft cancelled; order unchanged." : "Support draft cancelled." });
     }
 
     if (draft.status !== "draft") {
@@ -2950,12 +3221,12 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     }
 
     if (action === "preview") {
-      await sendAdminMessageDraftSummary(e, chat, draft, order, { heading: "👀 <b>Customer support preview</b>", includeMediaPreview: true });
-      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Preview only — nothing has been sent." });
+      await sendAdminMessageDraftSummary(e, chat, draft, order, { heading: purpose === "rejection" ? "👀 <b>Rejection follow-up preview</b>" : "👀 <b>Customer support preview</b>", includeMediaPreview: true });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: purpose === "rejection" ? "Preview only — order not rejected yet." : "Preview only — nothing has been sent." });
     }
 
     await executeSupportDraft(e, actor, chat, draftId);
-    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Support send action processed." });
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: purpose === "rejection" ? "Rejection send action processed." : "Support send action processed." });
   }
   if (data.startsWith("done:") || data.startsWith("paid:")) {
     if (!u.message || String(u.message.chat.id) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Open the bot chat to continue." });
@@ -3032,8 +3303,8 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       const lines = ["📝 <b>Admin drafts (" + states.length + ")</b>"];
       const buttons: Record<string, unknown>[][] = [];
       for (const state of states) {
-        lines.push("", "• <b>" + esc(adminComposerLabel(state.kind)) + "</b> — <b>" + esc(state.status) + "</b> · <code>" + esc(String(state.checkoutCode || state.orderId || "broadcast audience")) + "</code>", "  Draft ID: <code>" + esc(state.draftId) + "</code> · updated " + esc(String(state.updatedAt || "unknown")) + " UTC");
-        if (state.status === "draft" && buttons.length < 8) buttons.push([{ text: "✖️ Cancel " + adminComposerLabel(state.kind), callback_data: adminComposerCancelCallback(state) }]);
+        lines.push("", "• <b>" + esc(adminComposerDisplayLabel(state)) + "</b> — <b>" + esc(state.status) + "</b> · <code>" + esc(String(state.checkoutCode || state.orderId || "broadcast audience")) + "</code>", "  Draft ID: <code>" + esc(state.draftId) + "</code> · updated " + esc(String(state.updatedAt || "unknown")) + " UTC");
+        if (state.status === "draft" && buttons.length < 8) buttons.push([{ text: "✖️ Cancel " + adminComposerDisplayLabel(state), callback_data: adminComposerCancelCallback(state) }]);
         if (state.status === "sending") {
           if (state.kind === "broadcast") {
             const counts = await broadcastRecipientCounts(e, state.draftId);
@@ -3056,7 +3327,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     }
     if (action === "broadcast_help") {
       const recipientTotal = await broadcastAudienceCount(e, actor);
-      await say(e, chat, "<b>Broadcast to all clients</b>\nCurrent audience: <b>" + recipientTotal + "</b> unique saved client chats from all profile requests and service orders. Your admin chat is excluded.\n\nStart with:\n<code>/broadcast Your message here</code>\n\nYou can then replace the text or attach one photo, video, or PDF/image document. Nothing is sent while composing. Tap <b>Preview audience and content</b>, then <b>Confirm and send</b>.\n\nAt confirmation, the audience is snapshotted into a per-client delivery ledger and sent in batches of " + BROADCAST_BATCH_SIZE + ". Remaining batches continue automatically; /drafts also lets you continue or stop the remaining clients. Completed clients will not receive duplicates.\n\nFor one customer only, open their order and tap <b>Message this customer</b>, or use <code>/message FL-ABC123 Your message</code>.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
+      await say(e, chat, "<b>Broadcast to all clients</b>\nCurrent audience: <b>" + recipientTotal + "</b> unique saved client chats from all profile requests and service orders. Your admin chat is excluded.\n\nStart with:\n<code>/broadcast Your message here</code>\n\nYou can then replace the text or attach one photo, video, or PDF/image document. To send text and media together, either put the text in that media's Telegram caption after opening the draft, or send the media with caption <code>/broadcast Your message here</code>. The saved text travels as the media caption. Nothing is sent while composing. Tap <b>Preview audience and content</b> to see the exact media/caption, then <b>Confirm and send</b>.\n\nAt confirmation, the audience is snapshotted into a per-client delivery ledger and sent in batches of " + BROADCAST_BATCH_SIZE + ". Remaining batches continue automatically; /drafts also lets you continue or stop the remaining clients. Completed clients will not receive duplicates.\n\nFor one customer only, open their order and tap <b>Message this customer</b>, or use <code>/message FL-ABC123 Your message</code>.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Broadcast instructions opened." });
     }
     if (action === "message_help") {
@@ -3112,6 +3383,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     if (!service || service.status !== "pending_payment" || service.payment_method !== "selar" || !service.payment_reference) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "No service payment notification is attached." });
     const updateRes = await e.DB.prepare("UPDATE service_orders SET status='payment_verified',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(id).run();
     if (!updateRes.meta?.changes) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Service payment was already verified." });
+    await deleteReceiptVerifyPrompt(e, actor, { kind: "service", id });
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,details) VALUES(?,'service_payment_admin_verified',?,?)").bind(actor, id, `Admin manually confirmed Selar payment; reference ${service.payment_reference}`).run();
     await sayBestEffort(e, service.telegram_chat_id, "The admin has manually confirmed your payment. Your service order is awaiting fulfilment.");
     await say(e, e.ADMIN_TELEGRAM_ID, "Payment manually confirmed for service order <code>" + esc(String(service.checkout_code || id)) + "</code>. Use /deliver " + esc(String(service.checkout_code || id)) + " to open the fulfilment composer when ready, or inspect it with /order " + esc(String(service.checkout_code || id)) + ".", { inline_keyboard: [[{ text: "📝 Prepare service fulfilment", callback_data: "admin:service-deliver:" + id }], [{ text: "🔎 Inspect service order", callback_data: "admin:service:" + id }]] });
@@ -3125,6 +3397,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     if (!paid || paid.payment_method !== "selar" || !paid.payment_reference) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "No Selar sale notification is attached. Check Selar logs and match manually." });
     const updateRes = await e.DB.prepare("UPDATE contact_requests SET status='payment_verified',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment' AND payment_method='selar'").bind(id).run();
     if (!updateRes.meta?.changes) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Payment was already verified." });
+    await deleteReceiptVerifyPrompt(e, actor, { kind: "contact", id });
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,'selar_payment_admin_verified',?,?,?)").bind(actor, id, r.profile_id, `Admin reviewed webhook-backed Selar payment before approving; reference ${paid.payment_reference}`).run();
     await sayBestEffort(e, r.telegram_chat_id, "Your payment notification has been received and checked. I will send your request here once it is ready.");
     await say(e, e.ADMIN_TELEGRAM_ID, "Selar payment verified by admin for <code>" + id + "</code>. Next, prepare your delivery message/media for this exact customer and explicitly confirm sending.", { inline_keyboard: [[{ text: "🔓 Prepare delivery", callback_data: "approve:" + id }, { text: "Reject", callback_data: "reject:" + id }]] });
@@ -3134,6 +3407,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     if (!["pending_payment", "payment_verified"].includes(r.status)) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request is no longer pending." });
     const updateRes = await e.DB.prepare("UPDATE contact_requests SET status='rejected',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status IN('pending_payment','payment_verified')").bind(id).run();
     if (!updateRes.meta?.changes) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Request status already changed." });
+    await deleteReceiptVerifyPrompt(e, actor, { kind: "contact", id });
     await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id) VALUES(?,'reject_request',?,?)").bind(actor, id, r.profile_id).run();
     await say(e, r.telegram_chat_id, "Your request was rejected. If you paid, contact support about a refund; refunds must be handled through the payment provider or your bank.");
     return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Rejected." });

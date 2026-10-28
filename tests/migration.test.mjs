@@ -23,7 +23,7 @@ test('Migration: fresh database migrates to fully verified schema', () => {
   const result = applyAllMigrations(db);
 
   assert.equal(result.ok, true);
-  assert.equal(result.verifiedTables.length, 16);
+  assert.equal(result.verifiedTables.length, 17);
 
   const applied = getAppliedMigrations(db);
   assert.deepEqual(applied, [
@@ -45,7 +45,8 @@ test('Migration: fresh database migrates to fully verified schema', () => {
     '0016_admin_draft_recovery_actions',
     '0017_limit_unverified_service_orders',
     '0018_clear_delivered_media_references',
-    '0019_admin_broadcast_recipients'
+    '0019_admin_broadcast_recipients',
+    '0020_receipt_review_actions'
   ]);
 
   const verified = verifySchema(db);
@@ -159,6 +160,54 @@ test('Migration 0019: broadcast recipient ledger prevents duplicate queued clien
   insertRecipient();
   assert.equal(db.prepare("SELECT status FROM admin_broadcast_recipients WHERE broadcast_id='broadcast-1' AND telegram_chat_id='8102'").get().status, 'pending');
   assert.throws(insertRecipient, /UNIQUE constraint failed/i);
+});
+
+test('Migration 0020: receipt prompts are single-admin state and rejection drafts keep a constrained purpose', () => {
+  const db = new DatabaseSync(':memory:');
+  applyAllMigrations(db);
+
+  assert.ok(getTableColumns(db, 'admin_message_drafts').includes('purpose'));
+  assert.deepEqual(
+    getTableColumns(db, 'admin_receipt_verify_prompts'),
+    ['admin_telegram_id', 'order_id', 'order_kind', 'expires_at', 'created_at', 'updated_at']
+  );
+
+  db.prepare(`
+    INSERT INTO admin_message_drafts
+      (id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,status,expires_at)
+    VALUES (?,?,?,?,?,?,?,?,?)
+  `).run('purpose-default', 'order-purpose-default', 'contact', '10001', '7202', '7202', 'FL-PURP01', 'draft', '2999-01-01 00:00:00');
+  assert.equal(db.prepare("SELECT purpose FROM admin_message_drafts WHERE id='purpose-default'").get().purpose, 'support');
+
+  db.prepare("UPDATE admin_message_drafts SET status='cancelled' WHERE id='purpose-default'").run();
+  db.prepare(`
+    INSERT INTO admin_message_drafts
+      (id,order_id,order_kind,admin_telegram_id,telegram_user_id,telegram_chat_id,checkout_code,purpose,status,expires_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)
+  `).run('purpose-rejection', 'order-purpose-rejection', 'service', '10001', '7203', '7203', 'FL-PURP02', 'rejection', 'draft', '2999-01-01 00:00:00');
+  assert.equal(db.prepare("SELECT purpose FROM admin_message_drafts WHERE id='purpose-rejection'").get().purpose, 'rejection');
+
+  assert.throws(
+    () => db.prepare("UPDATE admin_message_drafts SET purpose='unknown' WHERE id='purpose-rejection'").run(),
+    /CHECK constraint failed/i
+  );
+
+  db.prepare(`
+    INSERT INTO admin_receipt_verify_prompts(admin_telegram_id,order_id,order_kind,expires_at)
+    VALUES ('10001','order-purpose-rejection','service','2999-01-01 00:00:00')
+  `).run();
+  assert.throws(
+    () => db.prepare(`
+      INSERT INTO admin_receipt_verify_prompts(admin_telegram_id,order_id,order_kind,expires_at)
+      VALUES ('10001','order-other','contact','2999-01-01 00:00:00')
+    `).run(),
+    /UNIQUE constraint failed/i,
+    'Only one receipt-verification prompt may be active for the admin'
+  );
+  assert.throws(
+    () => db.prepare("UPDATE admin_receipt_verify_prompts SET order_kind='other' WHERE admin_telegram_id='10001'").run(),
+    /CHECK constraint failed/i
+  );
 });
 
 test('Migration 0010: only one editable general support draft is allowed per admin', () => {
@@ -318,7 +367,7 @@ function completeRemoteSchemaSnapshot() {
 test('Remote migration verifier: accepts all required tables, columns, and unique indexes', () => {
   const result = verifyRemoteSchema(completeRemoteSchemaSnapshot());
   assert.equal(result.ok, true);
-  assert.equal(result.verifiedTables.length, 16);
+  assert.equal(result.verifiedTables.length, 17);
 });
 
 test('Remote migration verifier: fails when a required column is missing', () => {

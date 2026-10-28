@@ -31,6 +31,7 @@ function createTestDb() {
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0017_limit_unverified_service_orders.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0018_clear_delivered_media_references.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0019_admin_broadcast_recipients.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0020_receipt_review_actions.sql'), 'utf8'));
 
   return {
     raw: db,
@@ -1346,7 +1347,12 @@ test('Missing sale prompts for a Selar receipt photo, forwards it once, and neve
     assert.ok(caption.includes(order.id));
     assert.ok(caption.includes(order.checkout_code));
     assert.ok(caption.includes('Buyer Receipt'));
-    assert.ok(caption.includes(`/verify ${order.id} EXACT_SELAR_REFERENCE`));
+    assert.ok(caption.includes('<b>Verify</b> asks for the exact reference'));
+    assert.ok(caption.includes('<b>Reject</b> opens a follow-up message/media composer'));
+    assert.ok(!caption.includes(`/verify ${order.id} EXACT_SELAR_REFERENCE`), 'Receipt review should use buttons instead of only showing a verify command');
+    const receiptButtons = ((forwards[0].data.reply_markup as any)?.inline_keyboard || []).flat();
+    assert.ok(receiptButtons.some((button: any) => button.text === '✅ Verify' && button.callback_data === `receipt:verify:c:${order.id}`));
+    assert.ok(receiptButtons.some((button: any) => button.text === '🚫 Reject' && button.callback_data === `receipt:reject:c:${order.id}`));
     assert.ok(caption.includes('has NOT changed the order status'));
     assert.ok(!caption.includes('private caption must not be copied'), 'Customer captions must not be copied into the admin receipt context');
 
@@ -1390,7 +1396,10 @@ test('Service receipt fallback rejects unsupported documents and forwards a PDF 
     assert.equal(forwards.length, 1);
     assert.equal(String(forwards[0].data.chat_id), env.ADMIN_TELEGRAM_ID);
     assert.equal(forwards[0].data.document, 'document-file-8202');
-    assert.ok(String(forwards[0].data.caption || '').includes(`/verifyservice ${orderId} EXACT_SELAR_REFERENCE`));
+    assert.ok(!String(forwards[0].data.caption || '').includes(`/verifyservice ${orderId} EXACT_SELAR_REFERENCE`));
+    const serviceReceiptButtons = ((forwards[0].data.reply_markup as any)?.inline_keyboard || []).flat();
+    assert.ok(serviceReceiptButtons.some((button: any) => button.text === '✅ Verify' && button.callback_data === `receipt:verify:s:${orderId}`));
+    assert.ok(serviceReceiptButtons.some((button: any) => button.text === '🚫 Reject' && button.callback_data === `receipt:reject:s:${orderId}`));
 
     const saved = db.raw.prepare('SELECT status,payment_reference FROM service_orders WHERE id=?').get(orderId) as any;
     assert.equal(saved.status, 'pending_payment');
@@ -1429,6 +1438,119 @@ test('Receipt delivery failure is recorded and the same submission can be retrie
     assert.equal(sentTelegramMessages.filter(m => m.method === 'sendPhoto').length, 2, 'One failed attempt and one successful retry are expected');
     assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM receipt_review_prompts WHERE telegram_user_id='5213'").get().cnt, 0);
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(orderId) as any).status, 'pending_payment');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Receipt Verify button requires the exact Selar reference and reuses manual verification safeguards', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const contactId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests
+      (id,telegram_user_id,telegram_chat_id,profile_id,status,payment_method,checkout_code,checkout_name)
+      VALUES (?, '5221', '5221', 'anaimiya', 'pending_payment', 'selar', 'FL-RBUT01', 'Button Buyer')`).run(contactId);
+
+    await tgPost(env, callbackFrom(9999, `receipt:verify:c:${contactId}`, 'cb-receipt-nonadmin'));
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM admin_receipt_verify_prompts').get().cnt, 0, 'A non-admin cannot open receipt verification');
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(contactId) as any).status, 'pending_payment');
+
+    await tgPost(env, callbackFrom(10001, `receipt:verify:c:${contactId}`, 'cb-receipt-verify'));
+    const prompt = db.raw.prepare('SELECT * FROM admin_receipt_verify_prompts WHERE order_id=?').get(contactId) as any;
+    assert.ok(prompt, 'Verify button must open an exact-reference prompt when no sale is attached');
+    assert.equal(prompt.order_kind, 'contact');
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(contactId) as any).status, 'pending_payment', 'Tapping Verify must not itself verify payment');
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM processed_sales').get().cnt, 0);
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('screenshot and this button alone have <b>not</b> verified payment')));
+
+    await tgPost(env, adminMsg('two words'));
+    assert.ok(db.raw.prepare('SELECT * FROM admin_receipt_verify_prompts WHERE order_id=?').get(contactId), 'An invalid multi-word reply must keep the prompt open');
+    assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(contactId) as any).status, 'pending_payment');
+
+    await tgPost(env, adminMsg('SELAR-RECEIPT-REF-1'));
+    const savedContact = db.raw.prepare('SELECT status,payment_reference FROM contact_requests WHERE id=?').get(contactId) as any;
+    assert.equal(savedContact.status, 'payment_verified');
+    assert.equal(savedContact.payment_reference, 'SELAR-RECEIPT-REF-1');
+    assert.equal((db.raw.prepare("SELECT request_id FROM processed_sales WHERE provider_reference='SELAR-RECEIPT-REF-1'").get() as any).request_id, contactId);
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM admin_receipt_verify_prompts').get().cnt, 0, 'A consumed verification prompt must be deleted');
+    assert.ok(messagesTo(sentTelegramMessages, '5221').some(m => String(m.data.text).includes('Your payment has been confirmed')));
+
+    const serviceId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO service_orders
+      (id,service_id,telegram_user_id,telegram_chat_id,status,payment_method,checkout_code,checkout_name)
+      VALUES (?, 'telegram_channel', '5222', '5222', 'pending_payment', 'selar', 'FL-RBUT02', 'Cancel Buyer')`).run(serviceId);
+    await tgPost(env, callbackFrom(10001, `receipt:verify:s:${serviceId}`, 'cb-receipt-service-verify'));
+    assert.ok(db.raw.prepare('SELECT * FROM admin_receipt_verify_prompts WHERE order_id=?').get(serviceId));
+    await tgPost(env, callbackFrom(10001, `receipt:cancel:s:${serviceId}`, 'cb-receipt-service-cancel'));
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM admin_receipt_verify_prompts').get().cnt, 0);
+    assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceId) as any).status, 'pending_payment', 'Cancelling receipt verification must leave the service order unchanged');
+
+    const composerContactId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO contact_requests
+      (id,telegram_user_id,telegram_chat_id,profile_id,status,payment_method,checkout_code,checkout_name)
+      VALUES (?, '5223', '5223', 'rosebeck', 'pending_payment', 'selar', 'FL-RBUT03', 'Composer Buyer')`).run(composerContactId);
+    await tgPost(env, callbackFrom(10001, `receipt:verify:c:${composerContactId}`, 'cb-receipt-composer-verify'));
+    assert.ok(db.raw.prepare('SELECT * FROM admin_receipt_verify_prompts WHERE order_id=?').get(composerContactId));
+    await tgPost(env, adminMsg('/message FL-RBUT03 First support note'));
+    await tgPost(env, adminMsg('Updated support note'));
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM admin_receipt_verify_prompts').get().cnt, 0, 'Opening another composer must cancel the dormant receipt prompt instead of letting it capture draft text');
+    assert.equal((db.raw.prepare('SELECT status,payment_reference FROM contact_requests WHERE id=?').get(composerContactId) as any).status, 'pending_payment');
+    assert.equal((db.raw.prepare('SELECT status,payment_reference FROM contact_requests WHERE id=?').get(composerContactId) as any).payment_reference, null);
+    assert.equal(latestSupportDraft(db, composerContactId).message_text, 'Updated support note');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Receipt Reject button opens a follow-up composer and rejects only on its explicit send', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO service_orders
+      (id,service_id,telegram_user_id,telegram_chat_id,status,payment_method,checkout_code,checkout_name)
+      VALUES (?, 'telegram_channel', '5231', '5231', 'pending_payment', 'selar', 'FL-RREJ01', 'Reject Buyer')`).run(orderId);
+
+    await tgPost(env, callbackFrom(10001, `receipt:reject:s:${orderId}`, 'cb-receipt-reject'));
+    const draft = latestSupportDraft(db, orderId);
+    assert.ok(draft, 'Reject must open a client follow-up composer');
+    assert.equal(draft.purpose, 'rejection');
+    assert.equal(draft.status, 'draft');
+    assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(orderId) as any).status, 'pending_payment', 'Opening the rejection composer must not reject the order yet');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '5231').length, 0);
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('not rejected yet')));
+
+    await tgPost(env, supportPhotoPayload(8401, 'Please send a clearer Selar payment receipt if you completed checkout.'));
+    const updatedDraft = latestSupportDraft(db, orderId);
+    assert.equal(updatedDraft.message_text, 'Please send a clearer Selar payment receipt if you completed checkout.');
+    assert.equal(updatedDraft.media_file_id, 'photo-file-large');
+    assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(orderId) as any).status, 'pending_payment');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '5231').length, 0, 'Composing the rejection follow-up must not message the client');
+
+    await tgPost(env, callbackFrom(10001, `support-message:preview:${draft.id}`, 'cb-rejection-preview'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '5231').length, 0, 'Preview must not message the client or reject the order');
+    assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(orderId) as any).status, 'pending_payment');
+
+    await tgPost(env, adminMsg('yes'));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '5231').length, 0, 'YES must not send a rejection follow-up');
+    assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(orderId) as any).status, 'pending_payment');
+    assert.equal((db.raw.prepare('SELECT status FROM admin_message_drafts WHERE id=?').get(draft.id) as any).status, 'draft');
+
+    await tgPost(env, callbackFrom(10001, `support-message:send:${draft.id}`, 'cb-rejection-send'));
+    assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(orderId) as any).status, 'cancelled');
+    const sentDraft = db.raw.prepare('SELECT status,media_file_id FROM admin_message_drafts WHERE id=?').get(draft.id) as any;
+    assert.equal(sentDraft.status, 'sent');
+    assert.equal(sentDraft.media_file_id, null);
+    const customerCalls = customerTelegramCalls(sentTelegramMessages, '5231');
+    assert.equal(customerCalls.length, 1, 'The client must receive exactly one rejection follow-up');
+    assert.equal(customerCalls[0].method, 'sendPhoto');
+    assert.equal(customerCalls[0].data.photo, 'photo-file-large');
+    const caption = String(customerCalls[0].data.caption || '');
+    assert.ok(caption.includes('Your order FL-RREJ01 was rejected after payment review.'));
+    assert.ok(caption.includes('Please send a clearer Selar payment receipt'));
+    assert.ok(db.raw.prepare("SELECT id FROM admin_audit WHERE action='admin_receipt_rejected' AND request_id=?").get(orderId));
+    assert.ok(db.raw.prepare("SELECT id FROM admin_audit WHERE action='admin_rejection_message_customer' AND request_id=?").get(orderId));
   } finally {
     cleanup();
   }
@@ -1958,6 +2080,74 @@ test('Stale in-flight broadcast recipient becomes uncertain and is never blind-r
     assert.equal(db.raw.prepare("SELECT status FROM admin_broadcast_recipients WHERE broadcast_id=? AND telegram_chat_id='9202'").get(draftId).status, 'sent');
     assert.equal(customerTelegramCalls(sentTelegramMessages, '9202').length, 1);
     assert.equal(db.raw.prepare("SELECT status FROM admin_broadcast_drafts WHERE id=?").get(draftId).status, 'partial');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Broadcast media caption is saved, previewed exactly, and delivered with the media', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const insertContact = db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,?,?,?,?,?)");
+    insertContact.run(crypto.randomUUID(), '8241', '8241', 'anaimiya', 'pending_payment', 'FL-BMED01');
+    insertContact.run(crypto.randomUUID(), '8242', '8242', 'rosebeck', 'rejected', 'FL-BMED02');
+
+    await tgPost(env, adminMsg('/broadcast'));
+    await tgPost(env, supportPhotoPayload(8501, 'Weekend broadcast caption'));
+    const draft = db.raw.prepare("SELECT * FROM admin_broadcast_drafts WHERE admin_telegram_id='10001'").get() as any;
+    assert.ok(draft);
+    assert.equal(draft.message_text, 'Weekend broadcast caption', 'The Telegram media caption must be saved as broadcast text');
+    assert.equal(draft.media_kind, 'photo');
+    assert.equal(draft.media_file_id, 'photo-file-large');
+    assert.ok(messagesTo(sentTelegramMessages, '10001').some(m => String(m.data.text).includes('media caption was saved as the broadcast text')));
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8241').length, 0);
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8242').length, 0);
+
+    await tgPost(env, callbackFrom(10001, `broadcast:preview:${draft.id}`, 'cb-broadcast-media-preview'));
+    const adminPreview = sentTelegramMessages.find(m => m.method === 'sendPhoto' && String(m.data.chat_id) === '10001');
+    assert.ok(adminPreview, 'Broadcast preview must show the admin the actual media');
+    assert.equal(adminPreview.data.photo, 'photo-file-large');
+    assert.equal(adminPreview.data.caption, 'Weekend broadcast caption', 'Broadcast preview must use the exact saved caption');
+    assert.equal(db.raw.prepare('SELECT count(*) AS cnt FROM admin_broadcast_recipients WHERE broadcast_id=?').get(draft.id).cnt, 0, 'Preview must not create the recipient ledger');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8241').length, 0, 'Preview must not send to clients');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8242').length, 0, 'Preview must not send to clients');
+
+    await tgPost(env, callbackFrom(10001, `broadcast:send:${draft.id}`, 'cb-broadcast-media-send'));
+    assert.equal((db.raw.prepare('SELECT status FROM admin_broadcast_drafts WHERE id=?').get(draft.id) as any).status, 'sent');
+    for (const recipient of ['8241', '8242']) {
+      const calls = customerTelegramCalls(sentTelegramMessages, recipient);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].method, 'sendPhoto');
+      assert.equal(calls[0].data.photo, 'photo-file-large');
+      assert.equal(calls[0].data.caption, 'Weekend broadcast caption', 'Text and media must be delivered together');
+    }
+    assert.equal(db.raw.prepare("SELECT count(*) AS cnt FROM admin_broadcast_recipients WHERE broadcast_id=? AND status='sent'").get(draft.id).cnt, 2);
+  } finally {
+    cleanup();
+  }
+});
+
+test('A media message captioned /broadcast creates one draft with both media and text', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    db.raw.prepare("INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,checkout_code) VALUES(?,?,?,?,?,?)")
+      .run(crypto.randomUUID(), '8251', '8251', 'anaimiya', 'pending_payment', 'FL-BMED03');
+
+    await tgPost(env, supportPhotoPayload(8502, '/broadcast One-step broadcast text'));
+    const draft = db.raw.prepare("SELECT * FROM admin_broadcast_drafts WHERE admin_telegram_id='10001'").get() as any;
+    assert.ok(draft, 'Captioned /broadcast media must create a broadcast draft');
+    assert.equal(draft.message_text, 'One-step broadcast text');
+    assert.equal(draft.media_kind, 'photo');
+    assert.equal(draft.media_file_id, 'photo-file-large');
+    assert.equal(customerTelegramCalls(sentTelegramMessages, '8251').length, 0, 'Creating the draft must not send it');
+
+    await tgPost(env, callbackFrom(10001, `broadcast:send:${draft.id}`, 'cb-broadcast-one-step-send'));
+    const calls = customerTelegramCalls(sentTelegramMessages, '8251');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].method, 'sendPhoto');
+    assert.equal(calls[0].data.caption, 'One-step broadcast text');
   } finally {
     cleanup();
   }

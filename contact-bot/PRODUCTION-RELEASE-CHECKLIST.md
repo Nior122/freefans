@@ -144,3 +144,14 @@ Do not check these from automated tests alone. Record the PR/merge SHA, manual d
 - [ ] Only when the owner has a genuine intended broadcast, confirmation snapshots recipients into the ledger, sends in batches of 25, reports sent/failed/uncertain/cancelled/remaining counts, and never sends the same broadcast twice to a completed client. Do not send a test broadcast to real clients solely for smoke testing.
 - [ ] `/drafts` Continue/Stop controls work on an in-progress ledger-backed broadcast; stopping cancels only pending recipients and scheduled processing does not later send them.
 - [ ] An owner-controlled individual order can be messaged from **Message this customer** or `/message ORDER_CODE_OR_UUID`, with preview and explicit send exactly once and no order/payment status change.
+
+## 11. Receipt-review buttons and combined broadcast media gates
+
+Do not check these from automated tests alone. Record the PR/merge SHA, manual deployment run, and observed `schema_migrations` entry for `0020_receipt_review_actions` before calling these fixes live.
+
+- [ ] The deployment workflow applied migration `0020_receipt_review_actions`; D1 contains `admin_receipt_verify_prompts`, and `admin_message_drafts.purpose` accepts only `support` or `rejection`.
+- [ ] On an owner-controlled unpaid order with no attached sale, a non-sensitive test receipt is forwarded once with **Verify**, **Reject**, and **Inspect order** buttons and the order remains `pending_payment`.
+- [ ] Tapping **Verify** alone does not verify. With no attached sale, it asks for the exact Selar reference; a wrong/reused reference changes nothing, while the correct manually checked reference verifies once and records the existing audit/`processed_sales` safeguards.
+- [ ] On a separate owner-controlled unpaid order, tapping **Reject** opens the follow-up composer without changing status or messaging the client. Preview/cancel also leaves it pending; only **Reject & send follow-up** rejects/cancels it and sends exactly one composed text/media follow-up.
+- [ ] In a broadcast draft, sending supported media with a Telegram caption saves that caption as the broadcast text; Preview shows the admin the exact media and caption and sends nothing to clients.
+- [ ] A media message captioned `/broadcast Your message` creates one draft containing both the media and text. Do not send a test broadcast to real clients solely for smoke testing; verify actual combined delivery only with a genuine owner-intended broadcast or an isolated owner-controlled audience available without altering production data.
