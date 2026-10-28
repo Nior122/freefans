@@ -23,7 +23,7 @@ test('Migration: fresh database migrates to fully verified schema', () => {
   const result = applyAllMigrations(db);
 
   assert.equal(result.ok, true);
-  assert.equal(result.verifiedTables.length, 15);
+  assert.equal(result.verifiedTables.length, 16);
 
   const applied = getAppliedMigrations(db);
   assert.deepEqual(applied, [
@@ -44,7 +44,8 @@ test('Migration: fresh database migrates to fully verified schema', () => {
     '0015_service_delivery_draft_media',
     '0016_admin_draft_recovery_actions',
     '0017_limit_unverified_service_orders',
-    '0018_clear_delivered_media_references'
+    '0018_clear_delivered_media_references',
+    '0019_admin_broadcast_recipients'
   ]);
 
   const verified = verifySchema(db);
@@ -140,6 +141,24 @@ test('Migration 0017: service customers can have up to three unverified orders, 
     () => db.prepare("INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status) VALUES ('svc-4','telegram_channel','7003','7003','pending_payment')").run(),
     /max_three_unverified_service_orders/i
   );
+});
+
+test('Migration 0019: broadcast recipient ledger prevents duplicate queued clients', () => {
+  const db = new DatabaseSync(':memory:');
+  applyAllMigrations(db);
+
+  const columns = getTableColumns(db, 'admin_broadcast_recipients');
+  assert.ok(columns.includes('broadcast_id'));
+  assert.ok(columns.includes('telegram_chat_id'));
+  assert.ok(columns.includes('attempted_at'));
+  assert.ok(columns.includes('completed_at'));
+
+  const insertRecipient = () => db.prepare(
+    "INSERT INTO admin_broadcast_recipients(broadcast_id, telegram_chat_id) VALUES ('broadcast-1','8102')"
+  ).run();
+  insertRecipient();
+  assert.equal(db.prepare("SELECT status FROM admin_broadcast_recipients WHERE broadcast_id='broadcast-1' AND telegram_chat_id='8102'").get().status, 'pending');
+  assert.throws(insertRecipient, /UNIQUE constraint failed/i);
 });
 
 test('Migration 0010: only one editable general support draft is allowed per admin', () => {
@@ -299,7 +318,7 @@ function completeRemoteSchemaSnapshot() {
 test('Remote migration verifier: accepts all required tables, columns, and unique indexes', () => {
   const result = verifyRemoteSchema(completeRemoteSchemaSnapshot());
   assert.equal(result.ok, true);
-  assert.equal(result.verifiedTables.length, 15);
+  assert.equal(result.verifiedTables.length, 16);
 });
 
 test('Remote migration verifier: fails when a required column is missing', () => {

@@ -133,3 +133,14 @@ Do not check these from the automated suite alone. Record the Release 2 PR/merge
 - [x] Re-tapping stale Send buttons reports **already sent**, **already cancelled**, or **expired** as appropriate and never duplicates a customer message (tested live: re-tapping send button displayed "already sent" popup).
 - [x] `/profiles hidden`, `/profiles all SEARCH`, and `/profile PROFILE_ID` agree with the live source catalogue and D1 override state; reversible hide/restore works and a hidden profile's direct website URL redirects home after a successful visibility check. This is not represented as physical source deletion (tested live with `anaimiya`: `/hideprofile anaimiya` updated D1 and endpoint to `["anaimiya"]`; `/restoreprofile anaimiya` restored visibility and cleared endpoint to `[]`).
 - [ ] On a synthetic stale `sending` draft only, `/drafts` shows the lock and `/recoverdraft …` requires a separate inspected-not-delivered confirmation, cancels only that draft, creates an audit row, changes no order/payment status, and sends nothing. *(Automated regression test passing in `tests/contact-bot.test.ts`; live test not executed to prevent manufacturing artificial uncertain Telegram network failure in production).*
+
+## 10. All-client broadcast and individual messaging gates
+
+Do not check these from automated tests alone. Record the PR/merge SHA, manual deployment run, and observed `schema_migrations` entry for `0019_admin_broadcast_recipients` before calling the feature live.
+
+- [ ] The deployment workflow applied migration `0019_admin_broadcast_recipients`, and D1 contains `admin_broadcast_recipients` with the composite `(broadcast_id, telegram_chat_id)` primary key.
+- [ ] Admin Desk shows **Broadcast to all clients**; its audience count equals the number of unique non-admin `telegram_chat_id` values across saved profile requests and service orders.
+- [ ] A broadcast preview shows the same all-client count and sends nothing; cancelling the preview leaves the draft `cancelled` with no recipient sends.
+- [ ] Only when the owner has a genuine intended broadcast, confirmation snapshots recipients into the ledger, sends in batches of 25, reports sent/failed/uncertain/cancelled/remaining counts, and never sends the same broadcast twice to a completed client. Do not send a test broadcast to real clients solely for smoke testing.
+- [ ] `/drafts` Continue/Stop controls work on an in-progress ledger-backed broadcast; stopping cancels only pending recipients and scheduled processing does not later send them.
+- [ ] An owner-controlled individual order can be messaged from **Message this customer** or `/message ORDER_CODE_OR_UUID`, with preview and explicit send exactly once and no order/payment status change.
