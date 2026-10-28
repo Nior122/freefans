@@ -3153,7 +3153,7 @@ async function expireOldPendingOrders(e: Env) {
 }
 
 export default {
-  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+  async scheduled(_controller: unknown, env: Env): Promise<void> {
     await expireOldPendingOrders(env);
   },
   async fetch(request: Request, env: Env): Promise<Response> {
