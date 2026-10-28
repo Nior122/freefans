@@ -1199,13 +1199,13 @@ async function start(e: Env, m: Msg, payload: string) {
     }
   }
   if (!inserted) return say(e, chat, "I couldn't start your request just now. Please try again in a moment.");
-  const intro = `Hi! I’m Girl for ${esc(profile.name)}. I’ve started your request and created your unique order code: <code>${esc(code)}</code>.`;
+  const intro = `Hi! I’m Annie for ${esc(profile.name)}. I’ve started your request and created your unique order code: <code>${esc(code)}</code>.`;
   const instructions = `Tap the Pay now button below to open the checkout. In the customer name field, enter your full name followed by this code exactly, for example: <code>John Doe ${esc(code)}</code>. This lets me match your payment to the correct request. An email address cannot match or verify payment. After verification, I will send you your requests here.`;
   return say(e, chat, `${intro}\n\n${instructions}`, paymentKeyboard(e, requestId));
 }
 
 async function aiReply(e: Env, chat: string, userText: string, reminder = "", voiceReply = false) {
-  if (!e.AI) return say(e, chat, reminder || "👋 I'm Girl. I can help with your requests, billing, payment checks, and next steps. What can I help you with?");
+  if (!e.AI) return say(e, chat, reminder || "👋 I'm Annie. I can help with your requests, billing, payment checks, and next steps. What can I help you with?");
   try {
     // Supply read-only context from this customer's own request history. The
     // model cannot execute SQL/admin actions; payment checks are deterministic.
@@ -1220,7 +1220,7 @@ async function aiReply(e: Env, chat: string, userText: string, reminder = "", vo
     } catch { /* allow a conversation even if history is unavailable */ }
     const result = await e.AI.run(e.AI_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
       messages: [
-        { role: "system", content: "You are Girl, a warm, natural, helpful assistant for the requests and services available through this chat. Your main job is to help customers understand their requests, service orders, checkout, billing, and payment status. Do not introduce yourself as an AI or use a business brand name; if a name is needed, say “I'm Girl.” Never mention the payment provider by name. Use simple customer wording such as “Pay now,” “checkout,” “payment page,” and “service checkout.” Keep payment discussions about services and requests offered through this chat. In this bot context, words like “pay,” “account,” “Telegram account,” “checkout,” or “pay now” should refer to the customer's current request or service order unless they clearly say otherwise. Do not suggest paying Telegram, an external account, a creator, or a third-party seller. If the intended in-chat service is genuinely unclear, ask one short clarification. Use the read-only context about this Telegram user's own requests and service orders to answer questions about their specific order; name the relevant FL code and explain the next step when useful. For an existing profile/request order, tell the customer to use its Pay now button. For a service order that is still being described, help them clarify the service; when they are ready to pay, tell them to type PAY to receive the service checkout. If they want another request, explain the three-unpaid-request limit only when their saved requests show they have reached it. Mention “I've paid — check again” only when payment checking is relevant. Never claim an administrator is reviewing a payment unless the saved state or attached sale reference supports that. Never promise an ETA. You cannot execute commands, SQL, payment verification, approval, or delivery; deterministic handlers perform permitted actions. Never claim payment received, verified, approved, or fulfilled unless the saved status says so. Never invent profile, payment, service, or creator information. Never reveal or invent a creator's Telegram username, phone number, or private contact details. Never ask for passwords, card PINs, bank credentials, or OTPs. Refer to a “request” rather than “contact request” in customer-facing explanations. Keep replies concise, natural, and plain text." },
+        { role: "system", content: "You are Annie, a warm, natural, helpful assistant for the requests and services available through this chat. Your main job is to help customers understand their requests, service orders, checkout, billing, and payment status. Do not introduce yourself as an AI or use a business brand name; if a name is needed, say “I'm Annie.” Never mention the payment provider by name. Use simple customer wording such as “Pay now,” “checkout,” “payment page,” and “service checkout.” Keep payment discussions about services and requests offered through this chat. In this bot context, words like “pay,” “account,” “Telegram account,” “checkout,” or “pay now” should refer to the customer's current request or service order unless they clearly say otherwise. Do not suggest paying Telegram, an external account, a creator, or a third-party seller. If the intended in-chat service is genuinely unclear, ask one short clarification. Use the read-only context about this Telegram user's own requests and service orders to answer questions about their specific order; name the relevant FL code and explain the next step when useful. For an existing profile/request order, tell the customer to use its Pay now button. For a service order that is still being described, help them clarify the service; when they are ready to pay, tell them to type PAY to receive the service checkout. If they want another request, explain the three-unpaid-request limit only when their saved requests show they have reached it. Mention “I've paid — check again” only when payment checking is relevant. Never claim an administrator is reviewing a payment unless the saved state or attached sale reference supports that. Never promise an ETA. You cannot execute commands, SQL, payment verification, approval, or delivery; deterministic handlers perform permitted actions. Never claim payment received, verified, approved, or fulfilled unless the saved status says so. Never invent profile, payment, service, or creator information. Never reveal or invent a creator's Telegram username, phone number, or private contact details. Never ask for passwords, card PINs, bank credentials, or OTPs. Refer to a “request” rather than “contact request” in customer-facing explanations. Keep replies concise, natural, and plain text." },
         { role: "user", content: `Customer message: ${userText.slice(0, 1500)}\\nRead-only request history: ${history.slice(0, 3500)}` }
       ]
     });
@@ -1232,7 +1232,55 @@ async function aiReply(e: Env, chat: string, userText: string, reminder = "", vo
   }
 }
 
+async function startChannelSubscription(e: Env, m: Msg) {
+  const chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
+  if (!e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || provider(e) !== "selar") {
+    await say(e, chat, "The channel subscription checkout is not available right now. Please try again shortly.");
+    await notifyAdminIfConfigured(e, "Service setup required: the Telegram channel subscription needs the configured service checkout and product code.");
+    return;
+  }
+  const active = await e.DB.prepare("SELECT id,checkout_code,status,service_id FROM service_orders WHERE telegram_user_id=? AND status IN('awaiting_request','awaiting_email','pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
+  if (active) {
+    if (String(active.service_id) !== "telegram_channel" || String(active.status) !== "pending_payment") {
+      return say(e, chat, "You already have a service order in progress. Please finish that order or contact support before starting another. 💬");
+    }
+    const checkout = new URL(e.SERVICE_CHECKOUT_URL);
+    checkout.searchParams.set("add_to_cart", "1");
+    return say(e, chat, "💋 Your subscription checkout is ready again. Use the same unique code so your payment can be matched correctly.\n\nOrder code: <code>" + esc(String(active.checkout_code || "")) + "</code>\n\nEnter your full name followed by this code in the checkout name field, for example <code>John Doe " + esc(String(active.checkout_code || "")) + "</code>. After checkout, return here and tap the payment-check button. Payment is not confirmed until it is checked.", {
+      inline_keyboard: [
+        [{ text: "💳 Pay now", url: checkout.toString() }],
+        [{ text: "✅ Done — checkout completed", callback_data: "done:" + active.id }],
+        [{ text: "🔎 I've paid — check again", callback_data: "paid:" + active.id }]
+      ]
+    });
+  }
+  let code = "";
+  try { code = await generateUniqueCheckoutCode(e.DB); }
+  catch {
+    await notifyAdminIfConfigured(e, "Alert: Checkout code generation exhausted retries for Telegram channel subscription.");
+    return say(e, chat, "I couldn't prepare your checkout just now. Please try again in a moment.");
+  }
+  const id = crypto.randomUUID();
+  try {
+    await e.DB.prepare("INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,telegram_username,status,payment_method,checkout_code,request_text) VALUES(?,?,?,?,?,'pending_payment','selar',?,?)")
+      .bind(id, "telegram_channel", user, chat, m.from?.username || "", code, "Telegram channel subscription from bot services menu").run();
+  } catch {
+    return say(e, chat, "I couldn't start your subscription just now. If you already have a service order, finish it first; otherwise, please try again shortly.");
+  }
+  const checkout = new URL(e.SERVICE_CHECKOUT_URL);
+  checkout.searchParams.set("add_to_cart", "1");
+  await notifyAdminIfConfigured(e, "<b>New channel subscription order</b>\nSource: Telegram bot → View our services → Subscribe button\nCheckout product: service checkout (<code>" + esc(e.SERVICE_PRODUCT_ID) + "</code>)\nOrder code: <code>" + esc(code) + "</code>\nOrder UUID: <code>" + esc(id) + "</code>\nPayment is not verified yet.");
+  return say(e, chat, "🔥 <b>You're one step away!</b>\n\nOpen the checkout below. In the checkout name field, enter your full name followed by this unique code exactly, for example: <code>John Doe " + esc(code) + "</code>. The code helps match your payment to this subscription.\n\nAfter checkout, come back here and tap “Done — checkout completed” or “I've paid — check again”. Your subscription is not confirmed until payment is checked. 💌", {
+    inline_keyboard: [
+      [{ text: "💳 Pay now", url: checkout.toString() }],
+      [{ text: "✅ Done — checkout completed", callback_data: "done:" + id }],
+      [{ text: "🔎 I've paid — check again", callback_data: "paid:" + id }]
+    ]
+  });
+}
+
 async function startService(e: Env, m: Msg, serviceId: string) {
+  if (serviceId === "telegram_channel") return startChannelSubscription(e, m);
   const chat = String(m.chat.id), user = String(m.from?.id ?? m.chat.id);
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(serviceId)) return say(e, chat, "Invalid service purchase link.");
   if (!e.SERVICE_CHECKOUT_URL || !e.SERVICE_PRODUCT_ID || provider(e) !== "selar") {
@@ -1263,7 +1311,7 @@ async function startService(e: Env, m: Msg, serviceId: string) {
     }
   }
   if (!inserted) return say(e, chat, "I couldn't start your service order just now. Please try again in a moment.");
-  return say(e, chat, "Hi! I’m Girl. Tell me what you need, and I’ll ask a few questions so I understand your request.\n\nOrder reference: <code>" + id + "</code>\n\nWhen you’re ready to pay, type PAY and I’ll send the checkout link.");
+  return say(e, chat, "Hi! I’m Annie. Tell me what you need, and I’ll ask a few questions so I understand your request.\n\nOrder reference: <code>" + id + "</code>\n\nWhen you’re ready to pay, type PAY and I’ll send the checkout link.");
 }
 
 async function message(e: Env, m: Msg) {
@@ -1539,7 +1587,7 @@ async function message(e: Env, m: Msg) {
     if (user === e.ADMIN_TELEGRAM_ID && chat === user) {
       return say(e, chat, "Welcome back. Open /admin for the Admin Desk or /profiles to view and search website profiles.");
     }
-    return say(e, chat, "Hi, I'm Girl! 👋\n\nI can help with your requests, service orders, checkout and payment checks, fulfilment updates, and support. Browse available profiles on our website.\n\n⚠️ <i>Never send passwords, PINs or OTPs here. Support will never ask for your private credentials.</i>");
+    return say(e, chat, "Hey you… 💋 I’m Annie. Welcome!\n\nLooking for something special? I can show you our model photo previews or help you get access to our Telegram channel. 😉\n\nTap below and take a look at what’s waiting for you. 🔥\n\n⚠️ <i>Never send passwords, PINs or OTPs here.</i>", { inline_keyboard: [[{ text: "👀 View our services 🔞", callback_data: "services:view" }]] });
   }
   if (t === "/creators" || /^\/profiles(?:\s|$)/i.test(t)) {
     if (user !== e.ADMIN_TELEGRAM_ID) {
@@ -1854,7 +1902,8 @@ async function message(e: Env, m: Msg) {
     let current = heading;
     for (const row of rows) {
       const code = String(row.checkout_code || row.id);
-      const line = "• <code>" + esc(code) + "</code> · " + esc(String(row.kind)) + " · " + esc(String(row.target || "unknown")) + " · <b>" + esc(String(row.status)) + "</b> · " + esc(String(row.created_at || "unknown")) + "\n  Inspect: <code>/order " + esc(code) + "</code>";
+      const source = String(row.kind) === "contact" ? "FansLeak website · model Subscribe" : String(row.target) === "telegram_channel" ? "Telegram bot · services Subscribe" : "Telegram bot · service chat";
+      const line = "• <code>" + esc(code) + "</code> · " + esc(String(row.kind)) + " · " + esc(String(row.target || "unknown")) + " · <b>" + esc(String(row.status)) + "</b>\n  Source: " + esc(source) + " · " + esc(String(row.created_at || "unknown")) + "\n  Inspect: <code>/order " + esc(code) + "</code>";
       if (current.length + line.length + 1 > 3500) {
         chunks.push(current);
         current = line;
@@ -2018,7 +2067,7 @@ async function message(e: Env, m: Msg) {
     try {
       const result = await e.AI.run(e.AI_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
         messages: [
-          { role: "system", content: "You are Girl, the warm, helpful assistant for the services available through this chat. Your job is to understand the customer's request and guide them through service details, checkout, billing, and payment. Do not introduce yourself as an AI or use a business brand name; if a name is needed, say “I'm Girl.” Never mention the payment provider by name; say “Pay now,” “checkout,” or “service checkout.” Keep all payment guidance about services offered through this chat, not payments to Telegram, external accounts, creators, or third-party sellers. In this bot context, words like “pay,” “account,” “Telegram account,” or “checkout” refer to the current in-chat service unless the customer clearly says otherwise. If genuinely unclear, ask one brief question about which available service they mean. Respond directly and naturally to what the customer said; do not invent extra services or claim a payment is verified. When the customer is ready to pay for the service order being discussed, guide them to type PAY to receive the service checkout link. Keep responses concise, warm, and helpful." },
+          { role: "system", content: "You are Annie, the warm, helpful assistant for the services available through this chat. Your job is to understand the customer's request and guide them through service details, checkout, billing, and payment. Do not introduce yourself as an AI or use a business brand name; if a name is needed, say “I'm Annie.” Never mention the payment provider by name; say “Pay now,” “checkout,” or “service checkout.” Keep all payment guidance about services offered through this chat, not payments to Telegram, external accounts, creators, or third-party sellers. In this bot context, words like “pay,” “account,” “Telegram account,” or “checkout” refer to the current in-chat service unless the customer clearly says otherwise. If genuinely unclear, ask one brief question about which available service they mean. Respond directly and naturally to what the customer said; do not invent extra services or claim a payment is verified. When the customer is ready to pay for the service order being discussed, guide them to type PAY to receive the service checkout link. Keep responses concise, warm, and helpful." },
           { role: "user", content: t.slice(0, 1500) }
         ]
       });
@@ -2182,6 +2231,7 @@ async function formatAdminOrderInspection(e: Env, order: CustomerOrder): Promise
     "Order code: <code>" + adminInspectionValue(order.checkout_code) + "</code>",
     "Order UUID: <code>" + esc(order.id) + "</code>",
     (order.kind === "contact" ? "Profile" : "Service") + ": <code>" + adminInspectionValue(order.target_id, "unknown") + "</code>",
+    "Source: " + (order.kind === "contact" ? "FansLeak website → model Subscribe button" : String(order.target_id) === "telegram_channel" ? "Telegram bot → View our services → Subscribe button" : "Telegram bot service chat"),
     "Status: <b>" + esc(order.status) + "</b>",
     "Telegram user: <code>" + esc(order.telegram_user_id) + "</code>" + (username ? " (@" + esc(username) + ")" : ""),
     "Telegram chat: <code>" + esc(order.telegram_chat_id) + "</code>",
@@ -2429,6 +2479,22 @@ async function executeSupportDraft(e: Env, actor: string, chat: string | number,
 async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
   const actor = String(u.from.id), data = u.data || "", chat = u.message?.chat.id;
   const isAdminCallback = /^(?:admin-action:|profiledelete:|broadcast:|draft:|service-delivery:|support-message:|admin:|approve:|reject:|selarverify:|serviceverify:)/.test(data);
+  if (data === "services:view") {
+    if (!u.message) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Please open the bot chat to view services." });
+    await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Here are the services 💋" });
+    const siteUrl = (e.SITE_URL || "https://fansleak.pages.dev").replace(/\/$/, "");
+    return say(e, u.message.chat.id, "💋 <b>Choose the experience you want</b>\n\n<b>1. 📸 FansLeak website — model photo previews</b>\nBrowse a selection of models and some of their pictures on our website. The website has photos only — no videos — so you can look through the available models first.\n\n<b>2. 🔥 Telegram channel — the full experience</b>\nWant the full package? Join our Telegram channel for the main updates and adult video content, including OnlyFans creators’ authorised content, consensual homemade amateur videos, and many more. Content should be shared with permission.\n\nChoose below to visit the photo gallery or start your channel subscription. ✨", {
+      inline_keyboard: [
+        [{ text: "📸 Visit the website ✨", url: siteUrl }],
+        [{ text: "🔥 Join now — Subscribe", callback_data: "services:join" }]
+      ]
+    });
+  }
+  if (data === "services:join") {
+    if (!u.message) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Please open the bot chat to subscribe." });
+    await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Preparing your secure checkout…" });
+    return startChannelSubscription(e, { chat: u.message.chat, from: u.from, text: "/start service_telegram_channel" });
+  }
   if (isAdminCallback && (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor)) {
     return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin private chat only." });
   }
@@ -2942,13 +3008,13 @@ async function selar(request: Request, e: Env) {
       const upd = await e.DB.prepare("UPDATE contact_requests SET payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment' AND payment_method='selar'").bind(s.reference, target.id).run();
       if (!upd.meta?.changes) throw new Error("order_state_changed_before_attach");
       const markup = { inline_keyboard: [[{ text: "✅ I checked Selar — confirm payment", callback_data: "selarverify:" + target.id }, { text: "Reject request", callback_data: "reject:" + target.id }]] };
-      await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nRequest: <code>${target.id}</code>\nProfile: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nOrder code: <code>${esc(effectiveCode)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}${clueNote}`, markup);
+      await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nSource: FansLeak website → model Subscribe button\nCheckout product: profile request (<code>${esc(e.SELAR_PRODUCT_ID || "")}</code>)\nRequest: <code>${target.id}</code>\nProfile: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nOrder code: <code>${esc(effectiveCode)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}${clueNote}`, markup);
       await sayBestEffort(e, target.telegram_chat_id, "A payment notification was received. Your request still needs payment verification before it can be approved.");
     } else {
       const upd = await e.DB.prepare("UPDATE service_orders SET payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(s.reference, target.id).run();
       if (!upd.meta?.changes) throw new Error("order_state_changed_before_attach");
       const markup = { inline_keyboard: [[{ text: "✅ I checked Selar — confirm service payment", callback_data: "serviceverify:" + target.id }]] };
-      await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nOrder: <code>${target.id}</code>\nService: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nOrder code: <code>${esc(effectiveCode)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}${clueNote}`, markup);
+      await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nSource: ${String(target.profile_id) === "telegram_channel" ? "Telegram bot → View our services → Subscribe button" : "Telegram bot service chat"}\nCheckout product: service checkout (<code>${esc(e.SERVICE_PRODUCT_ID || "")}</code>)\nOrder: <code>${target.id}</code>\nService: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nOrder code: <code>${esc(effectiveCode)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}${clueNote}`, markup);
     }
   } catch (err) {
     // Processing failed after the dedup marker was written: remove the marker so a

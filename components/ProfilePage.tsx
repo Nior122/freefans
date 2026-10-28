@@ -467,16 +467,16 @@ const ProfilePageContent = ({ profile }: { profile: Profile }) => {
 
         {/* Actions */}
         <div className="flex items-center gap-4 w-full max-w-sm justify-center mb-3">
-          <button
-            type="button"
-            disabled
-            aria-disabled="true"
-            aria-label={`Subscribe to ${profile.name} (currently unavailable)`}
-            title="Subscriptions are currently unavailable"
-            className="flex-1 cursor-not-allowed opacity-60 bg-red-700 text-white py-3 rounded-full font-bold text-base shadow-lg shadow-red-900/40 flex items-center justify-center"
+          <a
+            href={`https://t.me/${(import.meta.env.VITE_TELEGRAM_BOT_USERNAME || 'KasiQueenbot').replace(/^@/, '')}?start=contact_${profile.id.replace(/\./g, '_dot_')}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={`Subscribe to ${profile.name} on Telegram`}
+            title={`Continue with ${profile.name} on Telegram`}
+            className="flex-1 bg-red-700 hover:bg-red-600 text-white py-3 rounded-full font-bold text-base shadow-lg shadow-red-900/40 flex items-center justify-center transition-colors"
           >
             Subscribe
-          </button>
+          </a>
 
           <button
             onClick={handleFavorite}
