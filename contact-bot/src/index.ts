@@ -136,11 +136,16 @@ type AdminComposerRef = {
   purpose?: AdminMessagePurpose | null;
 };
 type DraftRecoveryPayload = { kind: AdminComposerKind; draftId: string; updatedAt: string };
-type AdminPendingAction = "hide_profile" | "close_pending_orders" | "recover_draft";
+type AdminPendingAction = "hide_profile" | "close_pending_orders" | "recover_draft" | "delete_order" | "delete_orders_bulk";
 const PENDING_CONTACT_STATUSES = ["awaiting_email", "pending_payment", "awaiting_bank_reference", "pending_manual_payment"] as const;
 const PENDING_SERVICE_STATUSES = ["awaiting_request", "awaiting_email", "pending_payment"] as const;
+const FINISHED_CONTACT_STATUSES = ["approved", "rejected", "expired"] as const;
+const FINISHED_SERVICE_STATUSES = ["fulfilled", "cancelled"] as const;
+type OrderDeletionScope = "pending" | "finished" | "all";
 type PendingOrderSnapshotItem = { id: string; status: string };
 type PendingOrderSnapshot = { contacts: PendingOrderSnapshotItem[]; services: PendingOrderSnapshotItem[] };
+type SingleOrderDeletionPayload = { kind: OrderKind; id: string; status: string; checkoutCode?: string | null };
+type BulkOrderDeletionPayload = { scope: OrderDeletionScope; contacts: PendingOrderSnapshotItem[]; services: PendingOrderSnapshotItem[] };
 function parsePendingOrderSnapshot(value: unknown): PendingOrderSnapshot | null {
   if (typeof value !== "string" || !value.trim()) return null;
   try {
@@ -178,11 +183,40 @@ function parseDraftRecoveryPayload(value: unknown): DraftRecoveryPayload | null 
     return null;
   }
 }
+function parseSingleOrderDeletionPayload(value: unknown): SingleOrderDeletionPayload | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  try {
+    const parsed = JSON.parse(value) as Partial<SingleOrderDeletionPayload>;
+    const kind = String(parsed.kind || "") as OrderKind;
+    const id = String(parsed.id || "");
+    const status = String(parsed.status || "");
+    const checkoutCode = parsed.checkoutCode === null || parsed.checkoutCode === undefined ? null : String(parsed.checkoutCode);
+    if (kind !== "contact" && kind !== "service") return null;
+    if (!/^[0-9a-f-]{36}$/i.test(id) || !status || status.length > 64) return null;
+    if (checkoutCode !== null && checkoutCode.length > 32) return null;
+    return { kind, id, status, checkoutCode };
+  } catch {
+    return null;
+  }
+}
+function parseBulkOrderDeletionPayload(value: unknown): BulkOrderDeletionPayload | null {
+  const snapshot = parsePendingOrderSnapshot(value);
+  if (!snapshot || typeof value !== "string") return null;
+  try {
+    const scope = String((JSON.parse(value) as Partial<BulkOrderDeletionPayload>).scope || "");
+    if (scope !== "pending" && scope !== "finished" && scope !== "all") return null;
+    return { scope, contacts: snapshot.contacts, services: snapshot.services };
+  } catch {
+    return null;
+  }
+}
 function isVoiceConsequentialAdminText(value: string): boolean {
   const text = value.trim();
   return /^(?:yes|yes please|confirm|confirm it|go ahead|do it)[.! ]*$/i.test(text)
-    || /^\/(?:verify|verifyservice|reject)(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(text)
-    || /^(?:reject|decline)\s+(?:order\s+)?FL-[A-Z0-9]{6}[.! ]*$/i.test(text);
+    || /^\/(?:verify|verifyservice|reject|deleteorder|clearorders|expirepending)(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(text)
+    || /^(?:reject|decline)\s+(?:order\s+)?FL-[A-Z0-9]{6}[.! ]*$/i.test(text)
+    || /^(?:delete|remove|clear)\b.*\b(?:order|orders|request|requests|FL-[A-Z0-9]{6})\b/i.test(text)
+    || /^(?:close|cancel)\s+all\s+pending\s+orders[.! ]*$/i.test(text);
 }
 const CODE_CHARS = "0123456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 function checkoutCode(): string {
@@ -1356,6 +1390,344 @@ async function aiReply(e: Env, chat: string, userText: string, reminder = "", vo
   }
 }
 
+type AdminAssistantIntent = {
+  action: string;
+  ref?: string | null;
+  scope?: OrderDeletionScope | null;
+  text?: string | null;
+  instruction?: string | null;
+};
+
+const ADMIN_ASSISTANT_ACTIONS = new Set([
+  "inspect_order",
+  "delete_order",
+  "clear_orders",
+  "close_pending_orders",
+  "reject_order",
+  "prepare_delivery",
+  "message_customer",
+  "broadcast",
+  "list_orders",
+  "list_requests",
+  "list_drafts",
+  "list_profiles",
+  "open_admin_desk",
+  "verify_payment",
+  "hide_profile",
+  "none"
+]);
+
+function looksLikeAdminAssistantTask(text: string): boolean {
+  return /\bFL-[A-Z0-9]{6}\b/i.test(text)
+    || /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i.test(text)
+    || /\b(delete|remove|clear|close|expire|reject|message|send|broadcast|write|craft|draft|compose|show|list|inspect|find|open|deliver|fulfil|fulfill|prepare|order|orders|request|requests|customer|customers|client|clients|draft|drafts|profile|profiles|admin desk|verify|payment)\b/i.test(text);
+}
+
+async function craftAdminMessageText(e: Env, instruction: string, maxLength: number, audienceLabel: string): Promise<string> {
+  if (!e.AI) return "";
+  try {
+    const result = await e.AI.run(e.AI_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+      messages: [
+        {
+          role: "system",
+          content: "You write short, clear, friendly customer messages for a Telegram admin to send to " + audienceLabel + ". Follow the admin's brief exactly. Plain text only: no HTML, no markdown, and no placeholders such as [Name]. Do not invent prices, links, dates, order facts, refunds, or delivery details that are not in the brief. Do not claim a payment was verified, approved, refunded, or delivered unless the brief explicitly says so. Keep it under " + maxLength + " characters. Output only the message text."
+        },
+        { role: "user", content: String(instruction || "").slice(0, 1200) }
+      ]
+    });
+    let crafted = String((result as any)?.response || "").trim();
+    if ((crafted.startsWith('"') && crafted.endsWith('"')) || (crafted.startsWith("'") && crafted.endsWith("'"))) crafted = crafted.slice(1, -1).trim();
+    return crafted.slice(0, maxLength).trim();
+  } catch (error) {
+    console.error("Admin assistant message drafting failed", String(error));
+    return "";
+  }
+}
+
+async function classifyAdminAssistantIntent(e: Env, text: string): Promise<AdminAssistantIntent | null> {
+  if (!e.AI) return null;
+  try {
+    const result = await e.AI.run(e.AI_MODEL || "@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+      messages: [
+        {
+          role: "system",
+          content: "You are a strict intent classifier for a Telegram admin bot. The user is the verified admin. Classify the admin message into exactly one action from this allowlist and reply with ONLY a compact JSON object, no prose and no code fences: {\"action\":\"...\",\"ref\":\"FL-XXXXXX or full order UUID or null\",\"scope\":\"pending|finished|all|null\",\"text\":\"literal message text to use, or null\",\"instruction\":\"what to write when the admin asks you to compose wording, or null\"}. Actions: inspect_order, delete_order, clear_orders, close_pending_orders, reject_order, prepare_delivery, message_customer, broadcast, list_orders, list_requests, list_drafts, list_profiles, open_admin_desk, verify_payment, hide_profile, none. delete_order and clear_orders mean preparing PERMANENT deletion. close_pending_orders is only for close or expire pending wording, not delete or clear wording. message_customer requires an order ref. For message_customer and broadcast, put exact literal wording in text; if the admin asks you to write, compose, or craft wording, put that brief in instruction instead. If the admin asks to verify or confirm a payment, use verify_payment. If the admin asks to delete, hide, or remove a profile, use hide_profile. Never invent an order ref; copy it exactly from the message or use null. If this is not a clear admin task, use none."
+        },
+        { role: "user", content: String(text || "").slice(0, 1500) }
+      ]
+    });
+    const raw = String((result as any)?.response || "");
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    if (start < 0 || end <= start) return null;
+    const parsed = JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>;
+    const action = String(parsed.action || "").trim().toLowerCase();
+    if (!ADMIN_ASSISTANT_ACTIONS.has(action)) return null;
+    const rawRef = String(parsed.ref || parsed.orderRef || parsed.orderCode || parsed.orderId || "").trim().slice(0, 128);
+    const ref = /^FL-[A-Z0-9]{6}$/i.test(rawRef)
+      ? rawRef.toUpperCase()
+      : /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawRef)
+        ? rawRef.toLowerCase()
+        : rawRef || null;
+    const rawScope = String(parsed.scope || "").trim().toLowerCase();
+    const scope = rawScope === "pending" || rawScope === "finished" || rawScope === "all" ? rawScope as OrderDeletionScope : null;
+    const literalText = String(parsed.text || parsed.message || "").trim().slice(0, 3500);
+    const instruction = String(parsed.instruction || parsed.brief || "").trim().slice(0, 1500);
+    return {
+      action,
+      ref,
+      scope,
+      text: literalText || null,
+      instruction: instruction || null
+    };
+  } catch (error) {
+    console.error("Admin assistant classification failed", String(error));
+    return null;
+  }
+}
+
+function adminAssistantOrderRef(intent: AdminAssistantIntent): string | null {
+  const ref = String(intent.ref || "").trim();
+  if (/^FL-[A-Z0-9]{6}$/i.test(ref)) return ref.toUpperCase();
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(ref)) return ref.toLowerCase();
+  return null;
+}
+
+async function resolveAdminAssistantOrder(e: Env, chat: string | number, intent: AdminAssistantIntent): Promise<CustomerOrder | null> {
+  const ref = adminAssistantOrderRef(intent);
+  if (!ref) {
+    await say(e, chat, "I can prepare that, but I need the exact FL- order code or full order UUID. Nothing was changed or sent.");
+    return null;
+  }
+  const resolved = await resolveCustomerOrderReference(e, ref);
+  if (resolved.error === "ambiguous") {
+    await say(e, chat, "That reference matches more than one order, so I did not prepare anything. Inspect the exact full order UUID with /order ORDER_UUID.");
+    return null;
+  }
+  if (!resolved.order) {
+    await say(e, chat, "No profile request or service order matched that exact reference. Nothing was changed or sent.");
+    return null;
+  }
+  return await loadCustomerOrderByKind(e, resolved.order.kind, resolved.order.id) || resolved.order;
+}
+
+async function openAssistantBroadcastDraft(e: Env, actor: string, chat: string | number, body: string, crafted: boolean) {
+  if (body.length > 900) return say(e, chat, "Broadcast text must be 900 characters or fewer. Nothing was sent.");
+  const active = await activeBroadcastDraft(e, actor);
+  if (active?.status === "sending") {
+    const counts = await broadcastRecipientCounts(e, active.id);
+    if (counts.total) {
+      return say(e, chat, "📣 <b>A broadcast is already in progress.</b>\n" + formatBroadcastRecipientCounts(counts) + "\nCompleted clients will not receive duplicates. Continue the next saved batch or stop the remaining clients.", broadcastProgressKeyboard(active.id));
+    }
+    return say(e, chat, "⚠️ A broadcast is already sending or has an uncertain outcome. Use /drafts to inspect it before any recovery; do not blind-retry.");
+  }
+  if (active?.status === "draft") {
+    if (!body) {
+      return say(e, chat, "You already have the one open broadcast composer. Send text to update it, attach one photo/video/document, preview it, or use /broadcastcancel.", { inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + active.id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + active.id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + active.id }]] });
+    }
+    const updated = await e.DB.prepare("UPDATE admin_broadcast_drafts SET message_text=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(body, active.id, actor).run();
+    if (!updated.meta?.changes) return say(e, chat, "The broadcast draft changed while it was being updated. Nothing was sent.");
+    return say(e, chat, "📝 Broadcast text updated" + (crafted ? " by the Admin Assistant" : "") + ". Nothing has been sent.\n\nText:\n" + esc(body), { inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + active.id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + active.id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + active.id }]] });
+  }
+  const conflicts = await adminComposerConflicts(e, actor, { kind: "broadcast" });
+  if (conflicts.length) return replyAdminComposerConflict(e, chat, conflicts, "opening a broadcast composer");
+  const id = crypto.randomUUID();
+  try {
+    await e.DB.prepare("INSERT INTO admin_broadcast_drafts(id,admin_telegram_id,message_text,media_kind,media_file_id,media_mime_type,status,expires_at) VALUES(?,?,?,NULL,NULL,NULL,'draft',datetime('now','+30 minutes'))").bind(id, actor, body || null).run();
+  } catch {
+    const raced = await activeBroadcastDraft(e, actor);
+    if (raced?.status === "draft") return say(e, chat, "A broadcast composer was opened at the same time. Use that one composer; no second draft was created.", { inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + raced.id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + raced.id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + raced.id }]] });
+    throw new Error("admin_assistant_broadcast_draft_create_failed");
+  }
+  const racedConflicts = await adminComposerConflicts(e, actor, { kind: "broadcast", draftId: id });
+  if (racedConflicts.length) {
+    await e.DB.prepare("UPDATE admin_broadcast_drafts SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='draft' AND admin_telegram_id=?").bind(id, actor).run();
+    return replyAdminComposerConflict(e, chat, racedConflicts, "opening a broadcast composer");
+  }
+  return say(e, chat, "📣 <b>Broadcast draft created</b>" + (crafted ? " by the Admin Assistant" : "") + "\nAudience: every unique saved client chat from profile requests and service orders, excluding your admin chat. Delivery is batched with a saved per-client ledger so nobody is sent the same broadcast twice.\n\nText: " + (body ? esc(body) : "No message text yet. Send text or attach media.") + "\nMedia: none\n\nNothing has been sent. Preview and confirm when ready.", {
+    inline_keyboard: [[{ text: "👀 Preview audience and content", callback_data: "broadcast:preview:" + id }], [{ text: "✅ Send broadcast", callback_data: "broadcast:send:" + id }, { text: "✖️ Cancel", callback_data: "broadcast:cancel:" + id }]]
+  });
+}
+
+async function handleAdminAssistant(e: Env, m: Msg, rawText: string, voiceReply: boolean): Promise<boolean> {
+  const chat = String(m.chat.id);
+  const actor = String(m.from?.id ?? m.chat.id);
+  if (actor !== e.ADMIN_TELEGRAM_ID || chat !== actor) return false;
+  const text = String(rawText || "").trim();
+  if (!text || text.startsWith("/")) return false;
+
+  // These forbidden intents stay deterministic and manual even if AI is unavailable.
+  if (/\b(?:delete|hide|remove)\b[^.!?\n]*\bprofile\b/i.test(text) || /\bprofile\b[^.!?\n]*\b(?:delete|hide|remove)\b/i.test(text)) {
+    await say(e, chat, "Profile deletion/hiding is not an AI or natural-language action, so nothing was changed. To reversibly hide a profile yourself, use <code>/hideprofile PROFILE_ID</code> and confirm. Permanent removal requires a website source change and redeployment.");
+    return true;
+  }
+  if (/^\s*(?:please\s+)?(?:verify|confirm)\b[^.!?\n]*\b(?:payment|paid|Selar|order|FL-[A-Z0-9]{6})\b/i.test(text)) {
+    await say(e, chat, "I can't verify or confirm payments. Check the sale yourself in Selar, then use the order's <b>Verify</b> button or <code>/order CODE_OR_UUID</code> for the manual verification path. Nothing was verified or changed.");
+    return true;
+  }
+
+  if (!looksLikeAdminAssistantTask(text) || !e.AI) return false;
+  const intent = await classifyAdminAssistantIntent(e, text);
+  if (!intent || intent.action === "none") return false;
+
+  if (intent.action === "verify_payment") {
+    await say(e, chat, "I can't verify or confirm payments. Check the sale yourself in Selar, then use the order's <b>Verify</b> button or <code>/order CODE_OR_UUID</code> for the manual verification path. Nothing was verified or changed.");
+    return true;
+  }
+  if (intent.action === "hide_profile") {
+    await say(e, chat, "Profile deletion/hiding is not an AI or natural-language action, so nothing was changed. To reversibly hide a profile yourself, use <code>/hideprofile PROFILE_ID</code> and confirm. Permanent removal requires a website source change and redeployment.");
+    return true;
+  }
+
+  if (voiceReply && ["delete_order", "clear_orders", "close_pending_orders", "reject_order"].includes(intent.action)) {
+    await say(e, chat, "I will not prepare that consequential admin action from a voice transcript. Type the request or use the Admin Desk buttons so the exact target is deliberate.");
+    return true;
+  }
+
+  if (intent.action === "inspect_order") {
+    const order = await resolveAdminAssistantOrder(e, chat, intent);
+    if (!order) return true;
+    await sendAdminOrderInspection(e, chat, order, true);
+    return true;
+  }
+
+  if (intent.action === "delete_order") {
+    const ref = adminAssistantOrderRef(intent);
+    if (!ref) {
+      await say(e, chat, "I can prepare permanent deletion, but I need the exact FL- order code or full order UUID. Nothing was deleted.");
+      return true;
+    }
+    await prepareOrderDeletionByReference(e, actor, chat, ref);
+    return true;
+  }
+
+  if (intent.action === "clear_orders") {
+    if (intent.scope) await prepareBulkOrderDeletion(e, actor, chat, intent.scope);
+    else await sendClearOrdersScopeChooser(e, actor, chat);
+    return true;
+  }
+
+  if (intent.action === "close_pending_orders") {
+    await prepareClosePendingOrders(e, actor, chat);
+    return true;
+  }
+
+  if (intent.action === "reject_order") {
+    const order = await resolveAdminAssistantOrder(e, chat, intent);
+    if (!order) return true;
+    await sendAdminOrderInspection(e, chat, order, true);
+    await say(e, chat, "I opened the inspection only — <b>nothing was rejected</b>. After checking it, use the inspection's rejection controls or <code>/reject " + esc(String(order.checkout_code || order.id)) + "</code> when you deliberately want to reject/cancel it.");
+    return true;
+  }
+
+  if (intent.action === "prepare_delivery") {
+    const order = await resolveAdminAssistantOrder(e, chat, intent);
+    if (!order) return true;
+    if (order.status !== "payment_verified") {
+      await say(e, chat, (order.kind === "contact" ? "Request" : "Service order") + " <code>" + esc(String(order.checkout_code || order.id)) + "</code> is currently <b>" + esc(order.status) + "</b>. Fulfilment preparation requires manual payment verification first.");
+      return true;
+    }
+    await sendPrepareFulfilmentPrompt(e, chat, order);
+    return true;
+  }
+
+  if (intent.action === "message_customer") {
+    const order = await resolveAdminAssistantOrder(e, chat, intent);
+    if (!order) return true;
+    let body = String(intent.text || "").trim();
+    let crafted = false;
+    if (!body && intent.instruction) {
+      body = await craftAdminMessageText(e, intent.instruction, ADMIN_MESSAGE_TEXT_LIMIT, "one customer");
+      crafted = Boolean(body);
+      if (!body) {
+        await say(e, chat, "I couldn't draft that customer message just now. Use <code>/message " + esc(String(order.checkout_code || order.id)) + " Your message</code> instead. Nothing was sent.");
+        return true;
+      }
+    }
+    if (body.length > ADMIN_MESSAGE_TEXT_LIMIT) {
+      await say(e, chat, "That customer message is too long. Keep it to " + ADMIN_MESSAGE_TEXT_LIMIT + " characters or fewer. Nothing was sent.");
+      return true;
+    }
+    if (crafted) await say(e, chat, "🤖 I drafted this customer message for your review. Nothing has been sent.");
+    await createOrReopenAdminMessageDraft(e, m, order.id, body);
+    return true;
+  }
+
+  if (intent.action === "broadcast") {
+    let body = String(intent.text || "").trim();
+    let crafted = false;
+    if (!body && intent.instruction) {
+      body = await craftAdminMessageText(e, intent.instruction, 900, "all clients");
+      crafted = Boolean(body);
+      if (!body) {
+        await say(e, chat, "I couldn't draft that broadcast just now. Use <code>/broadcast Your message</code> instead. Nothing was sent.");
+        return true;
+      }
+    }
+    if (body.length > 900) {
+      await say(e, chat, "Broadcast text must be 900 characters or fewer. Nothing was sent.");
+      return true;
+    }
+    await openAssistantBroadcastDraft(e, actor, chat, body, crafted);
+    return true;
+  }
+
+  if (intent.action === "list_requests") {
+    const rows = await e.DB.prepare("SELECT id,profile_id,status,checkout_code,payment_reference FROM contact_requests WHERE status IN('pending_payment','payment_verified') ORDER BY created_at DESC LIMIT 12").all<any>();
+    const buttons = (rows.results || []).map(r => [{ text: (r.status === "payment_verified" ? "🟢 Paid — review approval" : "🟡 Check payment") + " · " + String(r.checkout_code || "request"), callback_data: "admin:request:" + r.id }]);
+    await say(e, chat, "<b>Requests needing attention</b>\nChoose a request to review its saved status. A sale notification is not payment verification.", { inline_keyboard: [...buttons, [{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
+    return true;
+  }
+
+  if (intent.action === "list_orders") {
+    const rows = await e.DB.prepare("SELECT id,service_id,status,checkout_code,payment_reference FROM service_orders ORDER BY created_at DESC LIMIT 12").all<any>();
+    const buttons = (rows.results || []).map(r => [{
+      text: (r.status === "payment_verified" ? "🟢 Ready to fulfil" : r.status === "pending_payment" ? "🟡 Check payment" : "🧾 Inspect") + " · " + String(r.checkout_code || "service order"),
+      callback_data: "admin:service:" + r.id
+    }]);
+    await say(e, chat, "<b>Recent service orders</b>\nChoose an order to inspect its saved status, payment evidence, drafts, and customer request text. A sale notification is not payment verification. For older/searchable records use /orders SEARCH or /order CODE_OR_UUID.", { inline_keyboard: [...buttons, [{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
+    return true;
+  }
+
+  if (intent.action === "list_drafts") {
+    await say(e, chat, "📝 Tap below to load the current editable and locked drafts.", { inline_keyboard: [[{ text: "📝 Load drafts", callback_data: "admin:drafts" }], [{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
+    return true;
+  }
+
+  if (intent.action === "list_profiles") {
+    try {
+      const profiles = await catalogue(e);
+      if (!profiles.length) {
+        await say(e, chat, "No visible website profiles are currently loaded.");
+        return true;
+      }
+      const lines = profiles.slice(0, 30).map(profile => "• <b>" + esc(profile.name) + "</b> · <code>" + esc(profile.id) + "</code>");
+      await say(e, chat, "<b>Visible website profiles (" + profiles.length + ")</b>\n" + lines.join("\n") + (profiles.length > 30 ? "\n…showing the first 30. Use /profiles SEARCH for the rest." : ""));
+    } catch {
+      await say(e, chat, "I couldn't load the live website profile catalogue just now. Try /profiles again shortly.");
+    }
+    return true;
+  }
+
+  if (intent.action === "open_admin_desk") {
+    await say(e, chat, "<b>Admin Desk</b>\nChoose an action:", {
+      inline_keyboard: [
+        [{ text: "📥 Review requests", callback_data: "admin:pending" }],
+        [{ text: "🧾 Review service orders", callback_data: "admin:orders" }],
+        [{ text: "📝 Drafts & recovery", callback_data: "admin:drafts" }],
+        [{ text: "📣 Broadcast to all clients", callback_data: "admin:broadcast_help" }],
+        [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }],
+        [{ text: "🗑️ Clear orders permanently", callback_data: "admin:clear_orders" }],
+        [{ text: "🤖 Admin assistant (AI tasks)", callback_data: "admin:assistant_help" }],
+        [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]
+      ]
+    });
+    return true;
+  }
+
+  return false;
+}
+
 async function servicesMenu(e: Env, chat: string | number) {
   const siteUrl = (e.SITE_URL || "https://fansleak.pages.dev").replace(/\/$/, "");
   return say(e, chat, "💋 <b>Choose your next move, babe!</b>\n\n<b>1. 📸 Website photo previews</b>\nBrowse some hot photo previews and available profiles on our website. Photos only — no videos there. 😉\n\n<b>2. 🔥 Telegram channel</b>\nReady for more? Subscribe to our channel for authorised content shared with permission. 🔥\n\nWhich one are you feeling, handsome? 👀", {
@@ -1802,9 +2174,9 @@ async function message(e: Env, m: Msg) {
   // Telegram may append @BotName to slash commands. Normalize only the command token.
   t = t.replace(/^([\/][A-Za-z0-9_]+)@[A-Za-z0-9_]+(?=\s|$)/, "$1");
   if (user === e.ADMIN_TELEGRAM_ID && chat !== user) {
-    const adminOnlyText = /^\/(?:admin|menu|help|pending|orders|order|profiles|profile|drafts|recoverdraft|broadcast|broadcastcancel|deleteprofile|hideprofile|restoreprofile|expirepending|reject|message|deliver|setcontact|enablecontact|disablecontact|authorizecontact|verify|verifyservice)(?:\s|$)/i.test(t)
+    const adminOnlyText = /^\/(?:admin|menu|help|pending|orders|order|profiles|profile|drafts|recoverdraft|broadcast|broadcastcancel|deleteprofile|hideprofile|restoreprofile|expirepending|deleteorder|clearorders|reject|message|deliver|setcontact|enablecontact|disablecontact|authorizecontact|verify|verifyservice)(?:\s|$)/i.test(t)
       || /^(?:list|show|view)\s+(?:all\s+)?(?:profiles|(?:recent\s+)?orders|pending\b.*)$/i.test(t)
-      || /^(?:delete|restore)\s+profile\b/i.test(t)
+      || /^(?:delete|hide|remove|restore)\s+profile\b/i.test(t)
       || /^(?:reject|decline|approve|deliver|fulfil|fulfill)\b.*\bFL-[A-Z0-9]{6}\b/i.test(t)
       || /^prepare\s+delivery\s+for\b.*\bFL-[A-Z0-9]{6}\b/i.test(t)
       || /^(?:send\s+)?broadcast\b/i.test(t)
@@ -1812,7 +2184,9 @@ async function message(e: Env, m: Msg) {
       || /^send\s+(?:photo|video|media)\s+to\s+clients\b/i.test(t)
       || /^(?:send\s+)?(?:a\s+)?message\s+to\s+(?:all\s+clients|customer\b.*\bFL-[A-Z0-9]{6}\b)/i.test(t)
       || /^message\s+customer\b.*\bFL-[A-Z0-9]{6}\b/i.test(t)
-      || /^(?:delete|close|cancel)\s+all\s+pending\s+orders$/i.test(t);
+      || /^(?:delete|remove|clear)\b.*\b(?:FL-[A-Z0-9]{6}|[0-9a-f-]{36})\b/i.test(t)
+      || /^(?:delete|remove|clear|close|cancel)\s+all\s+(?:pending|unpaid|finished|closed|completed\s+)?orders[.! ]*$/i.test(t)
+      || /^(?:write|craft|draft|compose)\b.*\b(?:message|broadcast)\b/i.test(t);
     if (adminOnlyText) return say(e, chat, "Open the private Admin Desk chat to use admin tools. Nothing was changed or sent.");
   }
   if (user === e.ADMIN_TELEGRAM_ID) {
@@ -1821,12 +2195,8 @@ async function message(e: Env, m: Msg) {
     else if (/^(?:show|list|view)\s+drafts$/i.test(t)) t = "/drafts";
     else if (/^(?:inspect|show|view)\s+order\s+([^\s]+)$/i.test(t)) t = "/order " + t.match(/^(?:inspect|show|view)\s+order\s+([^\s]+)$/i)[1];
     else if (/^(?:inspect|show|view)\s+profile\s+([^\s]+)$/i.test(t)) t = "/profile " + t.match(/^(?:inspect|show|view)\s+profile\s+([^\s]+)$/i)[1];
-    else if (/^(?:delete|hide)\s+profile\s+(.+)$/i.test(t)) {
-      const requested = t.match(/^(?:delete|hide)\s+profile\s+(.+)$/i)[1].trim();
-      const cat = await catalogue(e);
-      const profile = cat.find(p => p.id.toLowerCase() === requested.toLowerCase() || p.name.toLowerCase() === requested.toLowerCase());
-      if (!profile) return say(e, chat, "I couldn't match that name to a visible profile. Send the exact profile name or ID from /profiles.");
-      t = "/deleteprofile " + profile.id;
+    else if (/^(?:delete|hide|remove)\s+profile\b/i.test(t)) {
+      return say(e, chat, "Profile deletion/hiding is not an AI or natural-language action, so nothing was changed. To reversibly hide a profile yourself, use <code>/hideprofile PROFILE_ID</code> and confirm. Permanent removal requires a website source change and redeployment.");
     }
     else if (/^restore\s+profile\s+([A-Za-z0-9._-]{1,50})$/i.test(t)) t = "/restoreprofile " + t.match(/^restore\s+profile\s+([A-Za-z0-9._-]{1,50})$/i)[1];
     else if (/^(?:reject|decline)\s+(?:order\s+)?FL-[A-Z0-9]{6}$/i.test(t)) t = "/reject " + t.match(/FL-[A-Z0-9]{6}/i)[0];
@@ -1836,7 +2206,11 @@ async function message(e: Env, m: Msg) {
     else if (/^(?:send\s+)?broadcast\s*[:\-]?\s+[\s\S]+$/i.test(t)) t = "/broadcast " + t.replace(/^(?:send\s+)?broadcast\s*[:\-]?\s+/i, "");
     else if (/^(?:send\s+)?(?:a\s+)?message\s+to\s+customer\s+FL-[A-Z0-9]{6}\s*[:\-]\s*[\s\S]+$/i.test(t)) t = "/message " + t.replace(/^(?:send\s+)?(?:a\s+)?message\s+to\s+customer\s+(FL-[A-Z0-9]{6})\s*[:\-]\s*/i, "$1 ");
     else if (/^message\s+customer\s+FL-[A-Z0-9]{6}\s*[:\-]\s*[\s\S]+$/i.test(t)) t = "/message " + t.replace(/^message\s+customer\s+(FL-[A-Z0-9]{6})\s*[:\-]\s*/i, "$1 ");
-    else if (/^(?:delete|close|cancel)\s+all\s+pending\s+orders$/i.test(t)) t = "/expirepending";
+    else if (/^(?:permanently\s+)?(?:delete|remove|clear)\s+(?:the\s+)?(?:order\s+|request\s+)?(FL-[A-Z0-9]{6}|[0-9a-f-]{36})(?:\s+permanently)?[.! ]*$/i.test(t)) t = "/deleteorder " + t.match(/(FL-[A-Z0-9]{6}|[0-9a-f-]{36})/i)[1];
+    else if (/^(?:permanently\s+)?(?:clear|delete|remove)\s+all\s+(?:pending|unpaid)\s+orders?(?:\s+permanently)?[.! ]*$/i.test(t)) t = "/clearorders pending";
+    else if (/^(?:permanently\s+)?(?:clear|delete|remove)\s+all\s+(?:finished|closed|completed)\s+orders?(?:\s+permanently)?[.! ]*$/i.test(t)) t = "/clearorders finished";
+    else if (/^(?:permanently\s+)?(?:clear|delete|remove)\s+all\s+orders?(?:\s+permanently)?[.! ]*$/i.test(t)) t = "/clearorders";
+    else if (/^(?:close|cancel)\s+all\s+pending\s+orders[.! ]*$/i.test(t)) t = "/expirepending";
   }
   if (t.startsWith("/start")) {
     const arg = t.split(/\s+/, 2)[1] || "";
@@ -2073,24 +2447,20 @@ async function message(e: Env, m: Msg) {
     });
   }
   if (user === e.ADMIN_TELEGRAM_ID && t === "/expirepending") {
-    const contactRows = await e.DB.prepare("SELECT id,status FROM contact_requests WHERE status IN (?,?,?,?) ORDER BY id")
-      .bind(...PENDING_CONTACT_STATUSES)
-      .all<PendingOrderSnapshotItem>();
-    const serviceRows = await e.DB.prepare("SELECT id,status FROM service_orders WHERE status IN (?,?,?) ORDER BY id")
-      .bind(...PENDING_SERVICE_STATUSES)
-      .all<PendingOrderSnapshotItem>();
-    const snapshot: PendingOrderSnapshot = {
-      contacts: contactRows.results || [],
-      services: serviceRows.results || []
-    };
-    if (snapshot.contacts.length === 0 && snapshot.services.length === 0) {
-      return say(e, chat, "There are no unpaid pending orders to close. Manually verified and payment-review orders are not included in this action.");
-    }
-    const id = await createPendingAdminAction(e, user, "close_pending_orders", JSON.stringify(snapshot));
-    if (!id) return say(e, chat, "You already have an admin action awaiting confirmation. Reply YES or cancel it before starting another.");
-    return say(e, chat, "⚠️ <b>Close these exact pending orders?</b>\nProfile requests to expire: <b>" + snapshot.contacts.length + "</b>\nService orders to cancel: <b>" + snapshot.services.length + "</b>\n\nOnly the order IDs and statuses captured in this preview can close. Orders created or changed after this preview, manually verified orders, and payment-review orders will not be closed. This retains audit records and does not verify or approve payments. Reply <b>YES</b> or use the button to confirm.", {
-      inline_keyboard: [[{ text: "✅ Confirm close pending orders", callback_data: "admin-action:confirm:" + id }], [{ text: "Cancel", callback_data: "admin-action:cancel:" + id }]]
-    });
+    return prepareClosePendingOrders(e, user, chat);
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && /^\/deleteorder(?:\s|$)/i.test(t)) {
+    if (chat !== user) return say(e, chat, "Open the private Admin Desk chat to prepare permanent order deletion. Nothing was deleted.");
+    const match = t.match(/^\/deleteorder\s+(\S+)$/i);
+    if (!match) return say(e, chat, "Usage: /deleteorder FL-ABC123 or /deleteorder ORDER_UUID\nThis only prepares a permanent-deletion preview; nothing is deleted until you explicitly confirm.");
+    return prepareOrderDeletionByReference(e, user, chat, match[1]);
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && /^\/clearorders(?:\s|$)/i.test(t)) {
+    if (chat !== user) return say(e, chat, "Open the private Admin Desk chat to prepare permanent order deletion. Nothing was deleted.");
+    const match = t.match(/^\/clearorders(?:\s+(pending|finished|all))?$/i);
+    if (!match) return say(e, chat, "Usage: /clearorders, /clearorders pending, /clearorders finished, or /clearorders all\nWithout a scope, the bot shows scope buttons and counts. Nothing is deleted until you confirm the exact snapshot preview.");
+    if (!match[1]) return sendClearOrdersScopeChooser(e, user, chat);
+    return prepareBulkOrderDeletion(e, user, chat, match[1].toLowerCase() as OrderDeletionScope);
   }
   if (user === e.ADMIN_TELEGRAM_ID && /^\/restoreprofile\s+/i.test(t)) {
     const match = t.match(/^\/restoreprofile\s+([A-Za-z0-9._-]{1,50})$/i);
@@ -2115,6 +2485,8 @@ async function message(e: Env, m: Msg) {
         [{ text: "📝 Drafts & recovery", callback_data: "admin:drafts" }],
         [{ text: "📣 Broadcast to all clients", callback_data: "admin:broadcast_help" }],
         [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }],
+        [{ text: "🗑️ Clear orders permanently", callback_data: "admin:clear_orders" }],
+        [{ text: "🤖 Admin assistant (AI tasks)", callback_data: "admin:assistant_help" }],
         [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]
       ]
     });
@@ -2208,7 +2580,7 @@ async function message(e: Env, m: Msg) {
       : loadedRows;
     const rows = filteredRows.slice(0, 30);
     if (!rows.length) return say(e, chat, query ? "No recent orders matched that search in the latest 100 records per type. Try an FL code or use /order ORDER_UUID for an exact older record." : "No orders found.");
-    const heading = "<b>🧾 " + (query ? "Orders matching your search" : "Recent orders") + " (" + rows.length + (filteredRows.length > rows.length ? " of " + filteredRows.length : "") + ")</b>\n<i>Search covers the latest 100 profile requests and 100 service orders. Use /order CODE_OR_UUID for full details, including saved service request text. Closing/rejecting retains the order and audit record; it is not physical deletion.</i>";
+    const heading = "<b>🧾 " + (query ? "Orders matching your search" : "Recent orders") + " (" + rows.length + (filteredRows.length > rows.length ? " of " + filteredRows.length : "") + ")</b>\n<i>Search covers the latest 100 profile requests and 100 service orders. Use /order CODE_OR_UUID for full details, including saved service request text. Closing/rejecting retains the order and audit record; use /deleteorder only when you deliberately want confirmed permanent deletion.</i>";
     const chunks: string[] = [];
     let current = heading;
     for (const row of rows) {
@@ -2292,11 +2664,14 @@ async function message(e: Env, m: Msg) {
       "/hideprofile PROFILE_ID — preview reversibly hiding a website profile (legacy alias: /deleteprofile)",
       "/restoreprofile PROFILE_ID — remove a reversible hidden-profile override",
       "/expirepending — preview the exact unpaid orders that would close, then confirm",
+      "/deleteorder ORDER_CODE_OR_UUID — preview permanently deleting one order and its prompts/receipts/drafts, then confirm; customers are not notified, while audit and used payment-reference records are retained",
+      "/clearorders [pending|finished|all] — choose a bulk permanent-deletion scope, preview exact snapshot counts, then confirm; without a scope it shows scope buttons",
+      "Admin assistant — in this private chat, type requests such as 'delete order FL-ABC123', 'clear all pending orders', or 'write a message to customer FL-ABC123 saying…'; it only prepares confirmations/drafts and never verifies payments or deletes/hides profiles",
       "/reject FL-ABC123 — reject/cancel one selected order and notify its customer; on a forwarded receipt, Reject instead opens a follow-up text/media composer and rejects only when you send it",
       "",
       "Clients do not receive a creator list in this bot; profiles stay on the website. There is no stored creator contact to share. After manually verifying payment, use Prepare delivery to send the customer your chosen message, media, or other fulfilment here.",
       "Only one editable admin composer can be open across request delivery, service fulfilment, customer support, and broadcast. Ordinary text/media edits only that composer; YES never becomes delivery text and never sends request/service fulfilment.",
-      "Profile hiding is reversible and does not delete website source files. Rejecting/closing orders retains order and audit records rather than physically deleting them.",
+      "Profile hiding is reversible and does not delete website source files. Rejecting/closing retains records; only /deleteorder and /clearorders permanently delete order rows after your explicit confirmation.",
       "Payments are never verified automatically. Request delivery remains a separate, explicit admin action after manual payment verification."
     ].join("\n"));
   }
@@ -2378,8 +2753,10 @@ async function message(e: Env, m: Msg) {
       return say(e, chat, "I saved your message. You can tell me more, or type PAY when you’re ready to purchase.");
     }
   }
+  const isConfiguredAdminPrivate = user === e.ADMIN_TELEGRAM_ID && chat === user;
+  const adminTaskWithOrderCode = isConfiguredAdminPrivate && /\b(delete|remove|clear|get rid|write|craft|draft|compose|message|broadcast|reject|verify|inspect|find|show|list|deliver|fulfil|fulfill|prepare|order|request|status)\b/i.test(t);
   const prompt = await e.DB.prepare("SELECT order_id,order_kind FROM checkout_name_prompts WHERE telegram_user_id=?").bind(user).first<any>();
-  if (prompt && !emailRe.test(t)) {
+  if (prompt && !adminTaskWithOrderCode && !emailRe.test(t)) {
     const code = codeInName(t);
     if (!code) return say(e, chat, "I couldn't find the order code. Please send your exact full name followed by the code shown in checkout, for example: John Doe FL-7K4P9A.");
     const fullName = t.replace(new RegExp("\\s*" + code + "\\s*$", "i"), "").trim();
@@ -2394,7 +2771,7 @@ async function message(e: Env, m: Msg) {
     return handlePaidClaim(e, chat, user, order, { nameJustRecorded: true });
   }
   const submittedCode = codeInName(t);
-  if (submittedCode) return say(e, chat, "To submit your checkout name, tap Done on your checkout instructions first.");
+  if (submittedCode && !adminTaskWithOrderCode) return say(e, chat, "To submit your checkout name, tap Done on your checkout instructions first.");
   if (emailRe.test(t)) {
     const email = t.toLowerCase();
     const req = await e.DB.prepare("SELECT id,status,profile_id,buyer_email,checkout_code FROM contact_requests WHERE telegram_user_id=? AND status='pending_payment' ORDER BY created_at DESC LIMIT 1").bind(user).first<any>();
@@ -2445,19 +2822,21 @@ async function message(e: Env, m: Msg) {
       if(!resolved.order) return say(e,chat,resolved.error==="ambiguous" ? "That FL code matches more than one order. Inspect the exact UUID with /order ORDER_UUID before preparing fulfilment." : "No profile request or service order found for <code>"+esc(deliveryCode[0].toUpperCase())+"</code>.");
       const order=await loadCustomerOrderByKind(e,resolved.order.kind,resolved.order.id) || resolved.order;
       if(order.status!=="payment_verified") return say(e,chat,(order.kind==="contact" ? "Request" : "Service order")+" <code>"+esc(String(order.checkout_code || order.id))+"</code> is currently <b>"+esc(order.status)+"</b>. Fulfilment preparation requires manual payment verification first.");
-      if(order.kind==="contact") {
-        return say(e,chat,"📝 <b>Prepare request delivery</b>\nRequest: <code>"+esc(order.id)+"</code>\nCode: <code>"+esc(String(order.checkout_code || ""))+"</code>\nProfile: "+esc(String(order.target_id || "unknown"))+"\n\nTap below to open the delivery draft. No customer message is sent until you preview and explicitly send.",{inline_keyboard:[[ {text:"📝 Prepare delivery",callback_data:"approve:"+order.id} ]]});
-      }
-      return say(e,chat,"📝 <b>Prepare service fulfilment</b>\nOrder: <code>"+esc(order.id)+"</code>\nCode: <code>"+esc(String(order.checkout_code || ""))+"</code>\nService: "+esc(String(order.target_id || "unknown"))+"\n\nTap below to open the service composer. No customer message is sent until you preview and explicitly send.",{inline_keyboard:[[ {text:"📝 Prepare service fulfilment",callback_data:"admin:service-deliver:"+order.id} ],[ {text:"🔎 Inspect order and request text",callback_data:"admin:service:"+order.id} ]]});
+      return sendPrepareFulfilmentPrompt(e, chat, order);
     }
     const codeMatch=t.match(/\bFL-[A-Z0-9]{6}\b/i);
-    if (codeMatch && (intent.includes("find") || intent.includes("inspect") || intent.includes("order") || intent.includes("request") || intent.includes("status"))) {
+    const assistantActionIntent=/\b(delete|remove|clear|get rid|write|craft|draft|compose|message|broadcast|reject|verify|confirm payment)\b/.test(intent);
+    if (codeMatch && !assistantActionIntent && (intent.includes("find") || intent.includes("inspect") || intent.includes("order") || intent.includes("request") || intent.includes("status"))) {
       const resolved=await resolveCustomerOrderReference(e,codeMatch[0].toUpperCase());
       if (!resolved.order) return say(e,chat,resolved.error==="ambiguous" ? "That FL code matches more than one order. Use /orders to identify the exact UUID, then /order ORDER_UUID." : "No profile request or service order found for <code>"+esc(codeMatch[0].toUpperCase())+"</code>.");
       const order=await loadCustomerOrderByKind(e,resolved.order.kind,resolved.order.id) || resolved.order;
       await sendAdminOrderInspection(e,chat,order,true);
       return;
     }
+  }
+  if (user === e.ADMIN_TELEGRAM_ID && chat === user && !t.startsWith("/")) {
+    const handledByAssistant = await handleAdminAssistant(e, m, t, voiceReply);
+    if (handledByAssistant) return;
   }
   return aiReply(e, chat, t, "", voiceReply);
 }
@@ -2496,6 +2875,7 @@ function adminOrderInspectionKeyboard(order: CustomerOrder) {
   }
   rows.push(
     [{ text: "💬 Message this customer", callback_data: "admin:message:" + order.kind + ":" + order.id }],
+    [{ text: "🗑️ Delete order permanently", callback_data: "admin:deleteorder:" + order.kind + ":" + order.id }],
     [{ text: order.kind === "contact" ? "↩️ Back to requests" : "↩️ Back to service orders", callback_data: order.kind === "contact" ? "admin:pending" : "admin:orders" }],
     [{ text: "🏠 Admin Desk", callback_data: "admin:home" }]
   );
@@ -2580,6 +2960,218 @@ async function sendAdminServiceRequestText(e: Env, chat: string | number, order:
 async function sendAdminOrderInspection(e: Env, chat: string | number, order: CustomerOrder, includeServiceRequestText = true) {
   await say(e, chat, await formatAdminOrderInspection(e, order), adminOrderInspectionKeyboard(order));
   if (includeServiceRequestText && order.kind === "service") await sendAdminServiceRequestText(e, chat, order);
+}
+
+function orderDeletionScopeLabel(scope: OrderDeletionScope): string {
+  return scope === "pending" ? "Pending/unpaid only" : scope === "finished" ? "Finished/closed only" : "ALL orders (every status)";
+}
+
+function orderDeletionScopeDescription(scope: OrderDeletionScope): string {
+  if (scope === "pending") return "Unpaid/incomplete orders only. Paid orders awaiting fulfilment (<code>payment_verified</code>) and service orders in <code>payment_review</code> are not included.";
+  if (scope === "finished") return "Approved, rejected, or expired profile requests and fulfilled or cancelled service orders only. <code>payment_verified</code> and <code>payment_review</code> are not included.";
+  return "Every saved profile request and service order in every status, including paid, payment-review, approved, and fulfilled history.";
+}
+
+function orderDeletionStatuses(kind: OrderKind, scope: OrderDeletionScope): readonly string[] | null {
+  if (scope === "all") return null;
+  if (kind === "contact") return scope === "pending" ? PENDING_CONTACT_STATUSES : FINISHED_CONTACT_STATUSES;
+  return scope === "pending" ? PENDING_SERVICE_STATUSES : FINISHED_SERVICE_STATUSES;
+}
+
+async function loadOrderDeletionSnapshot(e: Env, scope: OrderDeletionScope): Promise<PendingOrderSnapshot> {
+  const load = async (table: "contact_requests" | "service_orders", statuses: readonly string[] | null): Promise<PendingOrderSnapshotItem[]> => {
+    if (!statuses) {
+      const rows = await e.DB.prepare(`SELECT id,status FROM ${table} ORDER BY id`).all<PendingOrderSnapshotItem>();
+      return rows.results || [];
+    }
+    const placeholders = statuses.map(() => "?").join(",");
+    const rows = await e.DB.prepare(`SELECT id,status FROM ${table} WHERE status IN (${placeholders}) ORDER BY id`).bind(...statuses).all<PendingOrderSnapshotItem>();
+    return rows.results || [];
+  };
+  return {
+    contacts: await load("contact_requests", orderDeletionStatuses("contact", scope)),
+    services: await load("service_orders", orderDeletionStatuses("service", scope))
+  };
+}
+
+async function orderDeletionScopeCounts(e: Env, scope: OrderDeletionScope): Promise<{ contacts: number; services: number; total: number }> {
+  const countFor = async (table: "contact_requests" | "service_orders", statuses: readonly string[] | null): Promise<number> => {
+    if (!statuses) {
+      const row = await e.DB.prepare(`SELECT COUNT(*) AS total FROM ${table}`).first<any>();
+      return Number(row?.total || 0);
+    }
+    const placeholders = statuses.map(() => "?").join(",");
+    const row = await e.DB.prepare(`SELECT COUNT(*) AS total FROM ${table} WHERE status IN (${placeholders})`).bind(...statuses).first<any>();
+    return Number(row?.total || 0);
+  };
+  const contacts = await countFor("contact_requests", orderDeletionStatuses("contact", scope));
+  const services = await countFor("service_orders", orderDeletionStatuses("service", scope));
+  return { contacts, services, total: contacts + services };
+}
+
+async function orderHasSendingDraft(e: Env, kind: OrderKind, id: string): Promise<boolean> {
+  const support = await e.DB.prepare("SELECT id FROM admin_message_drafts WHERE order_kind=? AND order_id=? AND status='sending' LIMIT 1").bind(kind, id).first<any>();
+  if (support) return true;
+  if (kind === "contact") {
+    const draft = await e.DB.prepare("SELECT id FROM delivery_drafts WHERE request_id=? AND status='sending' LIMIT 1").bind(id).first<any>();
+    return Boolean(draft);
+  }
+  const draft = await e.DB.prepare("SELECT id FROM service_delivery_drafts WHERE service_order_id=? AND status='sending' LIMIT 1").bind(id).first<any>();
+  return Boolean(draft);
+}
+
+async function deleteOrderChildRecords(e: Env, kind: OrderKind, ids: string[]): Promise<void> {
+  const commonTables = ["checkout_name_prompts", "receipt_review_prompts", "payment_receipt_submissions", "admin_message_drafts", "admin_receipt_verify_prompts"] as const;
+  for (let offset = 0; offset < ids.length; offset += 50) {
+    const chunk = ids.slice(offset, offset + 50);
+    if (!chunk.length) continue;
+    const placeholders = chunk.map(() => "?").join(",");
+    for (const table of commonTables) {
+      await e.DB.prepare(`DELETE FROM ${table} WHERE order_kind=? AND order_id IN (${placeholders})`).bind(kind, ...chunk).run();
+    }
+    if (kind === "contact") {
+      await e.DB.prepare(`DELETE FROM delivery_drafts WHERE request_id IN (${placeholders})`).bind(...chunk).run();
+    } else {
+      await e.DB.prepare(`DELETE FROM service_delivery_drafts WHERE service_order_id IN (${placeholders})`).bind(...chunk).run();
+    }
+  }
+}
+
+type PermanentOrderDeletionOutcome = "deleted" | "changed" | "blocked_sending";
+async function permanentlyDeleteOrderSnapshotItem(e: Env, kind: OrderKind, item: PendingOrderSnapshotItem): Promise<PermanentOrderDeletionOutcome> {
+  const order = await loadCustomerOrderByKind(e, kind, item.id);
+  if (!order || order.status !== item.status) return "changed";
+  if (await orderHasSendingDraft(e, kind, item.id)) return "blocked_sending";
+  const table = kind === "contact" ? "contact_requests" : "service_orders";
+  const deleted = await e.DB.prepare(`DELETE FROM ${table} WHERE id=? AND status=?`).bind(item.id, item.status).run();
+  if (!deleted.meta?.changes) return "changed";
+  await deleteOrderChildRecords(e, kind, [item.id]);
+  return "deleted";
+}
+
+async function prepareSingleOrderDeletion(e: Env, actor: string, chat: string | number, order: CustomerOrder) {
+  const payload: SingleOrderDeletionPayload = { kind: order.kind, id: order.id, status: order.status, checkoutCode: order.checkout_code || null };
+  const id = await createPendingAdminAction(e, actor, "delete_order", JSON.stringify(payload));
+  if (!id) return say(e, chat, "You already have an admin action awaiting confirmation. Reply YES or cancel it before starting another. Nothing was deleted.");
+  const hasPayment = order.status === "payment_verified" || order.status === "approved" || order.status === "fulfilled" || Boolean(order.payment_reference);
+  const lines = [
+    "⚠️ <b>Permanently delete this order?</b>",
+    "Type: <b>" + (order.kind === "contact" ? "Profile request" : "Service order") + "</b>",
+    "Order code: <code>" + esc(String(order.checkout_code || "not recorded")) + "</code>",
+    "Order UUID: <code>" + esc(order.id) + "</code>",
+    (order.kind === "contact" ? "Profile: <code>" : "Service: <code>") + esc(String(order.target_id || "unknown")) + "</code>",
+    "Status when previewed: <b>" + esc(order.status) + "</b>"
+  ];
+  if (hasPayment) lines.push("⚠️ <b>This order has a payment attached or verified.</b> Deleting it removes the saved order the customer paid for; double-check before confirming.");
+  lines.push(
+    "",
+    "This <b>permanently deletes</b> the order row plus its saved prompts, receipt submissions, verification prompt, and drafts. It cannot be undone, and the customer will <b>not</b> be notified.",
+    "Kept on purpose: admin audit history and used payment-reference records, so a used Selar reference can never verify another order.",
+    "If this order changes after this preview, or one of its drafts is mid-send, it will be skipped instead of deleted.",
+    "",
+    "Nothing has been deleted yet. Reply <b>YES</b> or tap confirm."
+  );
+  return say(e, chat, lines.join("\n"), {
+    inline_keyboard: [
+      [{ text: "🗑️ Yes, permanently delete", callback_data: "admin-action:confirm:" + id }],
+      [
+        { text: "Cancel", callback_data: "admin-action:cancel:" + id },
+        { text: "🔎 Inspect order", callback_data: (order.kind === "contact" ? "admin:request:" : "admin:service:") + order.id }
+      ]
+    ]
+  });
+}
+
+async function prepareOrderDeletionByReference(e: Env, actor: string, chat: string | number, rawRef: string) {
+  const resolved = await resolveCustomerOrderReference(e, rawRef);
+  if (resolved.error === "invalid") return say(e, chat, "Use a full order UUID or an order code in the format <code>FL-ABC123</code>. Nothing was deleted.");
+  if (resolved.error === "ambiguous") return say(e, chat, "That reference matches more than one order, so nothing was prepared for deletion. Inspect the exact full order UUID with /order ORDER_UUID.");
+  if (resolved.error === "missing" || !resolved.order) return say(e, chat, "No request or service order matched that UUID or FL- order code. Nothing was deleted.");
+  const order = await loadCustomerOrderByKind(e, resolved.order.kind, resolved.order.id) || resolved.order;
+  return prepareSingleOrderDeletion(e, actor, chat, order);
+}
+
+async function sendClearOrdersScopeChooser(e: Env, actor: string, chat: string | number) {
+  const [pending, finished, all] = await Promise.all([
+    orderDeletionScopeCounts(e, "pending"),
+    orderDeletionScopeCounts(e, "finished"),
+    orderDeletionScopeCounts(e, "all")
+  ]);
+  const lines = [
+    "🗑️ <b>Clear orders permanently</b>",
+    "Choose exactly which orders to preview for permanent deletion:",
+    "",
+    "• <b>Pending/unpaid:</b> " + pending.total + " (" + pending.contacts + " profile requests + " + pending.services + " service orders)",
+    "• <b>Finished/closed:</b> " + finished.total + " (" + finished.contacts + " profile requests + " + finished.services + " service orders)",
+    "• <b>ALL orders:</b> " + all.total + " (" + all.contacts + " profile requests + " + all.services + " service orders) — every status, including paid, payment-review, approved, and fulfilled.",
+    "",
+    "Saved orders also define the client chats used for broadcasts, so clearing orders reduces or empties the future broadcast audience.",
+    "Choosing a scope deletes nothing: you will see the exact snapshot counts and must confirm again."
+  ];
+  return say(e, chat, lines.join("\n"), {
+    inline_keyboard: [
+      [{ text: "🧹 Pending/unpaid only (" + pending.total + ")", callback_data: "admin:clearorders:pending" }],
+      [{ text: "🧹 Finished/closed only (" + finished.total + ")", callback_data: "admin:clearorders:finished" }],
+      [{ text: "☠️ ALL orders (" + all.total + ")", callback_data: "admin:clearorders:all" }],
+      [{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]
+    ]
+  });
+}
+
+async function prepareBulkOrderDeletion(e: Env, actor: string, chat: string | number, scope: OrderDeletionScope) {
+  const snapshot = await loadOrderDeletionSnapshot(e, scope);
+  const total = snapshot.contacts.length + snapshot.services.length;
+  if (!total) return say(e, chat, "There are no orders in the <b>" + esc(orderDeletionScopeLabel(scope)) + "</b> scope to delete. Nothing was changed.");
+  const payload: BulkOrderDeletionPayload = { scope, contacts: snapshot.contacts, services: snapshot.services };
+  const id = await createPendingAdminAction(e, actor, "delete_orders_bulk", JSON.stringify(payload));
+  if (!id) return say(e, chat, "You already have an admin action awaiting confirmation. Reply YES or cancel it before starting another. Nothing was deleted.");
+  const lines = [
+    "⚠️ <b>Permanently delete these orders?</b>",
+    "Scope: <b>" + esc(orderDeletionScopeLabel(scope)) + "</b> — " + orderDeletionScopeDescription(scope),
+    "Profile requests: <b>" + snapshot.contacts.length + "</b>",
+    "Service orders: <b>" + snapshot.services.length + "</b>",
+    "Total: <b>" + total + "</b>",
+    "",
+    "Only the order IDs and statuses captured in this preview can be deleted. Orders created or changed afterwards will be left untouched, and any order with a draft mid-send will be skipped.",
+    "The saved prompts, receipt submissions, verification prompts, and drafts for deleted orders are removed too. Customers are <b>not</b> notified. Admin audit history and used payment-reference records are kept so a used Selar reference can never verify another order."
+  ];
+  if (scope === "all") lines.push("☠️ Because this is <b>ALL orders</b>, it also empties the saved order-derived broadcast audience.");
+  lines.push("", "Nothing has been deleted yet. Reply <b>YES</b> or tap confirm.");
+  return say(e, chat, lines.join("\n"), {
+    inline_keyboard: [[
+      { text: "🗑️ Yes, permanently delete " + total + (total === 1 ? " order" : " orders"), callback_data: "admin-action:confirm:" + id }
+    ], [
+      { text: "Cancel", callback_data: "admin-action:cancel:" + id }
+    ]]
+  });
+}
+
+async function prepareClosePendingOrders(e: Env, actor: string, chat: string | number) {
+  const contactRows = await e.DB.prepare("SELECT id,status FROM contact_requests WHERE status IN (?,?,?,?) ORDER BY id")
+    .bind(...PENDING_CONTACT_STATUSES)
+    .all<PendingOrderSnapshotItem>();
+  const serviceRows = await e.DB.prepare("SELECT id,status FROM service_orders WHERE status IN (?,?,?) ORDER BY id")
+    .bind(...PENDING_SERVICE_STATUSES)
+    .all<PendingOrderSnapshotItem>();
+  const snapshot: PendingOrderSnapshot = {
+    contacts: contactRows.results || [],
+    services: serviceRows.results || []
+  };
+  if (snapshot.contacts.length === 0 && snapshot.services.length === 0) {
+    return say(e, chat, "There are no unpaid pending orders to close. Manually verified and payment-review orders are not included in this action.");
+  }
+  const id = await createPendingAdminAction(e, actor, "close_pending_orders", JSON.stringify(snapshot));
+  if (!id) return say(e, chat, "You already have an admin action awaiting confirmation. Reply YES or cancel it before starting another.");
+  return say(e, chat, "⚠️ <b>Close these exact pending orders?</b>\nProfile requests to expire: <b>" + snapshot.contacts.length + "</b>\nService orders to cancel: <b>" + snapshot.services.length + "</b>\n\nOnly the order IDs and statuses captured in this preview can close. Orders created or changed after this preview, manually verified orders, and payment-review orders will not be closed. This retains audit records and does not verify or approve payments. Reply <b>YES</b> or use the button to confirm.", {
+    inline_keyboard: [[{ text: "✅ Confirm close pending orders", callback_data: "admin-action:confirm:" + id }], [{ text: "Cancel", callback_data: "admin-action:cancel:" + id }]]
+  });
+}
+
+async function sendPrepareFulfilmentPrompt(e: Env, chat: string | number, order: CustomerOrder) {
+  if (order.kind === "contact") {
+    return say(e, chat, "📝 <b>Prepare request delivery</b>\nRequest: <code>" + esc(order.id) + "</code>\nCode: <code>" + esc(String(order.checkout_code || "")) + "</code>\nProfile: " + esc(String(order.target_id || "unknown")) + "\n\nTap below to open the delivery draft. No customer message is sent until you preview and explicitly send.", { inline_keyboard: [[{ text: "📝 Prepare delivery", callback_data: "approve:" + order.id }]] });
+  }
+  return say(e, chat, "📝 <b>Prepare service fulfilment</b>\nOrder: <code>" + esc(order.id) + "</code>\nCode: <code>" + esc(String(order.checkout_code || "")) + "</code>\nService: " + esc(String(order.target_id || "unknown")) + "\n\nTap below to open the service composer. No customer message is sent until you preview and explicitly send.", { inline_keyboard: [[{ text: "📝 Prepare service fulfilment", callback_data: "admin:service-deliver:" + order.id }], [{ text: "🔎 Inspect order and request text", callback_data: "admin:service:" + order.id }]] });
 }
 
 async function formatAdminProfileInspection(e: Env, profile: Profile, hiddenRow?: HiddenProfileRow | null): Promise<string> {
@@ -2669,6 +3261,60 @@ async function confirmPendingAdminAction(e: Env, actor: string, chat: string | n
       await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,details) VALUES(?,'admin_closed_pending_orders',?)").bind(actor, "Closed snapshot profile requests=" + closedContacts + " of " + snapshot.contacts.length + ", service orders=" + closedServices + " of " + snapshot.services.length).run();
       await e.DB.prepare("UPDATE admin_pending_actions SET status='completed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='executing'").bind(id).run();
       await say(e, chat, "✅ Previewed pending orders closed. Profile requests expired: <b>" + closedContacts + "</b> of " + snapshot.contacts.length + "; service orders cancelled: <b>" + closedServices + "</b> of " + snapshot.services.length + ". Orders that changed after preview were left untouched. Affected customers were notified. Records were retained for audit; no payment was verified.");
+      return true;
+    }
+    if (action.action === "delete_order") {
+      const deletion = parseSingleOrderDeletionPayload(action.payload);
+      if (!deletion) throw new Error("invalid_single_order_deletion_payload");
+      const orderBefore = await loadCustomerOrderByKind(e, deletion.kind, deletion.id);
+      const outcome = await permanentlyDeleteOrderSnapshotItem(e, deletion.kind, { id: deletion.id, status: deletion.status });
+      const codeLabel = String(orderBefore?.checkout_code || deletion.checkoutCode || deletion.id);
+      if (outcome === "deleted") {
+        await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,'admin_order_permanently_deleted',?,?,?)")
+          .bind(
+            actor,
+            deletion.id,
+            deletion.kind === "contact" ? (orderBefore?.target_id || null) : null,
+            "Admin permanently deleted " + deletion.kind + " order " + codeLabel + " after snapshot confirmation; previewed_status=" + deletion.status + "; saved prompts/receipt submissions/drafts deleted; admin audit and processed_sales/processed_abandoned_carts retained; customer not notified"
+          )
+          .run();
+      }
+      await e.DB.prepare("UPDATE admin_pending_actions SET status='completed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='executing'").bind(id).run();
+      if (outcome === "deleted") {
+        await say(e, chat, "🗑️ <b>Order permanently deleted.</b>\n" + (deletion.kind === "contact" ? "Profile request" : "Service order") + " <code>" + esc(codeLabel) + "</code> and its saved prompts, receipt submissions, and drafts were removed. The customer was not notified. Admin audit history and used payment-reference records were kept.");
+      } else if (outcome === "blocked_sending") {
+        await say(e, chat, "That order was <b>not deleted</b> because one of its drafts is mid-send (<code>sending</code>). Inspect /drafts and the customer conversation first; do not blind-retry the send. You can prepare deletion again after the send state is resolved.");
+      } else {
+        await say(e, chat, "That order changed or no longer exists after the deletion preview, so <b>nothing was deleted</b>. Inspect it again before preparing a new deletion.");
+      }
+      return true;
+    }
+    if (action.action === "delete_orders_bulk") {
+      const deletion = parseBulkOrderDeletionPayload(action.payload);
+      if (!deletion) throw new Error("invalid_bulk_order_deletion_payload");
+      let deletedContacts = 0;
+      let deletedServices = 0;
+      let changed = 0;
+      let blocked = 0;
+      for (const item of deletion.contacts) {
+        const outcome = await permanentlyDeleteOrderSnapshotItem(e, "contact", item);
+        if (outcome === "deleted") deletedContacts++;
+        else if (outcome === "blocked_sending") blocked++;
+        else changed++;
+      }
+      for (const item of deletion.services) {
+        const outcome = await permanentlyDeleteOrderSnapshotItem(e, "service", item);
+        if (outcome === "deleted") deletedServices++;
+        else if (outcome === "blocked_sending") blocked++;
+        else changed++;
+      }
+      const deletedTotal = deletedContacts + deletedServices;
+      const previewedTotal = deletion.contacts.length + deletion.services.length;
+      await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,details) VALUES(?,'admin_orders_permanently_deleted_bulk',?)")
+        .bind(actor, "Admin permanently deleted snapshot orders; scope=" + deletion.scope + "; profile_requests=" + deletedContacts + " of " + deletion.contacts.length + "; service_orders=" + deletedServices + " of " + deletion.services.length + "; changed_skipped=" + changed + "; sending_skipped=" + blocked + "; saved prompts/receipt submissions/drafts deleted for deleted orders; admin audit and processed_sales/processed_abandoned_carts retained; customers not notified")
+        .run();
+      await e.DB.prepare("UPDATE admin_pending_actions SET status='completed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='executing'").bind(id).run();
+      await say(e, chat, "🗑️ <b>Bulk permanent deletion finished.</b>\nScope: <b>" + esc(orderDeletionScopeLabel(deletion.scope)) + "</b>\nPermanently deleted: <b>" + deletedTotal + "</b> of " + previewedTotal + " (" + deletedContacts + " profile requests, " + deletedServices + " service orders).\nSkipped because changed after preview: <b>" + changed + "</b>\nSkipped because a draft was mid-send: <b>" + blocked + "</b>\nCustomers were not notified. Admin audit history and used payment-reference records were kept.");
       return true;
     }
     if (action.action === "recover_draft") {
@@ -3444,12 +4090,33 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Customer-message instructions opened." });
     }
     if (action === "help") {
-      await say(e, chat, "<b>Admin guide</b>\n• Review the real sale in Selar before confirming payment.\n• Payment confirmation and fulfilment delivery are separate actions.\n• Only one editable composer can be open across request delivery, service fulfilment, support, and broadcast; ordinary text/media edits only that composer.\n• Request/service fulfilment requires a manually verified payment, your composed message/media, preview, and the draft's explicit Send button. YES never becomes delivery text.\n• Use /order CODE_OR_UUID for full order inspection and /profile ID_OR_NAME for profile visibility/request counts.\n• Use /drafts to inspect editable/locked drafts. Recovery only cancels a stale lock after you inspect Telegram and confirms separately; it never resends.\n• Profile hiding is reversible; order closing/rejection retains records for audit.\n• Use /help for all supported commands.\n• AI replies cannot verify payments or approve delivery.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
+      await say(e, chat, "<b>Admin guide</b>\n• Review the real sale in Selar before confirming payment.\n• Payment confirmation and fulfilment delivery are separate actions.\n• Only one editable composer can be open across request delivery, service fulfilment, support, and broadcast; ordinary text/media edits only that composer.\n• Request/service fulfilment requires a manually verified payment, your composed message/media, preview, and the draft's explicit Send button. YES never becomes delivery text.\n• Use /order CODE_OR_UUID for full order inspection and /profile ID_OR_NAME for profile visibility/request counts.\n• Use /drafts to inspect editable/locked drafts. Recovery only cancels a stale lock after you inspect Telegram and confirms separately; it never resends.\n• Profile hiding is reversible; order closing/rejection retains records for audit. Only confirmed /deleteorder and /clearorders actions permanently delete order rows and their linked prompts/receipts/drafts; audit and used payment-reference records remain.\n• Use /help for all supported commands.\n• The admin assistant can prepare deletions, pending-order closures, fulfilment prompts, and message/broadcast drafts for your confirmation. It cannot verify payments, approve or send delivery by itself, or delete/hide profiles.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin guide opened." });
     }
     if (action === "home") {
-      await say(e, chat, "<b>Admin Desk</b>\nChoose an action:", { inline_keyboard: [[{ text: "📥 Review requests", callback_data: "admin:pending" }], [{ text: "🧾 Review service orders", callback_data: "admin:orders" }], [{ text: "📝 Drafts & recovery", callback_data: "admin:drafts" }], [{ text: "📣 Broadcast to all clients", callback_data: "admin:broadcast_help" }], [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }], [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]] });
+      await say(e, chat, "<b>Admin Desk</b>\nChoose an action:", { inline_keyboard: [[{ text: "📥 Review requests", callback_data: "admin:pending" }], [{ text: "🧾 Review service orders", callback_data: "admin:orders" }], [{ text: "📝 Drafts & recovery", callback_data: "admin:drafts" }], [{ text: "📣 Broadcast to all clients", callback_data: "admin:broadcast_help" }], [{ text: "💬 How to message a customer", callback_data: "admin:message_help" }], [{ text: "🗑️ Clear orders permanently", callback_data: "admin:clear_orders" }], [{ text: "🤖 Admin assistant (AI tasks)", callback_data: "admin:assistant_help" }], [{ text: "📘 Admin guide & safeguards", callback_data: "admin:help" }]] });
       return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin menu." });
+    }
+    if (action === "clear_orders") {
+      await sendClearOrdersScopeChooser(e, actor, chat);
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Choose a deletion scope. Nothing deleted yet." });
+    }
+    const clearOrdersMatch = action.match(/^clearorders:(pending|finished|all)$/i);
+    if (clearOrdersMatch) {
+      await prepareBulkOrderDeletion(e, actor, chat, clearOrdersMatch[1].toLowerCase() as OrderDeletionScope);
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Review the exact deletion preview. Nothing deleted yet." });
+    }
+    if (action === "assistant_help") {
+      await say(e, chat, "<b>🤖 Admin assistant</b>\nIn this private admin chat you can type requests such as:\n• <code>Delete order FL-ABC123</code>\n• <code>Clear all pending orders</code> or <code>Clear all orders</code>\n• <code>Write a friendly message to customer FL-ABC123 telling them…</code>\n• <code>Write a broadcast announcing…</code>\n• <code>Inspect FL-ABC123</code> or <code>Show service orders</code>\n\nThe assistant only prepares work: deletions and pending-order closures still need your Confirm button or typed YES, and customer/broadcast text opens a draft that you preview and explicitly send. It cannot verify payments, approve or send fulfilment by itself, or delete/hide profiles. Profile hiding stays manual with <code>/hideprofile PROFILE_ID</code>.\n\nIf a composer is already open, your ordinary text edits that draft instead, so finish or cancel it first. Voice transcripts cannot start deletions or closures; type those requests.", { inline_keyboard: [[{ text: "↩️ Back to Admin Desk", callback_data: "admin:home" }]] });
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin assistant instructions opened." });
+    }
+    const deleteOrderMatch = action.match(/^deleteorder:(contact|service):([0-9a-f-]{36})$/i);
+    if (deleteOrderMatch) {
+      const kind = deleteOrderMatch[1].toLowerCase() as OrderKind;
+      const order = await loadCustomerOrderByKind(e, kind, deleteOrderMatch[2]);
+      if (!order) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Order not found." });
+      await prepareSingleOrderDeletion(e, actor, chat, order);
+      return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Review the permanent-deletion confirmation. Nothing deleted yet." });
     }
     const customerMessageMatch = action.match(/^message:(contact|service):([0-9a-f-]{36})$/i);
     if (customerMessageMatch) {

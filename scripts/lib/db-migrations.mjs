@@ -215,6 +215,14 @@ export const MIGRATIONS = [
           ON admin_receipt_verify_prompts(order_kind, order_id);
       `);
     }
+  },
+  {
+    version: '0021_admin_order_deletion_actions',
+    description: 'Allow durable confirmations for permanent single and bulk order deletion',
+    apply(db) {
+      const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0021_admin_order_deletion_actions.sql'), 'utf8');
+      db.exec(sql);
+    }
   }
 ];
 
