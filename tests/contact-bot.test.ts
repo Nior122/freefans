@@ -232,9 +232,10 @@ test('Customer starting contact request generates unique FL-XXXXXX code and pers
     assert.ok(sent, 'Message must be sent to customer');
     const greeting = String(sent.data.text);
     assert.ok(greeting.includes('Hi babe! I’m Annie for Anaimiya.'));
-    assert.ok(greeting.includes(`I’ve started your hot request. Your code is:\n\n👉 <b>${order.checkout_code}</b> 👈`), 'The unique checkout code must be bold, prominent, and on its own line');
+    assert.ok(greeting.includes(`I’ve started your hot request. Your code is:\n\n👉 <b><code>${order.checkout_code}</code></b> 👈`), 'The unique checkout code must be bold, tap-to-copy, prominent, and on its own line');
     assert.ok(greeting.includes('Tap the <b>Pay now</b> button below to open checkout.'));
     assert.ok(greeting.includes(`write your full name and the code exactly like this:\n\n<b>John Doe ${order.checkout_code}</b>`), 'The example name must include this request’s actual code');
+    assert.ok(greeting.includes('Use the code exactly as shown, with no space after its final character.'));
     assert.ok(greeting.includes('This lets me match your payment fast. Do not use email — it will not work.'));
     assert.ok(greeting.includes('all her sexy videos, fresh OnlyFans leaks, way more hot photos of her'));
     assert.ok(greeting.includes('Ready to unlock it all? 🔥'));
@@ -243,6 +244,9 @@ test('Customer starting contact request generates unique FL-XXXXXX code and pers
     const payNowButton = greetingButtons.find((button: any) => button.text === '💳 Pay now');
     assert.ok(payNowButton, 'The website-originated greeting must preserve the Pay now button');
     assert.equal(payNowButton.callback_data, `pay_selar:${order.id}`);
+    const copyButton = greetingButtons.find((button: any) => button.text === '📋 Copy unique code');
+    assert.ok(copyButton, 'The greeting must include a Copy unique code button');
+    assert.equal(copyButton.callback_data, `copycode:${order.id}`);
 
     await tgPost(env, callbackFrom(5001, payNowButton.callback_data));
     const checkoutMessage = messagesTo(sentTelegramMessages, '5001').find(m => String(m.data.text).includes('Open the checkout here:'));
@@ -312,8 +316,10 @@ test('Direct /start opens Annie welcome, service menu, and channel checkout usin
       messagesTo(sentTelegramMessages, String(env.ADMIN_TELEGRAM_ID)).map(m => String(m.data.text)).join("\n"),
       /New channel subscription order|Source: Telegram bot → View our services/
     );
-    assert.match(String(checkoutMessage?.data.text), /👉 <b>Unique code = FL-[0-9A-Z]{6}<\/b> 👈/);
+    assert.match(String(checkoutMessage?.data.text), /👉 <b>Unique code = <code>FL-[0-9A-Z]{6}<\/code><\/b> 👈/);
     assert.match(String(checkoutMessage?.data.text), /<b>Example:<\/b>\n<code>John Doe FL-[0-9A-Z]{6}<\/code>/);
+    assert.ok(String(checkoutMessage?.data.text).includes('Use the code exactly as shown, with no space after its final character.'));
+    assert.ok(buttons.some((b: any) => b.text === '📋 Copy unique code' && b.callback_data === `copycode:${order.id}`));
     assert.match(String(checkoutMessage?.data.text), /You're about to join our channel/);
   } finally {
     cleanup();
@@ -607,6 +613,13 @@ test('Service order delivery safeguards and fulfilment flow', async () => {
       })
     }), { ...env, SELAR_WEBHOOK_SECRET: 'selar-secret-123' });
 
+    const servicePaymentFound = sentTelegramMessages.filter(m => String(m.data.chat_id) === '7001' && String(m.data.text || '').includes('Annie found your payment'));
+    assert.equal(servicePaymentFound.length, 1, 'A matched service webhook must automatically tell the customer without an I’ve paid tap');
+    assert.ok(String(servicePaymentFound[0].data.text).includes('An admin still has to confirm it, so please wait a little.'));
+    assert.ok(String(servicePaymentFound[0].data.text).includes('your service order will be sent here'));
+    order = await db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any;
+    assert.equal(order.status, 'pending_payment', 'The automatic payment-found message must not verify payment');
+
     // 4. Admin confirms payment manually via serviceverify
     await worker.fetch(new Request('https://worker.local/telegram/webhook', {
       method: 'POST',
@@ -648,6 +661,8 @@ test('Service order delivery safeguards and fulfilment flow', async () => {
     assert.equal(order.status, 'fulfilled');
     const customerDeliveryMsg = sentTelegramMessages.find(m => m.method === 'sendMessage' && String(m.data.chat_id) === '7001');
     assert.ok(customerDeliveryMsg, 'Customer must receive fulfilment only after confirmation');
+    assert.ok(String(customerDeliveryMsg.data.text).startsWith('🎊 <b>Congratulations!</b> Your payment has been confirmed'));
+    assert.ok(String(customerDeliveryMsg.data.text).indexOf('🎊') < String(customerDeliveryMsg.data.text).indexOf('https://files.example.com/asset.zip'));
     assert.ok(String(customerDeliveryMsg.data.text).includes('https://files.example.com/asset.zip'));
     const draft = db.raw.prepare('SELECT status FROM service_delivery_drafts WHERE service_order_id=?').get(serviceOrderId) as any;
     assert.equal(draft.status, 'sent');
@@ -1077,10 +1092,11 @@ test('Selar webhook negative cases and mismatched code/name never mutate payment
   }
 });
 
-test('Duplicate Selar webhook delivery records one sale and one admin notification', async () => {
+test('Duplicate Selar webhook delivery records one sale, one admin notification, and one automatic customer payment-found notice', async () => {
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
+    seedLanguage(db, 5140, 'es');
     const reqId = crypto.randomUUID();
     db.raw.prepare(`INSERT INTO contact_requests (id, telegram_user_id, telegram_chat_id, profile_id, status, payment_method, checkout_code, checkout_name)
       VALUES (?, '5140', '5140', 'anaimiya', 'pending_payment', 'selar', 'FL-DUP001', 'Buyer Person')`).run(reqId);
@@ -1090,6 +1106,11 @@ test('Duplicate Selar webhook delivery records one sale and one admin notificati
     assert.equal((await (await selarPost(env, sale)).json()).duplicate, true);
     assert.equal((db.raw.prepare('SELECT count(*) AS cnt FROM processed_sales').get() as any).cnt, 1);
     assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).filter(m => String(m.data.text).includes('Selar sale received')).length, 1);
+    const contactPaymentFound = messagesTo(sentTelegramMessages, '5140').filter(m => String(m.data.text).includes('Annie encontró tu pago'));
+    assert.equal(contactPaymentFound.length, 1, 'The customer must receive one automatic localized payment-found message');
+    assert.ok(String(contactPaymentFound[0].data.text).includes('todavía tiene que confirmarlo'));
+    assert.ok(String(contactPaymentFound[0].data.text).includes('espera un poquito'));
+    assert.ok(String(contactPaymentFound[0].data.text).includes('te enviaré aquí tu pedido'));
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(reqId) as any).status, 'pending_payment', 'Duplicate delivery must not verify or deliver');
   } finally {
     cleanup();
@@ -1135,6 +1156,7 @@ test('Request delivery still requires manual payment verification and explicit s
   const db = createTestDb();
   const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
   try {
+    seedLanguage(db, 5162, 'fr');
     const unverifiedId = crypto.randomUUID();
     db.raw.prepare(`INSERT INTO contact_requests (id, telegram_user_id, telegram_chat_id, profile_id, status, payment_method, payment_reference, checkout_code)
       VALUES (?, '5160', '5160', 'anaimiya', 'pending_payment', 'selar', 'ref-unverified', 'FL-UNV001')`).run(unverifiedId);
@@ -1155,6 +1177,9 @@ test('Request delivery still requires manual payment verification and explicit s
     await tgPost(env, callbackFrom(10001, `draft:send:${draft.id}`));
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(okId) as any).status, 'approved');
     assert.equal(messagesTo(sentTelegramMessages, '5162').filter(m => String(m.data.text || '').includes('Your admin-prepared request fulfilment is ready.')).length, 1);
+    const requestDelivery = messagesTo(sentTelegramMessages, '5162').find(m => String(m.data.text || '').includes('Your admin-prepared request fulfilment is ready.'));
+    assert.ok(String(requestDelivery?.data.text).startsWith('🎊 <b>Félicitations !</b>'));
+    assert.ok(String(requestDelivery?.data.text).indexOf('🎊') < String(requestDelivery?.data.text).indexOf('Your admin-prepared request fulfilment is ready.'));
   } finally {
     cleanup();
   }
@@ -3388,6 +3413,40 @@ test('Invalid language callbacks fail safely, the admin cannot save a customer l
     await tgPost(env, callbackFrom(10001, 'language:set:es', 'lang-admin-blocked'));
     assert.ok(sentTelegramMessages.some(m => m.method === 'answerCallbackQuery' && String(m.data.text).includes('Open your private chat with this bot to choose a language.')));
     assert.equal(db.raw.prepare("SELECT * FROM user_language_preferences WHERE telegram_user_id='10001'").get(), undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+
+test('Copy unique code sends only the order owner a tap-to-copy exact code in their saved language', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    seedLanguage(db, 6321, 'pt');
+    await tgPost(env, userMsg(6321, '/start contact_anaimiya'));
+    const order = db.raw.prepare("SELECT * FROM contact_requests WHERE telegram_user_id='6321'").get() as any;
+    assert.ok(order);
+    const greeting = messagesTo(sentTelegramMessages, '6321').at(-1);
+    assert.ok(String(greeting?.data.text).includes(`<b><code>${order.checkout_code}</code></b>`));
+    assert.ok(String(greeting?.data.text).includes('sem acrescentares um espaço depois do último carácter'));
+    const buttons = ((greeting?.data.reply_markup as any)?.inline_keyboard || []).flat();
+    const copyButton = buttons.find((b: any) => b.text === '📋 Copiar código único');
+    assert.ok(copyButton);
+    assert.equal(copyButton.callback_data, `copycode:${order.id}`);
+
+    await tgPost(env, callbackFrom(6321, copyButton.callback_data, 'copy-owner'));
+    const copyMessage = messagesTo(sentTelegramMessages, '6321').at(-1);
+    assert.ok(String(copyMessage?.data.text).includes(`<code>${order.checkout_code}</code>`));
+    assert.ok(String(copyMessage?.data.text).includes('Usa o código exactamente como está mostrado'));
+    assert.ok(!String(copyMessage?.data.text).includes(`${order.checkout_code} </code>`), 'The copied code must not include a trailing space');
+    assert.ok(sentTelegramMessages.some(m => m.method === 'answerCallbackQuery' && String(m.data.callback_query_id) === 'copy-owner' && String(m.data.text).includes('toca nele para o copiares')));
+
+    const ownerMessageCount = messagesTo(sentTelegramMessages, '6321').length;
+    await tgPost(env, callbackFrom(6322, copyButton.callback_data, 'copy-other-user'));
+    assert.equal(messagesTo(sentTelegramMessages, '6321').length, ownerMessageCount);
+    assert.equal(messagesTo(sentTelegramMessages, '6322').length, 0, 'Another customer must not receive the order owner’s code');
+    assert.ok(sentTelegramMessages.some(m => m.method === 'answerCallbackQuery' && String(m.data.callback_query_id) === 'copy-other-user' && String(m.data.text).includes('This order is not available for this Telegram account.')));
   } finally {
     cleanup();
   }

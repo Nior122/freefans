@@ -516,6 +516,7 @@ async function catalogueIncludingHidden(e: Env): Promise<{ profiles: Profile[]; 
 function paymentKeyboard(e: Env, id: string, language: LanguageCode = "en") {
   const rows: Record<string, unknown>[][] = [];
   if (enabledMethods(e).includes("selar")) rows.push([{ text: tr(language, "payNow"), callback_data: `pay_selar:${id}` }]);
+  rows.push([{ text: tr(language, "copyUniqueCode"), callback_data: `copycode:${id}` }]);
   rows.push([{ text: tr(language, "paidCheckAgain"), callback_data: `paid:${id}` }]);
   return { inline_keyboard: rows };
 }
@@ -1446,7 +1447,7 @@ async function start(e: Env, m: Msg, payload: string) {
     }
   }
   if (!inserted) return say(e, chat, tr(language, "requestStartFailed"));
-  const greeting = tr(language, "profileGreeting", { profileName: esc(profile.name), code: esc(code) });
+  const greeting = tr(language, "profileGreeting", { profileName: esc(profile.name), code: esc(code), exactCodeInstruction: tr(language, "exactCodeNoTrailingSpace") });
   return say(e, chat, greeting, paymentKeyboard(e, requestId, language));
 }
 
@@ -1912,9 +1913,10 @@ async function startChannelSubscription(e: Env, m: Msg, forceNew = false) {
   } catch { return say(e, chat, tr(language, "startSubscriptionFailed")); }
   const checkout = new URL(e.SERVICE_CHECKOUT_URL);
   checkout.searchParams.set("add_to_cart", "1");
-  return say(e, chat, tr(language, "channelCheckoutInstructions", { code: esc(code) }), {
+  return say(e, chat, tr(language, "channelCheckoutInstructions", { code: esc(code), exactCodeInstruction: tr(language, "exactCodeNoTrailingSpace") }), {
     inline_keyboard: [
       [{ text: tr(language, "payNow"), url: checkout.toString() }],
+      [{ text: tr(language, "copyUniqueCode"), callback_data: "copycode:" + id }],
       [{ text: tr(language, "doneCheckoutCompleted"), callback_data: "done:" + id }],
       [{ text: tr(language, "paidCheckAgain"), callback_data: "paid:" + id }]
     ]
@@ -2856,11 +2858,12 @@ async function message(e: Env, m: Msg) {
       const markup = {
         inline_keyboard: [
           [{ text: tr(language, "payNow"), url: checkout.toString() }],
+          [{ text: tr(language, "copyUniqueCode"), callback_data: `copycode:${serviceOrder.id}` }],
           [{ text: tr(language, "doneCheckoutCompleted"), callback_data: `done:${serviceOrder.id}` }],
           [{ text: tr(language, "paidCheckAgain"), callback_data: `paid:${serviceOrder.id}` }]
         ]
       };
-      return say(e, chat, tr(language, "serviceCheckoutInstructions", { code: esc(serviceOrder.checkout_code) }), markup);
+      return say(e, chat, tr(language, "serviceCheckoutInstructions", { code: esc(serviceOrder.checkout_code), exactCodeInstruction: tr(language, "exactCodeNoTrailingSpace") }), markup);
     }
     if (t.length < 2 || t.length > 2000) return say(e, chat, tr(language, "messageLengthInvalid"));
     const previous = String(serviceOrder.request_text || "");
@@ -3813,6 +3816,16 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     await cancelCustomerServiceOrder(e, u.message.chat.id, actor, id);
     return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: tr(language, "orderCancellationChecked") });
   }
+  if (data.startsWith("copycode:")) {
+    const language = actor === e.ADMIN_TELEGRAM_ID ? "en" : await customerLanguage(e, actor, chat);
+    if (!u.message || String(u.message.chat.id) !== actor) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: tr(language, "openBotContinue") });
+    const id = data.slice("copycode:".length);
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: tr(language, "invalidOrderReference") });
+    const order = await loadCustomerOrderById(e, id);
+    if (!order || String(order.telegram_user_id) !== actor || !order.checkout_code) return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: tr(language, "orderUnavailableAccount") });
+    await say(e, u.message.chat.id, tr(language, "copyUniqueCodeMessage", { code: esc(order.checkout_code), exactCodeInstruction: tr(language, "exactCodeNoTrailingSpace") }));
+    return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: tr(language, "copyUniqueCodeCallback") });
+  }
   if (isAdminCallback && (actor !== e.ADMIN_TELEGRAM_ID || chat === undefined || String(chat) !== actor)) {
     return tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: "Admin private chat only." });
   }
@@ -4032,7 +4045,7 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
     if(d.request_status!=="payment_verified") return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Payment or request state changed. Nothing was sent."});
     const body=String(d.message_text||"").trim();
     if(draftAction==="preview") {
-      const preview="👀 <b>Delivery preview</b>\nRequest: <code>"+d.request_id+"</code>\nCheckout code: <code>"+esc(d.checkout_code||"")+"</code>\nProfile: <code>"+esc(d.profile_id)+"</code>\n\n🎉 Congratulations! Your payment has been verified and your request approved.\n\n"+(body?esc(body):"<i>No custom message added.</i>")+"\n\n"+(d.media_kind?"📎 One "+esc(d.media_mime_type||d.media_kind)+" attachment will be sent.":"No media attached.")+"\n\n<i>Preview only — nothing has been sent. No creator contact is stored or added automatically; the customer receives only the message/media you composed.</i>";
+      const preview="👀 <b>Delivery preview</b>\nRequest: <code>"+d.request_id+"</code>\nCheckout code: <code>"+esc(d.checkout_code||"")+"</code>\nProfile: <code>"+esc(d.profile_id)+"</code>\n\n🎊 Congratulations! Your payment has been verified and your request approved.\n\n"+(body?esc(body):"<i>No custom message added.</i>")+"\n\n"+(d.media_kind?"📎 One "+esc(d.media_mime_type||d.media_kind)+" attachment will be sent.":"No media attached.")+"\n\n<i>Preview only — nothing has been sent. No creator contact is stored or added automatically; the customer receives only the message/media you composed.</i>";
       await say(e,chat,preview,{inline_keyboard:[[ {text:"✅ Send to customer",callback_data:"draft:send:"+draftId},{text:"✖️ Cancel",callback_data:"draft:cancel:"+draftId} ]]});
       return tg(e,"answerCallbackQuery",{callback_query_id:u.id,text:"Preview only — nothing has been sent."});
     }
@@ -4198,11 +4211,12 @@ async function callback(e: Env, u: NonNullable<Update["callback_query"]>) {
       const markup = {
         inline_keyboard: [
           [{ text: tr(language, "openCheckout"), url: checkout.toString() }],
+          [{ text: tr(language, "copyUniqueCode"), callback_data: `copycode:${id}` }],
           [{ text: tr(language, "doneCheckoutCompleted"), callback_data: `done:${id}` }],
           [{ text: tr(language, "paidCheckAgain"), callback_data: `paid:${id}` }]
         ]
       };
-      await say(e, r.telegram_chat_id, tr(language, "contactCheckoutInstructions", { url: checkout.toString(), code: esc(r.checkout_code || "FL-7K4P9A") }), markup);
+      await say(e, r.telegram_chat_id, tr(language, "contactCheckoutInstructions", { url: checkout.toString(), code: esc(r.checkout_code || "FL-7K4P9A"), exactCodeInstruction: tr(language, "exactCodeNoTrailingSpace") }), markup);
     }
     await tg(e, "answerCallbackQuery", { callback_query_id: u.id, text: tr(language, "checkoutInstructionsSent") }); return;
   }
@@ -4510,6 +4524,7 @@ async function selar(request: Request, e: Env) {
       if (!upd.meta?.changes) throw new Error("order_state_changed_before_attach");
       const markup = { inline_keyboard: [[{ text: "✅ I checked Selar — confirm service payment", callback_data: "serviceverify:" + target.id }]] };
       await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nSource: ${String(target.profile_id) === "telegram_channel" ? "Telegram bot → View our services → Subscribe button" : "Telegram bot service chat"}\nCheckout product: service checkout (<code>${esc(e.SERVICE_PRODUCT_ID || "")}</code>)\nOrder: <code>${target.id}</code>\nService: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nTelegram username: ${target.telegram_username ? "@" + esc(String(target.telegram_username).replace(/^@+/, "")) : "not provided"}\nOrder code: <code>${esc(effectiveCode)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}${clueNote}`, markup);
+      await sayBestEffort(e, target.telegram_chat_id, tr(await customerLanguageForChat(e, target.telegram_chat_id), "paymentNotificationReceivedService"));
     }
   } catch (err) {
     // Processing failed after the dedup marker was written: remove the marker so a
