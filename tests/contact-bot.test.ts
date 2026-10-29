@@ -34,6 +34,7 @@ function createTestDb() {
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0020_receipt_review_actions.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0021_admin_order_deletion_actions.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0022_user_language_preferences.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0023_processed_sale_customer_notifications.sql'), 'utf8'));
 
   return {
     raw: db,
@@ -82,9 +83,10 @@ function seedLanguage(db: any, userId: number | string, language = 'en') {
 }
 
 // Create a test environment with mock fetch to intercept Telegram API calls and catalogue fetch
-function createTestEnv(db: any, options: { failTelegramMethods?: Set<string> } = {}) {
+function createTestEnv(db: any, options: { failTelegramMethods?: Set<string>; failTelegramChatIds?: Set<string> } = {}) {
   const sentTelegramMessages: Array<{ method: string; data: Record<string, unknown> }> = [];
   const failTelegramMethods = options.failTelegramMethods || new Set<string>();
+  const failTelegramChatIds = options.failTelegramChatIds || new Set<string>();
 
   const mockFetch = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const urlStr = String(url);
@@ -95,7 +97,7 @@ function createTestEnv(db: any, options: { failTelegramMethods?: Set<string> } =
       const method = parts[parts.length - 1];
       const body = init?.body ? JSON.parse(String(init.body)) : {};
       sentTelegramMessages.push({ method, data: body });
-      if (failTelegramMethods.has(method)) {
+      if (failTelegramMethods.has(method) || (method === 'sendMessage' && failTelegramChatIds.has(String(body.chat_id)))) {
         return new Response(JSON.stringify({ ok: false, description: 'synthetic Telegram delivery failure' }), {
           status: 502,
           headers: { 'content-type': 'application/json' }
@@ -149,7 +151,7 @@ function createTestEnv(db: any, options: { failTelegramMethods?: Set<string> } =
     globalThis.fetch = originalFetch;
   };
 
-  return { env, sentTelegramMessages, cleanup, failTelegramMethods };
+  return { env, sentTelegramMessages, cleanup, failTelegramMethods, failTelegramChatIds };
 }
 
 test('Worker health check endpoint returns 200 with service information', async () => {
@@ -619,6 +621,8 @@ test('Service order delivery safeguards and fulfilment flow', async () => {
     assert.ok(String(servicePaymentFound[0].data.text).includes('your service order will be sent here'));
     order = await db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(serviceOrderId) as any;
     assert.equal(order.status, 'pending_payment', 'The automatic payment-found message must not verify payment');
+    const processedServiceSale = db.raw.prepare('SELECT customer_notification_status,customer_notification_attempts FROM processed_sales WHERE provider_reference=?').get('selar_srv_ref_1') as any;
+    assert.deepEqual([processedServiceSale.customer_notification_status, processedServiceSale.customer_notification_attempts], ['sent', 1], 'The successful automatic customer notice must be durably recorded');
 
     // 4. Admin confirms payment manually via serviceverify
     await worker.fetch(new Request('https://worker.local/telegram/webhook', {
@@ -1112,6 +1116,110 @@ test('Duplicate Selar webhook delivery records one sale, one admin notification,
     assert.ok(String(contactPaymentFound[0].data.text).includes('espera un poquito'));
     assert.ok(String(contactPaymentFound[0].data.text).includes('te enviaré aquí tu pedido'));
     assert.equal((db.raw.prepare('SELECT status FROM contact_requests WHERE id=?').get(reqId) as any).status, 'pending_payment', 'Duplicate delivery must not verify or deliver');
+    const processedDuplicateSale = db.raw.prepare('SELECT customer_notification_status,customer_notification_attempts FROM processed_sales WHERE provider_reference=?').get('ref-dup-1') as any;
+    assert.deepEqual([processedDuplicateSale.customer_notification_status, processedDuplicateSale.customer_notification_attempts], ['sent', 1], 'Duplicate delivery must not create a second tracked customer notice');
+  } finally {
+    cleanup();
+  }
+});
+
+
+test('Service payment-found notice is tracked and recovered after an explicit Telegram failure', async () => {
+  const db = createTestDb();
+  const failTelegramChatIds = new Set(['7201']);
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db, { failTelegramChatIds });
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status, payment_method, checkout_code, checkout_name)
+      VALUES (?, 'telegram_channel', '7201', '7201', 'pending_payment', 'selar', 'FL-RECOV1', 'Recovery Buyer')`).run(orderId);
+    const sale = { reference: 'ref-service-recovery-1', product_code: env.SERVICE_PRODUCT_ID, customer_full_name: 'Recovery Buyer FL-RECOV1', email: 'recovery@example.com' };
+
+    const firstResponse = await selarPost(env, sale);
+    const first = await firstResponse.json() as any;
+    assert.equal(firstResponse.status, 200);
+    assert.equal(first.matched, true);
+    assert.equal(first.customer_notification, 'pending', 'An explicit Telegram rejection must remain recoverable instead of disappearing silently');
+
+    let order = db.raw.prepare('SELECT status,payment_reference FROM service_orders WHERE id=?').get(orderId) as any;
+    assert.deepEqual([order.status, order.payment_reference], ['pending_payment', 'ref-service-recovery-1']);
+    let processed = db.raw.prepare('SELECT customer_notification_status,customer_notification_attempts FROM processed_sales WHERE provider_reference=?').get('ref-service-recovery-1') as any;
+    assert.deepEqual([processed.customer_notification_status, processed.customer_notification_attempts], ['pending', 1]);
+    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).filter(m => String(m.data.text).includes('Selar sale received')).length, 1);
+    assert.equal(messagesTo(sentTelegramMessages, '7201').filter(m => String(m.data.text).includes('Annie found your payment')).length, 1, 'The mock records the failed customer attempt');
+
+    failTelegramChatIds.delete('7201');
+    sentTelegramMessages.length = 0;
+    const duplicate = await (await selarPost(env, sale)).json() as any;
+    assert.equal(duplicate.duplicate, true);
+    assert.equal(duplicate.customer_notification, 'sent', 'A duplicate delivery must recover a still-pending customer notice');
+    const recovered = messagesTo(sentTelegramMessages, '7201').filter(m => String(m.data.text).includes('Annie found your payment'));
+    assert.equal(recovered.length, 1);
+    assert.ok(String(recovered[0].data.text).includes('please wait a little'));
+    assert.ok(String(recovered[0].data.text).includes('your service order will be sent here'));
+    assert.equal(messagesTo(sentTelegramMessages, env.ADMIN_TELEGRAM_ID).filter(m => String(m.data.text).includes('Selar sale received')).length, 0, 'Recovery must not duplicate the admin sale alert');
+
+    processed = db.raw.prepare('SELECT customer_notification_status,customer_notification_attempts FROM processed_sales WHERE provider_reference=?').get('ref-service-recovery-1') as any;
+    assert.deepEqual([processed.customer_notification_status, processed.customer_notification_attempts], ['sent', 2]);
+    order = db.raw.prepare('SELECT status,payment_reference FROM service_orders WHERE id=?').get(orderId) as any;
+    assert.equal(order.status, 'pending_payment', 'Recovering the informational notice must not verify payment');
+
+    sentTelegramMessages.length = 0;
+    const third = await (await selarPost(env, sale)).json() as any;
+    assert.equal(third.customer_notification, 'sent');
+    assert.equal(messagesTo(sentTelegramMessages, '7201').length, 0, 'Once sent, duplicate sales must not notify the customer again');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Scheduled recovery sends a pending legacy service payment-found notice exactly once', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    const orderId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status, payment_method, payment_reference, checkout_code, checkout_name)
+      VALUES (?, 'telegram_channel', '7202', '7202', 'pending_payment', 'selar', 'legacy-service-ref', 'FL-LEG001', 'Legacy Buyer')`).run(orderId);
+    db.raw.prepare(`INSERT INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id,received_at,customer_notification_status,customer_notification_attempts,customer_notification_updated_at)
+      VALUES('legacy-service-ref','legacy@example.com',0,'UNK',?,?,'2026-10-29T13:00:00.000Z','pending',0,'2026-10-29T13:00:00.000Z')`).run(env.SERVICE_PRODUCT_ID, orderId);
+
+    await worker.scheduled({ cron: '*/5 * * * *' } as any, env);
+    const firstPass = messagesTo(sentTelegramMessages, '7202').filter(m => String(m.data.text).includes('Annie found your payment'));
+    assert.equal(firstPass.length, 1, 'The five-minute scheduler must recover the pending service notice without an I’ve paid tap');
+    assert.ok(String(firstPass[0].data.text).includes('An admin still has to confirm it, so please wait a little.'));
+    assert.ok(String(firstPass[0].data.text).includes('your service order will be sent here'));
+    let processed = db.raw.prepare('SELECT customer_notification_status,customer_notification_attempts FROM processed_sales WHERE provider_reference=?').get('legacy-service-ref') as any;
+    assert.deepEqual([processed.customer_notification_status, processed.customer_notification_attempts], ['sent', 1]);
+    assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(orderId) as any).status, 'pending_payment');
+
+    await worker.scheduled({ cron: '*/5 * * * *' } as any, env);
+    assert.equal(messagesTo(sentTelegramMessages, '7202').filter(m => String(m.data.text).includes('Annie found your payment')).length, 1, 'A sent notice must not be repeated by later scheduler passes');
+    processed = db.raw.prepare('SELECT customer_notification_status,customer_notification_attempts FROM processed_sales WHERE provider_reference=?').get('legacy-service-ref') as any;
+    assert.deepEqual([processed.customer_notification_status, processed.customer_notification_attempts], ['sent', 1]);
+  } finally {
+    cleanup();
+  }
+});
+
+test('I’ve paid fallback gives the explicit service wait instructions and closes the notification ledger', async () => {
+  const db = createTestDb();
+  const { env, sentTelegramMessages, cleanup } = createTestEnv(db);
+  try {
+    seedLanguage(db, 7203);
+    const orderId = crypto.randomUUID();
+    db.raw.prepare(`INSERT INTO service_orders (id, service_id, telegram_user_id, telegram_chat_id, status, payment_method, payment_reference, checkout_code, checkout_name)
+      VALUES (?, 'telegram_channel', '7203', '7203', 'pending_payment', 'selar', 'fallback-service-ref', 'FL-FALL01', 'Fallback Buyer')`).run(orderId);
+    db.raw.prepare(`INSERT INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id,customer_notification_status,customer_notification_attempts,customer_notification_updated_at)
+      VALUES('fallback-service-ref','fallback@example.com',0,'UNK',?,?,'pending',1,strftime('%Y-%m-%dT%H:%M:%fZ','now'))`).run(env.SERVICE_PRODUCT_ID, orderId);
+
+    await tgPost(env, callbackFrom(7203, `paid:${orderId}`, 'cb-service-paid-fallback'));
+    const fallback = messagesTo(sentTelegramMessages, '7203').filter(m => String(m.data.text).includes('I found a sale record already attached to this order'));
+    assert.equal(fallback.length, 1);
+    assert.ok(String(fallback[0].data.text).includes('please wait a little'));
+    assert.ok(String(fallback[0].data.text).includes('your service order will be sent here'));
+    assert.ok(String(fallback[0].data.text).includes('Nothing has been approved or fulfilled automatically'));
+    const processed = db.raw.prepare('SELECT customer_notification_status,customer_notification_attempts FROM processed_sales WHERE provider_reference=?').get('fallback-service-ref') as any;
+    assert.deepEqual([processed.customer_notification_status, processed.customer_notification_attempts], ['sent', 1], 'A successful fallback tells the customer, so the scheduler must not send a duplicate later');
+    assert.equal((db.raw.prepare('SELECT status FROM service_orders WHERE id=?').get(orderId) as any).status, 'pending_payment', 'The fallback must not verify payment');
   } finally {
     cleanup();
   }

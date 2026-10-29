@@ -48,7 +48,8 @@ test('Migration: fresh database migrates to fully verified schema', () => {
     '0019_admin_broadcast_recipients',
     '0020_receipt_review_actions',
     '0021_admin_order_deletion_actions',
-    '0022_user_language_preferences'
+    '0022_user_language_preferences',
+    '0023_processed_sale_customer_notifications'
   ]);
 
   const verified = verifySchema(db);
@@ -333,6 +334,62 @@ test('Migration 0022: language preferences are additive, constrained, and preser
 
   const columns = db.prepare("PRAGMA table_info(user_language_preferences)").all().map(row => row.name);
   assert.deepEqual(columns, ['telegram_user_id', 'telegram_chat_id', 'language_code', 'pending_start_payload', 'created_at', 'updated_at']);
+});
+
+
+test('Migration 0023: payment-found notification ledger is additive and only pre-deployment service rows are recoverable', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'schema.sql'), 'utf8'));
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0002_service_orders.sql'), 'utf8'));
+
+  const insertService = db.prepare(`
+    INSERT INTO service_orders(id,service_id,telegram_user_id,telegram_chat_id,status,payment_method,payment_reference)
+    VALUES(?,?,?,?,?,?,?)
+  `);
+  insertService.run('legacy-service-order', 'telegram_channel', '7301', '7301', 'pending_payment', 'selar', 'legacy-service-ref');
+  insertService.run('recent-service-order', 'telegram_channel', '7302', '7302', 'pending_payment', 'selar', 'recent-service-ref');
+  db.prepare(`
+    INSERT INTO contact_requests(id,telegram_user_id,telegram_chat_id,profile_id,status,payment_method,payment_reference)
+    VALUES('legacy-contact-order','7303','7303','anaimiya','pending_payment','selar','legacy-contact-ref')
+  `).run();
+
+  const insertSale = db.prepare(`
+    INSERT INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id,received_at)
+    VALUES(?,?,?,?,?,?,?)
+  `);
+  insertSale.run('legacy-service-ref', 'legacy-service@example.com', 0, 'UNK', 'x19128f988', 'legacy-service-order', '2026-10-29T13:00:00.000Z');
+  insertSale.run('recent-service-ref', 'recent-service@example.com', 0, 'UNK', 'x19128f988', 'recent-service-order', '2026-10-30T13:00:00.000Z');
+  insertSale.run('legacy-contact-ref', 'legacy-contact@example.com', 0, 'UNK', 'j977zh71q8', 'legacy-contact-order', '2026-10-29T13:00:00.000Z');
+
+  db.exec(fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0023_processed_sale_customer_notifications.sql'), 'utf8'));
+
+  const statusFor = (reference) => db.prepare('SELECT customer_notification_status FROM processed_sales WHERE provider_reference=?').get(reference).customer_notification_status;
+  assert.equal(statusFor('legacy-service-ref'), 'pending', 'A service sale from before the service notice existed is safely recoverable');
+  assert.equal(statusFor('recent-service-ref'), 'uncertain', 'A post-deployment historical send has unknown outcome and must not be blind-retried');
+  assert.equal(statusFor('legacy-contact-ref'), 'uncertain', 'Historical contact sends were already possible and therefore remain uncertain, not pending');
+
+  const columns = db.prepare('PRAGMA table_info(processed_sales)').all().map(row => row.name);
+  assert.deepEqual(columns, [
+    'provider_reference', 'buyer_email', 'amount_minor', 'currency', 'product_id', 'request_id', 'received_at',
+    'customer_notification_status', 'customer_notification_attempts', 'customer_notified_at',
+    'customer_notification_attempted_at', 'customer_notification_updated_at'
+  ]);
+
+  db.prepare(`
+    INSERT INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id)
+    VALUES('new-service-ref','new@example.com',0,'UNK','x19128f988','recent-service-order')
+  `).run();
+  const fresh = db.prepare('SELECT customer_notification_status,customer_notification_attempts FROM processed_sales WHERE provider_reference=?').get('new-service-ref');
+  assert.deepEqual([fresh.customer_notification_status, fresh.customer_notification_attempts], ['pending', 0]);
+
+  assert.throws(
+    () => db.prepare("INSERT INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,customer_notification_status) VALUES('bad-status','bad@example.com',0,'UNK','delivered')").run(),
+    /CHECK constraint failed/i
+  );
+  assert.throws(
+    () => db.prepare("INSERT INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,customer_notification_attempts) VALUES('bad-attempts','bad@example.com',0,'UNK',-1)").run(),
+    /CHECK constraint failed/i
+  );
 });
 
 test('Migration 0005: pre-existing duplicate active rows block migration without data changes', () => {

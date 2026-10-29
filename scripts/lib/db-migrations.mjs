@@ -231,6 +231,49 @@ export const MIGRATIONS = [
       const sql = fs.readFileSync(path.join(ROOT, 'contact-bot', 'migrations', '0022_user_language_preferences.sql'), 'utf8');
       db.exec(sql);
     }
+  },
+  {
+    version: '0023_processed_sale_customer_notifications',
+    description: 'Durable customer delivery state for automatic payment-found notifications',
+    apply(db) {
+      const columns = getTableColumns(db, 'processed_sales');
+      if (!columns.includes('customer_notification_status')) {
+        db.exec("ALTER TABLE processed_sales ADD COLUMN customer_notification_status TEXT NOT NULL DEFAULT 'pending' CHECK(customer_notification_status IN ('pending','sending','sent','failed','uncertain','cancelled'));");
+      }
+      if (!columns.includes('customer_notification_attempts')) {
+        db.exec('ALTER TABLE processed_sales ADD COLUMN customer_notification_attempts INTEGER NOT NULL DEFAULT 0 CHECK(customer_notification_attempts >= 0);');
+      }
+      if (!columns.includes('customer_notified_at')) {
+        db.exec('ALTER TABLE processed_sales ADD COLUMN customer_notified_at TEXT;');
+      }
+      if (!columns.includes('customer_notification_attempted_at')) {
+        db.exec('ALTER TABLE processed_sales ADD COLUMN customer_notification_attempted_at TEXT;');
+      }
+      if (!columns.includes('customer_notification_updated_at')) {
+        db.exec('ALTER TABLE processed_sales ADD COLUMN customer_notification_updated_at TEXT;');
+      }
+      db.exec(`
+        UPDATE processed_sales
+        SET customer_notification_status='uncertain',
+            customer_notification_updated_at=received_at
+        WHERE customer_notification_updated_at IS NULL;
+
+        UPDATE processed_sales
+        SET customer_notification_status='pending'
+        WHERE received_at < '2026-10-29T13:56:44Z'
+          AND customer_notification_updated_at=received_at
+          AND EXISTS (
+            SELECT 1
+            FROM service_orders
+            WHERE service_orders.id = processed_sales.request_id
+              AND service_orders.status = 'pending_payment'
+              AND service_orders.payment_reference = processed_sales.provider_reference
+          );
+
+        CREATE INDEX IF NOT EXISTS idx_processed_sales_customer_notification
+          ON processed_sales(customer_notification_status, received_at);
+      `);
+    }
   }
 ];
 
@@ -334,7 +377,9 @@ export const EXPECTED_SCHEMA = {
   ],
   processed_sales: [
     'provider_reference', 'buyer_email', 'amount_minor', 'currency',
-    'product_id', 'request_id', 'received_at'
+    'product_id', 'request_id', 'received_at', 'customer_notification_status',
+    'customer_notification_attempts', 'customer_notified_at',
+    'customer_notification_attempted_at', 'customer_notification_updated_at'
   ],
   admin_audit: [
     'id', 'admin_telegram_id', 'action', 'profile_id', 'request_id',
