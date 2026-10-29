@@ -108,6 +108,11 @@ type AdminBroadcastDraft = { id: string; admin_telegram_id: string; message_text
 type BroadcastRecipientCounts = { total: number; pending: number; sending: number; sent: number; failed: number; uncertain: number; cancelled: number };
 const BROADCAST_BATCH_SIZE = 25;
 const BROADCAST_RECIPIENT_STALE_MINUTES = 10;
+type PaymentFoundNotificationStatus = "pending" | "sending" | "sent" | "failed" | "uncertain" | "cancelled";
+type PaymentFoundNotificationResult = PaymentFoundNotificationStatus | "not_found";
+const PAYMENT_FOUND_NOTIFICATION_MAX_ATTEMPTS = 3;
+const PAYMENT_FOUND_NOTIFICATION_STALE_MINUTES = 10;
+const PAYMENT_FOUND_NOTIFICATION_BATCH_SIZE = 25;
 type AdminMessagePurpose = "support" | "rejection";
 type AdminMessageDraft = {
   id: string;
@@ -428,6 +433,167 @@ async function customerLanguageForOrder(
   return customerLanguage(e, order.telegram_user_id ? String(order.telegram_user_id) : null, order.telegram_chat_id ? String(order.telegram_chat_id) : null);
 }
 
+function paymentFoundNotificationNextStatus(error: unknown, attempts: number): PaymentFoundNotificationStatus {
+  const message = String(error);
+  // A network failure or malformed Telegram response may mean Telegram had
+  // already accepted the message. Mark that uncertain and never blind-retry it.
+  if (/Telegram sendMessage request failed|Telegram sendMessage returned an invalid response/.test(message)) return "uncertain";
+  // Telegram returned an explicit non-delivery response, so a later bounded
+  // retry is safe. This covers transient 429/5xx responses and a customer who
+  // becomes reachable again before the attempt limit is reached.
+  return attempts >= PAYMENT_FOUND_NOTIFICATION_MAX_ATTEMPTS ? "failed" : "pending";
+}
+
+async function loadPaymentFoundNotificationOrder(e: Env, kind: OrderKind, orderId: string): Promise<any | null> {
+  return kind === "contact"
+    ? e.DB.prepare("SELECT id,telegram_user_id,telegram_chat_id,status,payment_reference,checkout_code FROM contact_requests WHERE id=?").bind(orderId).first<any>()
+    : e.DB.prepare("SELECT id,telegram_user_id,telegram_chat_id,status,payment_reference,checkout_code FROM service_orders WHERE id=?").bind(orderId).first<any>();
+}
+
+async function deliverPaymentFoundCustomerNotification(
+  e: Env,
+  kind: OrderKind,
+  orderId: string,
+  reference: string
+): Promise<PaymentFoundNotificationResult> {
+  let claimed = false;
+  try {
+    const sale = await e.DB.prepare("SELECT customer_notification_status,customer_notification_attempts FROM processed_sales WHERE provider_reference=? AND request_id=?")
+      .bind(reference, orderId)
+      .first<any>();
+    if (!sale) return "not_found";
+    const existingStatus = String(sale.customer_notification_status || "uncertain") as PaymentFoundNotificationStatus;
+    if (existingStatus !== "pending") return existingStatus;
+
+    const order = await loadPaymentFoundNotificationOrder(e, kind, orderId);
+    if (!order || String(order.status || "") !== "pending_payment" || String(order.payment_reference || "") !== reference) {
+      await e.DB.prepare("UPDATE processed_sales SET customer_notification_status='cancelled',customer_notification_updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE provider_reference=? AND request_id=? AND customer_notification_status='pending'")
+        .bind(reference, orderId)
+        .run();
+      return "cancelled";
+    }
+
+    const claim = await e.DB.prepare("UPDATE processed_sales SET customer_notification_status='sending',customer_notification_attempts=customer_notification_attempts+1,customer_notification_attempted_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),customer_notification_updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE provider_reference=? AND request_id=? AND customer_notification_status='pending' AND customer_notification_attempts<?")
+      .bind(reference, orderId, PAYMENT_FOUND_NOTIFICATION_MAX_ATTEMPTS)
+      .run();
+    if (!claim.meta?.changes) {
+      const current = await e.DB.prepare("SELECT customer_notification_status,customer_notification_attempts FROM processed_sales WHERE provider_reference=? AND request_id=?")
+        .bind(reference, orderId)
+        .first<any>();
+      if (!current) return "not_found";
+      if (String(current.customer_notification_status || "") === "pending" && Number(current.customer_notification_attempts || 0) >= PAYMENT_FOUND_NOTIFICATION_MAX_ATTEMPTS) {
+        await e.DB.prepare("UPDATE processed_sales SET customer_notification_status='failed',customer_notification_updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE provider_reference=? AND request_id=? AND customer_notification_status='pending'")
+          .bind(reference, orderId)
+          .run();
+        return "failed";
+      }
+      return String(current.customer_notification_status || "uncertain") as PaymentFoundNotificationResult;
+    }
+    claimed = true;
+    const attempts = Number(sale.customer_notification_attempts || 0) + 1;
+
+    try {
+      const language = await customerLanguageForOrder(e, order);
+      await say(
+        e,
+        order.telegram_chat_id,
+        tr(language, kind === "contact" ? "paymentNotificationReceivedContact" : "paymentNotificationReceivedService")
+      );
+    } catch (error) {
+      const nextStatus = paymentFoundNotificationNextStatus(error, attempts);
+      await e.DB.prepare("UPDATE processed_sales SET customer_notification_status=?,customer_notification_updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE provider_reference=? AND request_id=? AND customer_notification_status='sending'")
+        .bind(nextStatus, reference, orderId)
+        .run();
+      console.error(`Payment-found customer notification ${nextStatus} for ${kind} order ${orderId}`, String(error));
+      if (nextStatus === "failed" || nextStatus === "uncertain") {
+        try {
+          await notifyAdminIfConfigured(
+            e,
+            `⚠️ <b>Automatic payment-found customer message not confirmed</b>\nOrder type: ${kind}\nOrder code: <code>${esc(String(order.checkout_code || orderId))}</code>\nDelivery status: ${nextStatus}\nThe sale remains attached and still requires manual Selar verification. Inspect the customer conversation before resending anything.`
+          );
+        } catch { /* the durable status remains the source of truth */ }
+      }
+      return nextStatus;
+    }
+
+    await e.DB.prepare("UPDATE processed_sales SET customer_notification_status='sent',customer_notified_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),customer_notification_updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE provider_reference=? AND request_id=? AND customer_notification_status='sending'")
+      .bind(reference, orderId)
+      .run();
+    return "sent";
+  } catch (error) {
+    console.error(`Payment-found customer notification processing failed for ${kind} order ${orderId}`, String(error));
+    if (claimed) {
+      try {
+        await e.DB.prepare("UPDATE processed_sales SET customer_notification_status='uncertain',customer_notification_updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE provider_reference=? AND request_id=? AND customer_notification_status='sending'")
+          .bind(reference, orderId)
+          .run();
+      } catch { /* stale sending rows are converted to uncertain by the scheduler */ }
+    }
+    return "uncertain";
+  }
+}
+
+async function recoverDuplicatePaymentFoundNotification(
+  e: Env,
+  kind: OrderKind,
+  reference: string,
+  productId: string
+): Promise<PaymentFoundNotificationResult> {
+  const existing = await e.DB.prepare("SELECT request_id,product_id,customer_notification_status FROM processed_sales WHERE provider_reference=?")
+    .bind(reference)
+    .first<any>();
+  if (!existing) return "not_found";
+  const status = String(existing.customer_notification_status || "uncertain") as PaymentFoundNotificationResult;
+  if (status !== "pending" || !existing.request_id || String(existing.product_id || "") !== productId) return status;
+
+  const order = await loadPaymentFoundNotificationOrder(e, kind, String(existing.request_id));
+  // A concurrent first delivery may have inserted the sale marker but not yet
+  // attached it to the order. Leave it pending for that handler/scheduler.
+  if (!order || String(order.status || "") !== "pending_payment" || String(order.payment_reference || "") !== reference) return "pending";
+  return deliverPaymentFoundCustomerNotification(e, kind, String(existing.request_id), reference);
+}
+
+async function markPaymentFoundNotificationSent(e: Env, order: CustomerOrder, reference: string): Promise<void> {
+  if (!reference) return;
+  try {
+    await e.DB.prepare("UPDATE processed_sales SET customer_notification_status='sent',customer_notified_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),customer_notification_updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE provider_reference=? AND request_id=? AND customer_notification_status<>'sent'")
+      .bind(reference, order.id)
+      .run();
+  } catch (error) {
+    console.error(`Could not mark payment-found notification sent for ${order.kind} order ${order.id}`, String(error));
+  }
+}
+
+async function processPendingPaymentFoundNotifications(e: Env): Promise<void> {
+  await e.DB.prepare("UPDATE processed_sales SET customer_notification_status='uncertain',customer_notification_updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE customer_notification_status='sending' AND customer_notification_attempted_at IS NOT NULL AND datetime(customer_notification_attempted_at)<=datetime('now','-" + PAYMENT_FOUND_NOTIFICATION_STALE_MINUTES + " minutes')")
+    .run();
+  const rows = await e.DB.prepare(`
+    SELECT ps.provider_reference,ps.request_id,
+      CASE WHEN c.id IS NOT NULL THEN 'contact' ELSE 'service' END AS order_kind
+    FROM processed_sales ps
+    LEFT JOIN contact_requests c
+      ON c.id=ps.request_id AND c.status='pending_payment' AND c.payment_reference=ps.provider_reference
+    LEFT JOIN service_orders s
+      ON s.id=ps.request_id AND s.status='pending_payment' AND s.payment_reference=ps.provider_reference
+    WHERE ps.customer_notification_status='pending'
+      AND ps.customer_notification_attempts<?
+      AND (c.id IS NOT NULL OR s.id IS NOT NULL)
+    ORDER BY ps.received_at ASC
+    LIMIT ?
+  `)
+    .bind(PAYMENT_FOUND_NOTIFICATION_MAX_ATTEMPTS, PAYMENT_FOUND_NOTIFICATION_BATCH_SIZE)
+    .all<any>();
+  for (const row of rows.results || []) {
+    if (!row.provider_reference || !row.request_id) continue;
+    await deliverPaymentFoundCustomerNotification(
+      e,
+      String(row.order_kind) === "contact" ? "contact" : "service",
+      String(row.request_id),
+      String(row.provider_reference)
+    );
+  }
+}
+
 function safePendingStartPayload(value: unknown): string {
   const payload = String(value || "").trim();
   if (!payload) return "";
@@ -654,6 +820,7 @@ async function handlePaidClaim(e: Env, chat: string, user: string, order: Custom
   if (saleReference) {
     await clearPaymentPrompts(e, user, order.id);
     await say(e, chat, tr(language, order.kind === "contact" ? "saleFoundManualQueueContact" : "saleFoundManualQueueService", { prefix }));
+    await markPaymentFoundNotificationSent(e, order, saleReference);
     return "sale_found";
   }
 
@@ -1991,7 +2158,7 @@ async function manuallyVerifyOrderByReference(e: Env, actor: string, chat: strin
   if (!productId) { await say(e, chat, "The Selar product code is not configured for this flow. Nothing was changed."); return; }
   const upd = await e.DB.prepare(`UPDATE ${table} SET status='payment_verified',payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'`).bind(reference, oid).run();
   if (!upd.meta?.changes) { await say(e, chat, "Order status changed while verifying. No change made."); return; }
-  await e.DB.prepare("INSERT OR IGNORE INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id) VALUES(?,?,?,?,?,?)").bind(reference, row.buyer_email || "", 0, "UNK", productId, oid).run();
+  await e.DB.prepare("INSERT OR IGNORE INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id,customer_notification_status,customer_notification_attempts,customer_notification_updated_at) VALUES(?,?,?,?,?,?,'cancelled',0,strftime('%Y-%m-%dT%H:%M:%fZ','now'))").bind(reference, row.buyer_email || "", 0, "UNK", productId, oid).run();
   await e.DB.prepare("INSERT INTO admin_audit(admin_telegram_id,action,request_id,profile_id,details) VALUES(?,?,?,?,?)").bind(actor, isService ? "service_payment_admin_verified_manual_reference" : "selar_payment_admin_verified_manual_reference", oid, row.target_id || null, `Admin manually verified after checking Selar directly; reference ${reference}`).run();
   if (isService) {
     const customerLang = await customerLanguageForChat(e, row.telegram_chat_id);
@@ -4463,7 +4630,11 @@ async function selar(request: Request, e: Env) {
     await notifyAdminIfConfigured(e, `<b>Selar sale was for the wrong configured product</b>\nReference: <code>${esc(s.reference)}</code>\nCustomer name: ${esc(s.customerName)}\nProduct ID: ${esc(s.productId)}${s.email ? `\nEmail: ${esc(s.email)}` : "\nEmail: not supplied"}\nNo payment was verified automatically.`);
     return json({ error: "wrong_product" }, 422);
   }
-  if (await e.DB.prepare("SELECT provider_reference FROM processed_sales WHERE provider_reference=?").bind(s.reference).first()) return json({ ok: true, duplicate: true });
+  const existingSale = await e.DB.prepare("SELECT provider_reference FROM processed_sales WHERE provider_reference=?").bind(s.reference).first<any>();
+  if (existingSale) {
+    const customerNotification = await recoverDuplicatePaymentFoundNotification(e, kind, s.reference, s.productId);
+    return json({ ok: true, duplicate: true, customer_notification: customerNotification });
+  }
 
   const code = codeInName(s.customerName);
   let target: any = null;
@@ -4477,7 +4648,7 @@ async function selar(request: Request, e: Env) {
   const fullName = normName(saleName);
   if (code) {
     const codeRows = kind === "contact"
-      ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,telegram_username,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE checkout_code=? AND status='pending_payment' AND payment_method='selar' LIMIT 2").bind(code).all<any>()
+      ? await e.DB.prepare("SELECT id,profile_id,telegram_user_id,telegram_chat_id,telegram_username,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE checkout_code=? AND status='pending_payment' AND payment_method='selar' LIMIT 2").bind(code).all<any>()
       : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name,buyer_email FROM service_orders WHERE checkout_code=? AND status='pending_payment' LIMIT 2").bind(code).all<any>();
     if (codeRows.results.length === 1) {
       const candidate = codeRows.results[0];
@@ -4493,7 +4664,7 @@ async function selar(request: Request, e: Env) {
   if (!target && !code) {
     if (fullName.length >= 5 && fullName.includes(" ")) {
       const nameRows = kind === "contact"
-        ? await e.DB.prepare("SELECT id,profile_id,telegram_chat_id,telegram_username,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE status='pending_payment' AND payment_method='selar' AND checkout_name IS NOT NULL").all<any>()
+        ? await e.DB.prepare("SELECT id,profile_id,telegram_user_id,telegram_chat_id,telegram_username,checkout_code,checkout_name,buyer_email FROM contact_requests WHERE status='pending_payment' AND payment_method='selar' AND checkout_name IS NOT NULL").all<any>()
         : await e.DB.prepare("SELECT id,service_id AS profile_id,telegram_chat_id,request_text,telegram_username,telegram_user_id,checkout_code,checkout_name,buyer_email FROM service_orders WHERE status='pending_payment' AND checkout_name IS NOT NULL").all<any>();
       const exactNameRows = nameRows.results.filter((row: any) => row.checkout_name && normName(row.checkout_name) === fullName);
       if (exactNameRows.length === 1) {
@@ -4505,12 +4676,16 @@ async function selar(request: Request, e: Env) {
 
   if (!target) return json({ ok: true, matched: false, reason: "no_unique_code_or_name_match" });
 
-  const saleInserted = await e.DB.prepare("INSERT OR IGNORE INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id) VALUES(?,?,?,?,?,?)").bind(s.reference, s.email || target.buyer_email || "", 0, "UNK", s.productId, target.id).run();
-  if (saleInserted.meta?.changes === 0) return json({ ok: true, duplicate: true });
+  const saleInserted = await e.DB.prepare("INSERT OR IGNORE INTO processed_sales(provider_reference,buyer_email,amount_minor,currency,product_id,request_id,customer_notification_status,customer_notification_attempts,customer_notification_updated_at) VALUES(?,?,?,?,?,?,'pending',0,strftime('%Y-%m-%dT%H:%M:%fZ','now'))").bind(s.reference, s.email || target.buyer_email || "", 0, "UNK", s.productId, target.id).run();
+  if (saleInserted.meta?.changes === 0) {
+    const customerNotification = await recoverDuplicatePaymentFoundNotification(e, kind, s.reference, s.productId);
+    return json({ ok: true, duplicate: true, customer_notification: customerNotification });
+  }
 
   const effectiveCode = target.checkout_code || code || "unknown";
   const matchLabel = matchedBy === "unique_code" ? "unique checkout code" : "exact full saved checkout name";
   const clueNote = "\n\n<i>Matched by " + matchLabel + ". This is only a reconciliation match; an administrator must verify the payment directly in Selar.</i>";
+  let customerNotification: PaymentFoundNotificationResult = "pending";
 
   try {
     if (kind === "contact") {
@@ -4518,13 +4693,13 @@ async function selar(request: Request, e: Env) {
       if (!upd.meta?.changes) throw new Error("order_state_changed_before_attach");
       const markup = { inline_keyboard: [[{ text: "✅ I checked Selar — confirm payment", callback_data: "selarverify:" + target.id }, { text: "Reject request", callback_data: "reject:" + target.id }]] };
       await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nSource: FansLeak website → model Subscribe button\nCheckout product: profile request (<code>${esc(e.SELAR_PRODUCT_ID || "")}</code>)\nRequest: <code>${target.id}</code>\nProfile: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nTelegram username: ${target.telegram_username ? "@" + esc(String(target.telegram_username).replace(/^@+/, "")) : "not provided"}\nOrder code: <code>${esc(effectiveCode)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}${clueNote}`, markup);
-      await sayBestEffort(e, target.telegram_chat_id, tr(await customerLanguageForChat(e, target.telegram_chat_id), "paymentNotificationReceivedContact"));
+      customerNotification = await deliverPaymentFoundCustomerNotification(e, kind, target.id, s.reference);
     } else {
       const upd = await e.DB.prepare("UPDATE service_orders SET payment_method='selar',payment_reference=?,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='pending_payment'").bind(s.reference, target.id).run();
       if (!upd.meta?.changes) throw new Error("order_state_changed_before_attach");
       const markup = { inline_keyboard: [[{ text: "✅ I checked Selar — confirm service payment", callback_data: "serviceverify:" + target.id }]] };
       await say(e, e.ADMIN_TELEGRAM_ID, `<b>Selar sale received — please check manually</b>\nSource: ${String(target.profile_id) === "telegram_channel" ? "Telegram bot → View our services → Subscribe button" : "Telegram bot service chat"}\nCheckout product: service checkout (<code>${esc(e.SERVICE_PRODUCT_ID || "")}</code>)\nOrder: <code>${target.id}</code>\nService: ${esc(target.profile_id)}\nCustomer name: ${esc(s.customerName)}\nTelegram username: ${target.telegram_username ? "@" + esc(String(target.telegram_username).replace(/^@+/, "")) : "not provided"}\nOrder code: <code>${esc(effectiveCode)}</code>\nEmail: ${esc(s.email || target.buyer_email || "not provided")}${clueNote}`, markup);
-      await sayBestEffort(e, target.telegram_chat_id, tr(await customerLanguageForChat(e, target.telegram_chat_id), "paymentNotificationReceivedService"));
+      customerNotification = await deliverPaymentFoundCustomerNotification(e, kind, target.id, s.reference);
     }
   } catch (err) {
     // Processing failed after the dedup marker was written: remove the marker so a
@@ -4533,7 +4708,7 @@ async function selar(request: Request, e: Env) {
     try { await notifyAdminIfConfigured(e, `<b>Selar sale processing failed; event was not consumed</b>\nReference: <code>${esc(s.reference)}</code>\nThe sender may retry delivery. No payment was verified.`); } catch { /* preserve the original error */ }
     throw err;
   }
-  return json({ ok: true, matched: true, reconciled_by: matchedBy });
+  return json({ ok: true, matched: true, reconciled_by: matchedBy, customer_notification: customerNotification });
 }
 
 async function abandonedCart(request: Request, e: Env) {
@@ -4615,6 +4790,11 @@ export default {
   async scheduled(controller: unknown, env: Env): Promise<void> {
     const cron = String((controller as { cron?: unknown } | null)?.cron || "");
     if (!cron || cron === "0 * * * *") await expireOldPendingOrders(env);
+    try {
+      await processPendingPaymentFoundNotifications(env);
+    } catch (err) {
+      console.error("Scheduled payment-found notification batch failed", String(err));
+    }
     try {
       await processScheduledBroadcasts(env);
     } catch (err) {

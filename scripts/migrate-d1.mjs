@@ -320,6 +320,33 @@ export function migrateRemote() {
     runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0022_user_language_preferences')");
   }
 
+  // Migration 23: durable delivery state for the customer's automatic
+  // payment-found notice. Column checks keep a retry safe if a prior remote
+  // ALTER succeeded before the migration version was recorded.
+  if (!applied.has('0023_processed_sale_customer_notifications')) {
+    console.log('[migrate-d1] Applying 0023_processed_sale_customer_notifications migration...');
+    const processedSaleCols = runWranglerCommand('PRAGMA table_info(processed_sales)').map(r => r.name);
+    if (!processedSaleCols.includes('customer_notification_status')) {
+      runWranglerCommand("ALTER TABLE processed_sales ADD COLUMN customer_notification_status TEXT NOT NULL DEFAULT 'pending' CHECK(customer_notification_status IN ('pending','sending','sent','failed','uncertain','cancelled'))");
+    }
+    if (!processedSaleCols.includes('customer_notification_attempts')) {
+      runWranglerCommand('ALTER TABLE processed_sales ADD COLUMN customer_notification_attempts INTEGER NOT NULL DEFAULT 0 CHECK(customer_notification_attempts >= 0)');
+    }
+    if (!processedSaleCols.includes('customer_notified_at')) {
+      runWranglerCommand('ALTER TABLE processed_sales ADD COLUMN customer_notified_at TEXT');
+    }
+    if (!processedSaleCols.includes('customer_notification_attempted_at')) {
+      runWranglerCommand('ALTER TABLE processed_sales ADD COLUMN customer_notification_attempted_at TEXT');
+    }
+    if (!processedSaleCols.includes('customer_notification_updated_at')) {
+      runWranglerCommand('ALTER TABLE processed_sales ADD COLUMN customer_notification_updated_at TEXT');
+    }
+    runWranglerCommand("UPDATE processed_sales SET customer_notification_status='uncertain',customer_notification_updated_at=received_at WHERE customer_notification_updated_at IS NULL");
+    runWranglerCommand("UPDATE processed_sales SET customer_notification_status='pending' WHERE received_at < '2026-10-29T13:56:44Z' AND customer_notification_updated_at=received_at AND EXISTS (SELECT 1 FROM service_orders WHERE service_orders.id = processed_sales.request_id AND service_orders.status = 'pending_payment' AND service_orders.payment_reference = processed_sales.provider_reference)");
+    runWranglerCommand('CREATE INDEX IF NOT EXISTS idx_processed_sales_customer_notification ON processed_sales(customer_notification_status, received_at)');
+    runWranglerCommand("INSERT OR IGNORE INTO schema_migrations(version) VALUES('0023_processed_sale_customer_notifications')");
+  }
+
   // Final complete schema verification. These expectations are shared with the
   // local migration verifier to prevent the two definitions drifting apart.
   console.log('[migrate-d1] Verifying complete schema...');
