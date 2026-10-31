@@ -95,6 +95,33 @@ export const scrapeProfileUrl = (input: {
   maxPages: number;
   rightsConfirmed: boolean;
 }) => api<ScrapeResult>('/api/admin/scrape', { method: 'POST', body: JSON.stringify(input) });
+
+export const BULK_SCRAPE_MAX_PROFILES = 25;
+
+// Parse the bulk-scraper textarea: one profile URL per line (commas also
+// accepted), whitespace trimmed, duplicates removed in source order, and the
+// batch capped so a single run cannot overwhelm the source or the admin.
+export function parseBulkProfileUrls(text: string, max = BULK_SCRAPE_MAX_PROFILES): {
+  urls: string[];
+  duplicates: number;
+  overflow: number;
+} {
+  const raw = String(text || '').split(/[\n,]+/).map(item => item.trim()).filter(Boolean);
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  let duplicates = 0;
+  for (const url of raw) {
+    if (seen.has(url)) { duplicates += 1; continue; }
+    seen.add(url);
+    unique.push(url);
+  }
+  const cap = Math.max(1, max);
+  return {
+    urls: unique.slice(0, cap),
+    duplicates,
+    overflow: Math.max(0, unique.length - cap),
+  };
+}
 export const exportAdminCms = () => api<AdminCmsContent>('/api/admin/export');
 
 export function slugifyProfileId(value: string): string {

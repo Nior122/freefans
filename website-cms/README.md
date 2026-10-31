@@ -147,6 +147,10 @@ npm run build
 
 ## Scraper rules
 
+- Bulk mode accepts up to 25 profile URLs per batch. The admin browser processes
+  them one by one with progress, auto-saves each successful profile as a draft,
+  skips creators that already exist without modifying them, and reports any
+  failed URL with its reason while the rest of the batch continues.
 - Coomer/Kemono profile and post URLs (including the `.party`/`.su` mirrors) are
   imported through their public JSON API, which returns the real post image and
   video files, captions, dates, and tags. Coomer does not expose the creator's
