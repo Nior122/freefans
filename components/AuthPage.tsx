@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { useMockData } from '../services/mockData';
 import { UserRole } from '../types';
 
@@ -12,9 +12,9 @@ export const AuthPage = () => {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    // Simulate Admin login for demo if specific email
-    const role = email.includes('admin') ? UserRole.ADMIN : UserRole.USER;
-    login(email, role);
+    // This public account form never grants website-admin access. The owner
+    // uses the separate server-side login at /admin/.
+    login(email, UserRole.USER);
     navigate('/');
   };
 
@@ -42,7 +42,6 @@ export const AuthPage = () => {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
-            <p className="text-xs text-gray-400 mt-1">Tip: Use "admin@test.com" for admin features</p>
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
@@ -60,6 +59,10 @@ export const AuthPage = () => {
             {isLogin ? 'Sign In' : 'Create Account'}
           </button>
         </form>
+
+        <p className="mt-5 text-center text-xs text-gray-500">
+          Website owner? Use the separate <Link to="/admin/" className="font-bold text-red-600 hover:underline">secure admin login</Link>.
+        </p>
 
         <div className="mt-6 text-center">
           <button 

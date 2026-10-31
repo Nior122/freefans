@@ -16,15 +16,17 @@ import {
 } from 'lucide-react';
 import { useMockData } from '../services/mockData';
 import { Lightbox } from './Lightbox';
+import { AdvertSlot } from './AdvertSlot';
 import { MediaType, Profile } from '../types';
 
 export const ProfilePage = () => {
   const { id } = useParams<{ id: string }>();
-  const { profiles, hiddenProfileIds, profileVisibilityStatus } = useMockData();
+  const { profiles, hiddenProfileIds, profileVisibilityStatus, cmsStatus } = useMockData();
+  const profile = profiles.find(p => p.id === id);
 
   if (id && hiddenProfileIds.has(id)) return <Navigate to="/" replace />;
 
-  if (profileVisibilityStatus === 'loading') {
+  if (profileVisibilityStatus === 'loading' || (!profile && cmsStatus === 'loading')) {
     return (
       <div className="min-h-screen bg-[#0f1014] text-white flex items-center justify-center px-6">
         <div className="flex items-center gap-3 text-gray-300" role="status" aria-live="polite">
@@ -35,7 +37,6 @@ export const ProfilePage = () => {
     );
   }
 
-  const profile = profiles.find(p => p.id === id);
   if (!profile) return <Navigate to="/" replace />;
 
   return <ProfilePageContent profile={profile} />;
@@ -504,6 +505,8 @@ const ProfilePageContent = ({ profile }: { profile: Profile }) => {
 
       <div className="max-w-[1600px] mx-auto px-2 md:px-4">
 
+        <AdvertSlot placement="profile_top" className="mb-6" limit={1} />
+
         {/* 2. Navigation Tabs */}
         <div className="flex border-b border-red-900/40 mb-4 overflow-x-auto no-scrollbar">
           {[
@@ -705,10 +708,14 @@ const ProfilePageContent = ({ profile }: { profile: Profile }) => {
           </div>
         )}
 
+        <AdvertSlot placement="profile_inline" className="mt-8" limit={1} />
+
         {/* Bottom Pagination */}
         <div className="flex justify-center mt-8 mb-12">
           <PaginationControls />
         </div>
+
+        <AdvertSlot placement="profile_bottom" className="mb-12" limit={1} />
 
       </div>
 

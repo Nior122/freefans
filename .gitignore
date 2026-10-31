@@ -23,3 +23,8 @@ dist-ssr
 *.sln
 *.sw?
 .env
+
+# Cloudflare local state and local secret files
+.wrangler/
+.dev.vars
+.dev.vars.*

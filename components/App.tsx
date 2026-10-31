@@ -7,6 +7,7 @@ import { HomePage } from './HomePage';
 import { AuthPage } from './AuthPage';
 import { SearchPage, HashtagsPage, MorePage } from './ExtraPages';
 import { MockDataProvider, useMockData } from '../services/mockData';
+import { AdvertSlot } from './AdvertSlot';
 
 // Navigation Component
 const Navbar = () => {
@@ -21,7 +22,6 @@ const Navbar = () => {
     { name: 'Search', icon: Search, path: '/search/' },
     { name: 'Hashtags', icon: Hash, path: '/hashtags/' },
     ...(user ? [{ name: 'Favorites', icon: Heart, path: '/favorites/' }] : []),
-    ...(user?.role === 'ADMIN' ? [{ name: 'Admin', icon: Settings, path: '/admin/' }] : []),
     { name: 'More', icon: MoreHorizontal, path: '/more/' },
   ];
 
@@ -81,6 +81,12 @@ const Navbar = () => {
             })}
           </div>
 
+          {!/^\/(admin|auth)(\/|$)/.test(location.pathname) && (
+            <div className="hidden px-4 pb-4 lg:block">
+              <AdvertSlot placement="sidebar" limit={1} />
+            </div>
+          )}
+
           <div className="p-4 border-t border-red-900/40">
             {user ? (
               <div className="flex items-center justify-between px-4 py-3">
@@ -113,10 +119,17 @@ const Navbar = () => {
   );
 };
 
+const GlobalAdverts = () => {
+  const location = useLocation();
+  if (/^\/(admin|auth)(\/|$)/.test(location.pathname)) return null;
+  return <AdvertSlot placement="global" />;
+};
+
 // Layout Wrapper
 const Layout = ({ children }: { children?: React.ReactNode }) => {
   return (
     <div className="flex min-h-screen bg-black">
+      <GlobalAdverts />
       <Navbar />
       <main className="flex-1 w-full max-w-full md:max-w-[calc(100vw-16rem)] min-h-screen overflow-x-hidden pt-16 md:pt-0">
         {children}
@@ -125,12 +138,11 @@ const Layout = ({ children }: { children?: React.ReactNode }) => {
   );
 };
 
-const ProtectedRoute = ({ children, requireAdmin = false }: { children?: React.ReactNode, requireAdmin?: boolean }) => {
+const ProtectedRoute = ({ children }: { children?: React.ReactNode }) => {
   const { user } = useMockData();
-  
+
   if (!user) return <Navigate to="/auth/" replace />;
-  if (requireAdmin && user.role !== 'ADMIN') return <Navigate to="/" />;
-  
+
   return <>{children}</>;
 };
 
@@ -183,11 +195,7 @@ export default function App() {
                 <HomePage showFavoritesOnly />
               </ProtectedRoute>
             } />
-            <Route path="/admin" element={
-              <ProtectedRoute requireAdmin>
-                <AdminPanel />
-              </ProtectedRoute>
-            } />
+            <Route path="/admin" element={<AdminPanel />} />
             <Route path="*" element={<Navigate to="/" />} />
           </Routes>
         </Layout>

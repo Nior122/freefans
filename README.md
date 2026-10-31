@@ -7,7 +7,7 @@ previews, with search, hashtags, favorites, and an admin panel.
 - **Frontend**: React 18, TypeScript, Vite (port 5000), Tailwind CSS via CDN
 - **Routing**: React Router v6 (`BrowserRouter`, clean URLs such as `/profile/emmafiore`)
 - **Backend**: Express.js (port 3001) — `/api/generate-bio` powered by Google Gemini AI
-- **Data**: Local JSON/TS files in `services/` (no database required)
+- **Data**: Bundled JSON/TS profiles in `services/`, plus an optional separate Cloudflare Pages D1 website CMS for admin-managed profile overlays, new profiles, and adverts
 
 ## Run Locally
 ```bash
@@ -21,12 +21,22 @@ npm run dev       # Vite frontend only
 npm run server    # Express API only
 ```
 
+The website admin API uses Cloudflare Pages Functions + D1, so Vite alone shows
+an admin setup/API-unavailable screen. For a full local admin test, build and
+run Wrangler Pages as described in [`website-cms/README.md`](website-cms/README.md).
+
 ## Environment Variables
 | Variable | Purpose |
 | --- | --- |
 | `SITE_URL` | Public base URL (no trailing slash) used to build absolute URLs in `sitemap.xml` / `robots.txt`, set to `https://fansleak.pages.dev`. **Set this in Cloudflare Pages.** |
 | `AI_INTEGRATIONS_GEMINI_API_KEY` | Gemini API key for the bio generator (optional) |
 | `AI_INTEGRATIONS_GEMINI_BASE_URL` | Gemini base URL (optional) |
+| `ADMIN_USERNAME` | Website-admin username secret for `/admin/` (Cloudflare Pages) |
+| `ADMIN_PASSWORD` | Website-admin password secret; alternatively use `ADMIN_PASSWORD_SHA256` |
+| `ADMIN_SESSION_SECRET` | At least 32 random characters; signs the admin session cookie |
+| `ADMIN_SESSION_HOURS` | Optional admin session length (default 8) |
+| `SCRAPER_MAX_ITEMS` / `SCRAPER_MAX_PAGES` | Optional admin scraper limits (defaults 300 / 3) |
+| `SCRAPER_USER_AGENT` | Optional public-page scraper user agent |
 
 See `.env.example`.
 
@@ -97,6 +107,8 @@ if the tag is missing from `dist/index.html` or sits outside `<head>`.
 | Build output directory | `dist` |
 | Environment variable | `SITE_URL = https://fansleak.pages.dev` (Production) |
 | Optional | `NODE_VERSION = 22` |
+| D1 binding | `SITE_DB` → separate `fansleak-site-cms` database (Production) |
+| Admin secrets | `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `ADMIN_SESSION_SECRET` |
 
 `public/_redirects` (`/* /index.html 200`) gives Cloudflare Pages the SPA fallback so deep
 links like `/profile/emmafiore` resolve to the app instead of a 404.
@@ -140,7 +152,9 @@ URL Inspection → *Request indexing* works today even while the sitemap reports
 ## Project Structure
 - `index.tsx` — React entry point
 - `components/` — App, HomePage, ProfilePage, AdminPanel, AuthPage, ExtraPages, Lightbox
-- `services/` — Data provider (`mockData.tsx`) + per-profile data files
+- `services/` — Bundled data provider (`mockData.tsx`), website CMS client (`cms.ts`), and per-profile data files
+- `functions/` — Cloudflare Pages Functions for website admin auth/API/scraping and dynamic D1 profile/catalogue/sitemap routes
+- `website-cms/` — Separate website D1 schema and owner setup guide (not the bot database)
 - `public/og-image.svg` — source for `og-image.png` (1200×630 social card)
 - `scripts/generate-sitemap.mjs` — sitemap + robots.txt generator (runs on prebuild)
 - `scripts/prerender.mjs` — per-route HTML/metadata generation (runs on postbuild)
@@ -152,8 +166,11 @@ URL Inspection → *Request indexing* works today even while the sitemap reports
 ## Notes
 - `DOCUMENTATION.md` and `NEXT_JS_BLUEPRINT.md` describe a planned Next.js + Supabase
   rebuild — not implemented.
-- Profiles created in the Admin panel are held in memory only (not persisted), so they are
-  not indexable; add a profile to `PROFILES` in `services/mockData.tsx` to make it permanent.
+- Profiles created or edited in the website Admin panel persist in the separate
+  Pages D1 CMS when `SITE_DB` and the admin secrets are configured. If the CMS
+  is unavailable, the public site falls back to the bundled profiles. For a
+  permanent build-time prerendered/JSON-LD profile, export the profile JSON and
+  use `npm run add-profile` as described below.
 
 ## Brand assets
 
@@ -176,9 +193,16 @@ these files or their `<link>` tags go missing.
 
 ## Adding a profile
 
-A profile is one entry in `PROFILES` (`services/mockData.tsx`) plus an image array. Everything
-else — `/profile/<id>/` URL, sitemap entry, prerendered HTML, canonical, JSON-LD — is derived
-from that array, so adding an entry and rebuilding is all it takes.
+There are two supported profile paths:
+
+1. **Website Admin panel (instant D1 publishing):** create/edit at `/admin/`, scrape
+   an authorized public URL into a draft, review the normal FansLeak fields/media,
+   then publish. Built-in edits are D1 overlays; new profiles are D1 records.
+2. **Permanent bundled profile (build-time SEO):** add one entry to `PROFILES`
+   (`services/mockData.tsx`) plus an image array. Its `/profile/<id>/` URL, static
+   sitemap entry, prerendered HTML, canonical, and JSON-LD are generated on rebuild.
+
+The existing importer below is the permanent bundled path:
 
 ```bash
 npm run add-profile -- path/to/profile.json --dry-run   # validates + prints the entry
@@ -219,8 +243,33 @@ creator has submitted, or your own content. The importer never fetches anything;
 validates and writes JSON you provide.
 
 
+## Website admin panel and adverts
+
+`/admin/` is protected by a real server-side Cloudflare Pages session. The old
+public demo rule (any email containing “admin”) has been removed. The owner sets
+a new username/password with `ADMIN_USERNAME` and `ADMIN_PASSWORD` in Cloudflare
+Pages; `ADMIN_SESSION_SECRET` signs the HttpOnly session cookie. Replacing the
+password and redeploying resets access. The public `/auth/` form never grants
+admin access.
+
+The panel includes:
+
+- Dashboard counts and recent D1 activity.
+- Search/filter, create, edit, publish, draft, hide, restorable delete, and
+  media management for built-in and D1 profiles.
+- A rights-confirmed scraper for public Coomer profiles/posts, generic public
+  pages, direct media URLs, and profile/batch JSON. It creates a draft using the
+  existing profile standard and does not bypass logins or paywalls.
+- Managed image/video/link banners plus trusted script, HTML, native-banner,
+  social-bar, and popunder slots with placement, status, priority, and dates.
+- A Setup & Secrets tab listing the separate `SITE_DB` D1 binding and every
+  Pages variable/secret name.
+
+Full owner setup is in [`website-cms/README.md`](website-cms/README.md). This
+website CMS deliberately uses a different D1 database from the Telegram bot.
+
 ## Telegram contact requests
 
-The red **Subscribe** button on each profile opens `@KasiQueenbot` with that profile's ID and starts the selected profile's request flow. The site build generates `public/contact-catalogue.json` from the visible profile records, so newly added profiles are included automatically on the next deployment. Optionally set `VITE_TELEGRAM_BOT_USERNAME` in Cloudflare Pages; it defaults to `KasiQueenbot`.
+The red **Subscribe** button on each profile opens `@KasiQueenbot` with that profile's ID and starts the selected profile's request flow. The site build generates the static `public/contact-catalogue.json` from bundled visible profiles. When the website CMS D1 binding is configured, a Pages Function also merges published D1 profiles into `/contact-catalogue.json` and removes hidden/deleted entries without changing any bot code. Optionally set `VITE_TELEGRAM_BOT_USERNAME` in Cloudflare Pages; it defaults to `KasiQueenbot`.
 
 The configurable bot Worker, Selar payment webhooks, manual admin payment verification, creator-consent gating, D1 schema/migrations, tests, and deployment instructions are in [`contact-bot/README.md`](contact-bot/README.md). Payments are never verified automatically. The Worker must be separately deployed/configured; the website button alone does not activate payment processing.

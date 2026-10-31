@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMockData } from '../services/mockData';
 import { Profile } from '../types';
+import { AdvertSlot } from './AdvertSlot';
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
 
 function shuffleArray<T>(arr: T[]): T[] {
@@ -35,7 +36,7 @@ export const HomePage = ({ showFavoritesOnly }: { showFavoritesOnly?: boolean })
       setCurrentPage(1);
     }, 10000);
     return () => clearInterval(interval);
-  }, [showFavoritesOnly]);
+  }, [showFavoritesOnly, profiles]);
 
   const filteredProfiles = shuffledProfiles;
 
@@ -89,6 +90,8 @@ export const HomePage = ({ showFavoritesOnly }: { showFavoritesOnly?: boolean })
             Showing {startIndex + 1} - {endIndex} of {totalItems}
           </p>
         </div>
+
+        <AdvertSlot placement="home_top" className="mb-6" limit={1} />
 
         {/* Pagination Controls */}
         <div className="flex justify-center items-center gap-1 mb-6 flex-wrap">
@@ -153,10 +156,15 @@ export const HomePage = ({ showFavoritesOnly }: { showFavoritesOnly?: boolean })
         ) : (
           <div className="space-y-4">
             {displayProfiles.map((profile, index) => (
-              <ListCard key={profile.id} profile={profile} date={formatDate(index)} />
+              <React.Fragment key={profile.id}>
+                <ListCard profile={profile} date={formatDate(index)} />
+                {index === 3 && <AdvertSlot placement="home_inline" limit={1} />}
+              </React.Fragment>
             ))}
           </div>
         )}
+
+        <AdvertSlot placement="home_bottom" className="mt-8" limit={1} />
 
         {/* Bottom Pagination */}
         {displayProfiles.length > 0 && (

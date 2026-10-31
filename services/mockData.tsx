@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
-import { Profile, User, UserRole, Image, MediaType } from '../types';
+import React, { createContext, useCallback, useContext, useMemo, useState, useEffect, ReactNode } from 'react';
+import { Advert, CmsProfileRecord, Profile, User, UserRole, Image, MediaType } from '../types';
+import { getPublicCmsContent, mergePublicProfiles } from './cms';
 import anaimiyaData from './anaimiyaData.json';
 import ruriData from './ruriData.json';
 import nicolebunData from './nicolebunData.json';
@@ -12014,6 +12015,11 @@ const PROFILES: Profile[] = [
 
 interface MockDataContextType {
   profiles: Profile[];
+  baseProfiles: Profile[];
+  cmsProfileRecords: CmsProfileRecord[];
+  adverts: Advert[];
+  cmsStatus: 'loading' | 'ready' | 'unavailable';
+  refreshCmsContent: () => Promise<void>;
   hiddenProfileIds: Set<string>;
   profileVisibilityStatus: 'loading' | 'ready' | 'unavailable';
   user: User | null;
@@ -12030,9 +12036,34 @@ const MockDataContext = createContext<MockDataContextType | undefined>(undefined
 
 export const MockDataProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
-  const [profiles, setProfiles] = useState<Profile[]>(PROFILES);
+  const [profileBaseState, setProfileBaseState] = useState<Profile[]>(PROFILES);
+  const [cmsProfileRecords, setCmsProfileRecords] = useState<CmsProfileRecord[]>([]);
+  const [adverts, setAdverts] = useState<Advert[]>([]);
+  const [cmsStatus, setCmsStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading');
   const [hiddenProfileIds, setHiddenProfileIds] = useState<Set<string>>(new Set());
   const [profileVisibilityStatus, setProfileVisibilityStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading');
+
+  const refreshCmsContent = useCallback(async () => {
+    try {
+      const content = await getPublicCmsContent();
+      setCmsProfileRecords(Array.isArray(content.profileRecords) ? content.profileRecords : []);
+      setAdverts(Array.isArray(content.adverts) ? content.adverts : []);
+      setCmsStatus('ready');
+    } catch {
+      // The separate website CMS is optional at runtime: if Pages Functions or
+      // the SITE_DB binding are not ready, the bundled catalogue still works.
+      setCmsStatus('unavailable');
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshCmsContent();
+  }, [refreshCmsContent]);
+
+  const profiles = useMemo(
+    () => mergePublicProfiles(profileBaseState, cmsProfileRecords).filter(profile => !hiddenProfileIds.has(profile.id)),
+    [profileBaseState, cmsProfileRecords, hiddenProfileIds],
+  );
 
   // Admin-hidden profiles are stored in the Cloudflare Worker D1 database so
   // visibility changes apply across browsers instead of only changing local React state.
@@ -12051,7 +12082,6 @@ export const MockDataProvider = ({ children }: { children: ReactNode }) => {
         }
         const hidden = new Set(data.hiddenProfileIds.filter((id): id is string => typeof id === 'string'));
         setHiddenProfileIds(hidden);
-        setProfiles(current => current.filter(profile => !hidden.has(profile.id)));
         setProfileVisibilityStatus('ready');
       })
       .catch(() => {
@@ -12076,15 +12106,15 @@ export const MockDataProvider = ({ children }: { children: ReactNode }) => {
   };
 
   const addProfile = (profile: Profile) => {
-    setProfiles(prev => [...prev, profile]);
+    setProfileBaseState(prev => [...prev, profile]);
   };
 
   const updateProfile = (updated: Profile) => {
-    setProfiles(prev => prev.map(p => p.id === updated.id ? updated : p));
+    setProfileBaseState(prev => prev.map(p => p.id === updated.id ? updated : p));
   };
 
   const deleteProfile = (id: string) => {
-    setProfiles(prev => prev.filter(p => p.id !== id));
+    setProfileBaseState(prev => prev.filter(p => p.id !== id));
   };
 
   const toggleFavorite = (profileId: string) => {
@@ -12108,6 +12138,11 @@ export const MockDataProvider = ({ children }: { children: ReactNode }) => {
   return (
     <MockDataContext.Provider value={{
       profiles,
+      baseProfiles: PROFILES,
+      cmsProfileRecords,
+      adverts,
+      cmsStatus,
+      refreshCmsContent,
       hiddenProfileIds,
       profileVisibilityStatus,
       user,
