@@ -41,6 +41,7 @@ interface PageData {
   finalUrl: URL;
   title: string;
   description: string;
+  bioText?: string;
   image: string;
   keywords: string[];
   publishedAt?: string;
@@ -51,6 +52,10 @@ interface PageData {
 const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'bmp', 'svg']);
 const VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'mov', 'm4v', 'ogv']);
 const MAX_HTML_BYTES = 6 * 1024 * 1024;
+// Coomer and Kemono share one API. Canonical roots are coomer.st / kemono.cr;
+// the .party/.su mirrors redirect there.
+const COOMER_HOST_PATTERN = /^(?:www\.|beta\.)?(kemono|coomer)\.(?:cr|s[tu]|party)$/;
+const COOMER_IMG_HOSTS = new Set(['img.coomer.st', 'img.kemono.cr']);
 
 function isPrivateIp(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
@@ -122,7 +127,7 @@ async function readLimitedText(response: Response): Promise<string> {
   return text + decoder.decode();
 }
 
-async function fetchPublic(initial: URL, env: SiteCmsEnv): Promise<{ finalUrl: URL; contentType: string; text: string }> {
+async function fetchPublic(initial: URL, env: SiteCmsEnv, options: { accept?: string } = {}): Promise<{ finalUrl: URL; contentType: string; text: string }> {
   let current = initial;
   const userAgent = env.SCRAPER_USER_AGENT || 'Mozilla/5.0 FansLeakAdminImporter/1.0 (+https://fansleak.pages.dev/admin)';
 
@@ -137,7 +142,7 @@ async function fetchPublic(initial: URL, env: SiteCmsEnv): Promise<{ finalUrl: U
         signal: controller.signal,
         headers: {
           'user-agent': userAgent,
-          accept: 'text/html,application/xhtml+xml,image/*,video/*;q=0.8,*/*;q=0.5',
+          accept: options.accept || 'text/html,application/xhtml+xml,image/*,video/*;q=0.8,*/*;q=0.5',
         },
       });
     } catch (error) {
@@ -208,8 +213,11 @@ function typeFromUrl(url: URL, fallback?: MediaType): MediaType | null {
 
 function normaliseCoomer(url: URL): { original: URL; display: URL } {
   const original = new URL(url.toString());
-  if (original.hostname === 'coomer.st' && original.pathname.startsWith('/data/')) original.hostname = 'img.coomer.st';
-  if (original.hostname === 'img.coomer.st' && original.pathname.startsWith('/thumbnail/data/')) {
+  const hostMatch = original.hostname.toLowerCase().match(COOMER_HOST_PATTERN);
+  if (hostMatch && original.pathname.startsWith('/data/')) {
+    original.hostname = hostMatch[1] === 'kemono' ? 'img.kemono.cr' : 'img.coomer.st';
+  }
+  if (COOMER_IMG_HOSTS.has(original.hostname.toLowerCase()) && original.pathname.startsWith('/thumbnail/data/')) {
     original.pathname = original.pathname.replace('/thumbnail/data/', '/data/');
   }
   const display = new URL(original.toString());
@@ -232,7 +240,7 @@ function addCandidate(
   if (!mediaType) return;
 
   let { original, display } = normaliseCoomer(parsed);
-  if (mediaType === 'image' && original.hostname === 'img.coomer.st' && original.pathname.startsWith('/data/')) {
+  if (mediaType === 'image' && COOMER_IMG_HOSTS.has(original.hostname.toLowerCase()) && original.pathname.startsWith('/data/')) {
     display = new URL(original.toString());
     display.pathname = display.pathname.replace('/data/', '/thumbnail/data/');
   }
@@ -364,16 +372,32 @@ function parsePage(html: string, finalUrl: URL, contentType: string): PageData {
   }
 
   const rawMediaPattern = /((?:https?:)?\/\/[^\s"'<>]+|\/(?:thumbnail\/)?data\/[^\s"'<>]+)\.(?:jpe?g|png|webp|gif|avif|mp4|webm|mov|m4v)(?:\?[^\s"'<>]*)?/gi;
-  for (const match of html.matchAll(rawMediaPattern)) add(match[0]);
+  // Media URLs are often embedded in JSON state blobs with escaped slashes
+  // (https:\/\/...), which the raw pattern cannot see until unescaped.
+  const scannable = html.replace(/\\u0026/gi, '&').replace(/\\\//g, '/');
+  for (const match of scannable.matchAll(rawMediaPattern)) add(match[0]);
 
   const title = stripTags(meta.get('og:title') || meta.get('twitter:title') || titleTag || jsonLd.names[0] || '');
-  const description = stripTags(meta.get('description') || meta.get('og:description') || meta.get('twitter:description') || jsonLd.descriptions[0] || '');
+  // og:/twitter: descriptions are page-specific; the plain meta description is
+  // often a site-wide slogan, so prefer the social ones for the bio.
+  const description = stripTags(meta.get('og:description') || meta.get('twitter:description') || meta.get('description') || jsonLd.descriptions[0] || '');
+
+  // Best-effort visible bio/about block (many profile pages keep the real bio
+  // in the body copy, not in meta tags).
+  let bioText = '';
+  const bioBlock = html.match(/<(?:div|section|p|span|article)\b[^>]*(?:class|id)="[^"]*(?:bio|about|profile-description|creator-description|user-description)[^"]*"[^>]*>([\s\S]{10,1500}?)<\/(?:div|section|p|span|article)>/i);
+  if (bioBlock) {
+    const text = stripTags(bioBlock[1]);
+    if (text.length >= 10 && text.length <= 600) bioText = text;
+  }
+
   const keywords = (meta.get('keywords') || '').split(',').map(item => item.trim()).filter(Boolean);
 
   return {
     finalUrl,
     title,
     description,
+    bioText,
     image: meta.get('og:image') || meta.get('twitter:image') || '',
     keywords,
     publishedAt,
@@ -391,26 +415,191 @@ function prettify(value: string): string {
 
 function titleName(rawTitle: string, username: string): string {
   let title = rawTitle
-    .replace(/\s*[|\-–—]\s*(coomer|onlyfans|fansly).*$/i, '')
+    .replace(/\s*[|\-–—]\s*(coomer|kemono|onlyfans|fansly).*$/i, '')
     .replace(/\s*\((?:onlyfans|fansly)\)\s*$/i, '')
     .trim();
-  if (!title || /^(coomer|onlyfans|fansly)$/i.test(title)) title = prettify(username);
+  // Coomer/Kemono profile pages title themselves: Posts of "user" from "Service"
+  if (!title || /^(coomer|kemono|onlyfans|fansly)$/i.test(title) || /^posts?\s+of\b/i.test(title)) title = prettify(username);
   return title.slice(0, 60) || 'Creator';
 }
 
-function coomerParts(url: URL): { service: string; username: string; postId?: string } | null {
-  if (!['coomer.st', 'www.coomer.st'].includes(url.hostname.toLowerCase())) return null;
+// Strip archiver-site boilerplate from a scraped description so a real bio can
+// survive, while still rejecting pure "download leaks free" promo copy.
+function cleanScrapedBio(raw: string): string {
+  const text = stripTags(raw || '')
+    .replace(/posts of\s+"?[^"|]+?\s+from\s+"?[^"|]+/i, '')
+    .replace(/\s*[|\-–—]\s*(coomer|kemono).*$/i, '')
+    .replace(/\b(?:view|watch|download)\b[^.]*\b(?:leaks?|free)\b[^.]*\.?/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (text.length < 10) return '';
+  if (/^(coomer|kemono)\b/i.test(text)) return '';
+  if (/\bleaks?\b/i.test(text) && /\b(?:download|free|coomer|kemono)\b/i.test(text)) return '';
+  return text.slice(0, 400);
+}
+
+interface CoomerParts {
+  service: string;
+  username: string;
+  postId?: string;
+  root: string;
+}
+
+function coomerParts(url: URL): CoomerParts | null {
+  const hostMatch = url.hostname.toLowerCase().match(COOMER_HOST_PATTERN);
+  if (!hostMatch) return null;
   const parts = url.pathname.split('/').filter(Boolean).map(part => {
     try { return decodeURIComponent(part); } catch { return part; }
   });
   if (parts.length < 3 || parts[1] !== 'user') return null;
-  return { service: parts[0], username: parts[2], postId: parts[3] === 'post' ? parts[4] : undefined };
+  return {
+    service: parts[0],
+    username: parts[2],
+    postId: parts[3] === 'post' ? parts[4] : undefined,
+    root: hostMatch[1] === 'kemono' ? 'https://kemono.cr' : 'https://coomer.st',
+  };
 }
 
 function uniqueCandidates(candidates: Candidate[]): Candidate[] {
   const byUrl = new Map<string, Candidate>();
   for (const item of candidates) if (!byUrl.has(item.url)) byUrl.set(item.url, item);
   return [...byUrl.values()];
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+// The Coomer/Kemono API rejects requests whose Accept header is not text/css
+// (their WAF rule), so API calls must send exactly that.
+async function fetchCoomerJson(url: string, env: SiteCmsEnv): Promise<unknown> {
+  const fetched = await fetchPublic(assertPublicHttpUrl(url), env, { accept: 'text/css' });
+  try {
+    return JSON.parse(fetched.text);
+  } catch {
+    throw new ScrapeError('The Coomer API returned an unexpected response.', 502, 'coomer_api_invalid');
+  }
+}
+
+function coomerFileUrl(root: string, rawPath: string): string {
+  let path = rawPath.replace(/\\/g, '/').trim();
+  if (!path) return '';
+  if (/^https?:\/\//i.test(path)) return path;
+  if (!path.startsWith('/')) path = `/${path}`;
+  return path.startsWith('/data/') ? `${root}${path}` : `${root}/data${path}`;
+}
+
+function coomerPostFiles(post: Record<string, unknown>, extraAttachments: unknown): string[] {
+  const files: string[] = [];
+  const push = (value: unknown) => {
+    if (typeof value === 'string' && value.trim()) { files.push(value); return; }
+    const path = asString(asRecord(value).path);
+    if (path) files.push(path);
+  };
+  push(post.file);
+  if (Array.isArray(post.attachments)) post.attachments.forEach(push);
+  if (Array.isArray(extraAttachments)) extraAttachments.forEach(push);
+  const content = asString(post.content);
+  if (content) {
+    const inlinePattern = /src="(?:https?:\/\/(?:kemono\.cr|kemono\.su|coomer\.st|coomer\.party))?(\/inline\/[^"]+|\/[0-9a-f]{2}\/[0-9a-f]{2}\/[0-9a-f]{64}\.[^"]+)"/gi;
+    for (const match of content.matchAll(inlinePattern)) files.push(match[1]);
+  }
+  return files;
+}
+
+interface CoomerApiMeta {
+  name: string;
+  postCount: number;
+}
+
+async function scrapeCoomerApi(
+  coomer: CoomerParts,
+  env: SiteCmsEnv,
+  maxItems: number,
+  maxPages: number,
+): Promise<{ page: PageData; pagesFetched: number; meta: CoomerApiMeta }> {
+  const { root, service, username, postId } = coomer;
+  const apiBase = `${root}/api/v1/${encodeURIComponent(service)}/user/${encodeURIComponent(username)}`;
+  const base = new URL(root);
+  const map = new Map<string, Candidate>();
+  const tagCounts = new Map<string, number>();
+  let pagesFetched = 0;
+  const meta: CoomerApiMeta = { name: '', postCount: 0 };
+
+  try {
+    const profile = asRecord(await fetchCoomerJson(`${apiBase}/profile`, env));
+    meta.name = stripTags(asString(profile.name));
+    meta.postCount = Number(profile.post_count) || 0;
+  } catch { /* profile metadata is optional; the posts are what matter */ }
+
+  const addPost = (rawPost: unknown, extraAttachments?: unknown) => {
+    const post = asRecord(rawPost);
+    const caption = (stripTags(asString(post.title)) || stripTags(asString(post.content))).slice(0, 140);
+    const createdAt = asString(post.published) || asString(post.added) || undefined;
+    if (Array.isArray(post.tags)) {
+      for (const rawTag of post.tags) {
+        const tag = stripTags(asString(rawTag) || asString(asRecord(rawTag).tag) || asString(asRecord(rawTag).name)).toLowerCase();
+        if (tag) tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
+      }
+    }
+    for (const file of coomerPostFiles(post, extraAttachments)) {
+      if (map.size >= maxItems) break;
+      addCandidate(map, coomerFileUrl(root, file), base, { caption, createdAt });
+    }
+  };
+
+  if (postId) {
+    const data = asRecord(await fetchCoomerJson(`${apiBase}/post/${encodeURIComponent(postId)}`, env));
+    pagesFetched += 1;
+    const post = Object.keys(asRecord(data.post)).length ? data.post : data;
+    addPost(post, data.attachments);
+    if (!map.size && Array.isArray(data.previews)) {
+      for (const preview of data.previews) {
+        const record = asRecord(preview);
+        const path = asString(record.path);
+        if (!path) continue;
+        const server = asString(record.server).replace(/\/$/, '');
+        addCandidate(map, server ? coomerFileUrl(server, path) : coomerFileUrl(root, path), base, {});
+      }
+    }
+  } else {
+    for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
+      const data = await fetchCoomerJson(`${apiBase}/posts?o=${pageIndex * 50}`, env);
+      pagesFetched += 1;
+      if (!Array.isArray(data)) {
+        throw new ScrapeError('The Coomer API returned an unexpected posts response.', 502, 'coomer_api_invalid');
+      }
+      if (!data.length) break;
+      for (const post of data) {
+        addPost(post);
+        if (map.size >= maxItems) break;
+      }
+      if (data.length < 50 || map.size >= maxItems) break;
+    }
+  }
+
+  if (!map.size) {
+    throw new ScrapeError('The Coomer API returned no image or video files for this creator.', 422, 'coomer_api_no_media');
+  }
+
+  const keywords = [...tagCounts.entries()].sort((a, b) => b[1] - a[1]).map(([tag]) => tag).slice(0, 10);
+  return {
+    page: {
+      finalUrl: new URL(`${root}/${service}/user/${username}${postId ? `/post/${postId}` : ''}`),
+      title: meta.name,
+      description: '',
+      bioText: '',
+      image: '',
+      keywords,
+      candidates: [...map.values()],
+    },
+    pagesFetched,
+    meta,
+  };
 }
 
 export async function scrapeProfileSource(input: ScrapeInput, env: SiteCmsEnv): Promise<ScrapeOutput> {
@@ -428,6 +617,7 @@ export async function scrapeProfileSource(input: ScrapeInput, env: SiteCmsEnv): 
   const warnings: string[] = [];
   const pages: PageData[] = [];
   let pagesFetched = 0;
+  let coomerMeta: CoomerApiMeta = { name: '', postCount: 0 };
   let sourceType: ScrapeOutput['sourceType'] = 'webpage';
   const firstCoomer = sourceUrls.map(coomerParts).find(Boolean);
   if (firstCoomer) sourceType = firstCoomer.postId ? 'coomer_post' : 'coomer_profile';
@@ -443,6 +633,21 @@ export async function scrapeProfileSource(input: ScrapeInput, env: SiteCmsEnv): 
     }
 
     const coomer = coomerParts(sourceUrl);
+    if (coomer) {
+      // Coomer/Kemono pages are JavaScript-driven, so raw HTML usually exposes
+      // only the name/avatar. Their JSON API returns the real post files
+      // (images and videos), so use it first and keep HTML as a fallback.
+      try {
+        const api = await scrapeCoomerApi(coomer, env, maxItems, maxPages);
+        pages.push(api.page);
+        pagesFetched += api.pagesFetched;
+        if (!coomerMeta.name && api.meta.name) coomerMeta = { ...api.meta };
+        continue;
+      } catch (error) {
+        warnings.push(`Coomer API extraction failed (${error instanceof Error ? error.message : 'unknown error'}); falling back to webpage extraction.`);
+      }
+    }
+
     if (coomer && !coomer.postId) {
       let known = new Set(pages.flatMap(page => page.candidates.map(item => item.url)));
       for (let pageIndex = 0; pageIndex < maxPages; pageIndex += 1) {
@@ -483,16 +688,18 @@ export async function scrapeProfileSource(input: ScrapeInput, env: SiteCmsEnv): 
   const coomer = firstCoomer || null;
   const username = coomer?.username || slugify(firstPage.title || sourceUrls[0].hostname.replace(/^www\./, ''));
   const id = slugify(username);
-  const name = titleName(firstPage.title, username);
+  const name = coomerMeta.name ? coomerMeta.name.slice(0, 60) : titleName(firstPage.title, username);
   const firstImage = selected.find(item => item.mediaType === 'image');
   const avatarUrl = coomer
-    ? `https://img.coomer.st/icons/${encodeURIComponent(coomer.service)}/${encodeURIComponent(coomer.username)}`
+    ? `${coomer.root.replace('://', '://img.')}/icons/${encodeURIComponent(coomer.service)}/${encodeURIComponent(coomer.username)}`
     : firstPage.image || firstImage?.url || selected[0].thumbnailUrl;
   const heroUrl = firstPage.image || firstImage?.url || avatarUrl;
   const genericBio = `${name} — exclusive creator previews, photos and videos 🔥 | Subscribe for the full experience ✨`;
-  const bio = firstPage.description.length >= 10 && !/coomer|onlyfans leaks|download.*onlyfans/i.test(firstPage.description)
-    ? firstPage.description.slice(0, 400)
-    : genericBio;
+  const serviceLabel = coomer ? prettify(coomer.service).replace('Onlyfans', 'OnlyFans') : '';
+  const coomerBio = coomer
+    ? `${name} — ${serviceLabel} model sharing exclusive premium content 💋 | ${coomerMeta.postCount > 0 ? `${coomerMeta.postCount.toLocaleString('en-US')} posts of exclusive photos and videos` : 'Exclusive photos and videos'} | Subscribe for the full experience ✨🔥`
+    : '';
+  const bio = cleanScrapedBio(firstPage.bioText || '') || cleanScrapedBio(firstPage.description) || coomerBio || genericBio;
 
   const hashtagText = `${firstPage.title} ${firstPage.description}`;
   const hashtags = [...hashtagText.matchAll(/#([a-z0-9_]+)/gi)].map(match => match[1].toLowerCase());

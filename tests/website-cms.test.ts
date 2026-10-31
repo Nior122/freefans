@@ -172,6 +172,101 @@ test('website CMS scraper rejects unsafe URLs and normalizes direct Coomer media
   ]);
 });
 
+test('website CMS scraper uses the Coomer API for post media, videos, name and bio', async () => {
+  const originalFetch = globalThis.fetch;
+  const acceptHeaders: string[] = [];
+  const imagePath = `/ab/cd/${'a'.repeat(64)}.jpg`;
+  const inlinePath = `/12/34/${'b'.repeat(64)}.png`;
+  globalThis.fetch = (async (input: unknown, init?: { headers?: Record<string, string> }) => {
+    const url = String(input);
+    acceptHeaders.push(init?.headers?.accept || '');
+    if (url.includes('/api/v1/onlyfans/user/testcreator/profile')) {
+      return new Response(JSON.stringify({ name: 'Test Creator', post_count: 1234 }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (url.includes('/api/v1/onlyfans/user/testcreator/posts')) {
+      return new Response(JSON.stringify([
+        { id: '1', title: 'First post', published: '2025-01-02T03:04:05', tags: ['Cosplay'], file: { name: 'a.jpg', path: imagePath }, attachments: [] },
+        {
+          id: '2', title: 'Video post', published: '2025-01-01T03:04:05',
+          content: `<p>hi</p><img src="https://coomer.st${inlinePath}">`,
+          file: {},
+          attachments: [{ name: 'v.mp4', path: '/de/f0/video.mp4' }, { name: 'a.zip', path: '/de/f0/archive.zip' }],
+        },
+      ]), { headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('not found', { status: 404 });
+  }) as typeof fetch;
+  try {
+    const result = await scrapeProfileSource({ url: 'https://coomer.st/onlyfans/user/testcreator', maxItems: 50, maxPages: 2 }, {});
+    assert.equal(result.sourceType, 'coomer_profile');
+    assert.equal(result.draftProfile.name, 'Test Creator');
+    assert.ok(result.draftProfile.bio.includes('1,234 posts'), `bio should use the API post count: ${result.draftProfile.bio}`);
+    assert.ok(acceptHeaders.length >= 2 && acceptHeaders.every(header => header === 'text/css'), 'Coomer API calls must send Accept: text/css');
+    // Post file image, attachment video (zip skipped), inline content image.
+    assert.deepEqual(result.draftProfile.images.map(item => item.mediaType), ['image', 'video', 'image']);
+    assert.equal(result.draftProfile.images[0]?.url, `https://img.coomer.st/thumbnail/data${imagePath}`);
+    assert.equal(result.draftProfile.images[0]?.sourceUrl, `https://img.coomer.st/data${imagePath}`);
+    assert.equal(result.draftProfile.images[1]?.url, 'https://img.coomer.st/data/de/f0/video.mp4');
+    assert.equal(result.draftProfile.images[0]?.caption, 'First post');
+    assert.ok(result.draftProfile.tags.includes('cosplay'));
+    assert.equal(result.draftProfile.avatarUrl, 'https://img.coomer.st/icons/onlyfans/testcreator');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('website CMS scraper uses the Coomer API single-post shape', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: unknown) => {
+    const url = String(input);
+    if (url.includes('/profile')) {
+      return new Response(JSON.stringify({ name: 'Poster Creator', post_count: 10 }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (url.includes('/post/999')) {
+      return new Response(JSON.stringify({
+        post: { id: '999', title: 'Solo post', published: '2025-02-01T00:00:00', file: { name: 'v.mp4', path: '/aa/bb/clip.mp4' } },
+        attachments: [{ name: 'p.jpg', path: '/aa/bb/photo.jpg' }],
+        previews: [],
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('not found', { status: 404 });
+  }) as typeof fetch;
+  try {
+    const result = await scrapeProfileSource({ url: 'https://coomer.party/onlyfans/user/poster/post/999', maxItems: 10, maxPages: 1 }, {});
+    assert.equal(result.sourceType, 'coomer_post');
+    assert.equal(result.draftProfile.name, 'Poster Creator');
+    assert.deepEqual(result.draftProfile.images.map(item => item.mediaType), ['video', 'image']);
+    assert.equal(result.pagesFetched, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('website CMS scraper falls back to webpage extraction when the Coomer API fails', async () => {
+  const originalFetch = globalThis.fetch;
+  const html = `<!doctype html><html><head>
+    <meta property="og:title" content="Fallback Creator">
+    <meta property="og:description" content="Real bio about this creator and her cosplay shoots | Coomer">
+    <meta property="og:image" content="https://img.coomer.st/icons/onlyfans/fallback">
+    </head><body>
+    <img src="https://img.coomer.st/thumbnail/data/ab/cd/poster.jpg" alt="Post poster">
+    </body></html>`;
+  globalThis.fetch = (async (input: unknown) => {
+    const url = String(input);
+    if (url.includes('/api/v1/')) return new Response('blocked', { status: 500 });
+    return new Response(html, { headers: { 'content-type': 'text/html' } });
+  }) as typeof fetch;
+  try {
+    const result = await scrapeProfileSource({ url: 'https://coomer.st/onlyfans/user/fallback', maxItems: 10, maxPages: 2 }, {});
+    assert.ok(result.warnings.some(warning => warning.includes('falling back to webpage extraction')));
+    assert.equal(result.draftProfile.name, 'Fallback Creator');
+    assert.ok(result.draftProfile.bio.startsWith('Real bio about this creator'), `bio should keep the cleaned description: ${result.draftProfile.bio}`);
+    assert.ok(result.draftProfile.images.some(item => item.url === 'https://img.coomer.st/thumbnail/data/ab/cd/poster.jpg'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 interface ProfileRow extends Record<string, unknown> {
   id: string;
   status: CmsProfileRecord['status'];

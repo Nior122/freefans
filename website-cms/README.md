@@ -147,6 +147,13 @@ npm run build
 
 ## Scraper rules
 
+- Coomer/Kemono profile and post URLs (including the `.party`/`.su` mirrors) are
+  imported through their public JSON API, which returns the real post image and
+  video files, captions, dates, and tags. Coomer does not expose the creator's
+  original platform bio, so the draft bio is generated from the scraped name,
+  service, and post count and can be edited before publishing. If the API is
+  unavailable, the scraper falls back to webpage extraction and says so in the
+  scrape warnings.
 - Only public `http(s)` URLs on standard ports are accepted.
 - Local/private/reserved-network URLs and URLs with embedded credentials are rejected.
 - Redirects are validated and page downloads are size/time limited.
