@@ -5,9 +5,11 @@ import type { Advert, CmsProfileRecord, Image, Profile } from '../types';
 import {
   applyProfileRecord,
   buildCmsProfileRecord,
+  BULK_SCRAPE_MAX_PROFILES,
   isAdvertLive,
   mergeAdminProfiles,
   mergePublicProfiles,
+  parseBulkProfileUrls,
   slugifyProfileId,
 } from '../services/cms';
 import {
@@ -265,6 +267,31 @@ test('website CMS scraper falls back to webpage extraction when the Coomer API f
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('bulk scraper URL list is trimmed, de-duplicated in order, and capped', () => {
+  assert.equal(BULK_SCRAPE_MAX_PROFILES, 25);
+  assert.deepEqual(parseBulkProfileUrls(''), { urls: [], duplicates: 0, overflow: 0 });
+
+  const parsed = parseBulkProfileUrls([
+    ' https://coomer.st/onlyfans/user/one ',
+    '',
+    'https://coomer.st/onlyfans/user/two,https://coomer.st/onlyfans/user/three',
+    'https://coomer.st/onlyfans/user/one',
+  ].join('\n'));
+  assert.deepEqual(parsed.urls, [
+    'https://coomer.st/onlyfans/user/one',
+    'https://coomer.st/onlyfans/user/two',
+    'https://coomer.st/onlyfans/user/three',
+  ]);
+  assert.equal(parsed.duplicates, 1);
+  assert.equal(parsed.overflow, 0);
+
+  const many = Array.from({ length: 30 }, (_, index) => `https://coomer.st/onlyfans/user/creator-${index + 1}`);
+  const capped = parseBulkProfileUrls(many.join('\n'));
+  assert.equal(capped.urls.length, 25);
+  assert.equal(capped.urls[24], 'https://coomer.st/onlyfans/user/creator-25');
+  assert.equal(capped.overflow, 5);
 });
 
 interface ProfileRow extends Record<string, unknown> {

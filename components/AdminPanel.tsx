@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   AlertTriangle, ArrowDown, ArrowUp, CheckCircle2, Download, Edit2, Eye, EyeOff,
@@ -8,10 +8,10 @@ import {
 } from 'lucide-react';
 import { useMockData } from '../services/mockData';
 import {
-  AdminProfileEntry, applyProfileRecord, buildCmsProfileRecord, CmsApiError,
+  AdminProfileEntry, applyProfileRecord, buildCmsProfileRecord, BULK_SCRAPE_MAX_PROFILES, CmsApiError,
   deleteAdvert as deleteAdvertApi, downloadJson, emptyAdvert, emptyProfile,
   exportAdminCms, getAdminContent, getAdminSession, loginAdmin, logoutAdmin,
-  makeMediaId, mergeAdminProfiles, normalizeTags, permanentlyDeleteCmsProfileRecord,
+  makeMediaId, mergeAdminProfiles, normalizeTags, parseBulkProfileUrls, permanentlyDeleteCmsProfileRecord,
   saveAdvert as saveAdvertApi, saveCmsProfileRecord, scrapeProfileUrl, slugifyProfileId,
   type AdminSession, type ScrapeResult,
 } from '../services/cms';
@@ -30,6 +30,28 @@ interface ProfileEditState {
   status: CmsProfileStatus;
   isNew: boolean;
 }
+
+type BulkScrapeItemStatus = 'queued' | 'scraping' | 'saved' | 'skipped' | 'failed';
+
+interface BulkScrapeItem {
+  url: string;
+  status: BulkScrapeItemStatus;
+  profileId?: string;
+  profileName?: string;
+  mediaCount?: number;
+  message?: string;
+}
+
+const bulkScrapeStatusLabels: Record<BulkScrapeItemStatus, string> = {
+  queued: 'Queued', scraping: 'Scraping…', saved: 'Saved draft', skipped: 'Skipped', failed: 'Failed',
+};
+const bulkScrapeStatusStyles: Record<BulkScrapeItemStatus, string> = {
+  queued: 'border-slate-400/30 bg-slate-400/10 text-slate-300',
+  scraping: 'border-sky-400/30 bg-sky-400/10 text-sky-300',
+  saved: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300',
+  skipped: 'border-amber-400/30 bg-amber-400/10 text-amber-300',
+  failed: 'border-rose-400/30 bg-rose-400/10 text-rose-300',
+};
 
 const inputCls = 'w-full rounded-xl border border-white/10 bg-black/50 px-3 py-2.5 text-sm text-white outline-none transition placeholder:text-gray-600 focus:border-red-500 focus:ring-2 focus:ring-red-500/20';
 const labelCls = 'mb-1.5 block text-[11px] font-black uppercase tracking-[0.16em] text-gray-500';
@@ -148,6 +170,10 @@ export const AdminPanel = () => {
   const [selectedScrapeMediaIds, setSelectedScrapeMediaIds] = useState<string[]>([]);
   const [appendTargetProfileId, setAppendTargetProfileId] = useState('');
   const [importJsonText, setImportJsonText] = useState('');
+  const [bulkScrapeText, setBulkScrapeText] = useState('');
+  const [bulkItems, setBulkItems] = useState<BulkScrapeItem[]>([]);
+  const [bulkRunning, setBulkRunning] = useState(false);
+  const bulkCancelRef = useRef(false);
 
   const [editingAdvert, setEditingAdvert] = useState<Advert | null>(null);
   const [advertQuery, setAdvertQuery] = useState('');
@@ -419,6 +445,106 @@ export const AdminPanel = () => {
     } finally {
       setScraping(false);
     }
+  };
+
+  // Bulk mode processes profile URLs one at a time from the browser so a long
+  // batch never hits per-request Worker limits. Each successful scrape is
+  // auto-saved as a D1 draft; existing creators are skipped untouched and a
+  // failed URL never stops the rest of the batch.
+  const runBulkScrape = async () => {
+    if (!rightsConfirmed) {
+      setNotice({ tone: 'error', message: 'Confirm that you own the content or have permission to publish it before bulk scraping.' });
+      return;
+    }
+    const parsed = parseBulkProfileUrls(bulkScrapeText);
+    if (!parsed.urls.length) {
+      setNotice({ tone: 'error', message: 'Paste at least one profile URL for the bulk scrape.' });
+      return;
+    }
+
+    bulkCancelRef.current = false;
+    setBulkItems(parsed.urls.map(url => ({ url, status: 'queued' as const })));
+    setBulkRunning(true);
+    setNotice(null);
+
+    const updateItem = (index: number, patch: Partial<BulkScrapeItem>) => {
+      setBulkItems(current => current.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
+    };
+    const knownProfileIds = new Set(profileEntries.map(entry => entry.profile.id));
+    let saved = 0;
+    let skipped = 0;
+    let failed = 0;
+    let stopped = false;
+
+    for (let index = 0; index < parsed.urls.length; index += 1) {
+      const url = parsed.urls[index];
+      if (bulkCancelRef.current) {
+        stopped = true;
+        for (let rest = index; rest < parsed.urls.length; rest += 1) {
+          updateItem(rest, { status: 'skipped', message: 'Stopped by admin before processing.' });
+          skipped += 1;
+        }
+        break;
+      }
+
+      updateItem(index, { status: 'scraping', message: 'Scraping profile…' });
+      try {
+        const result = await scrapeProfileUrl({
+          url,
+          urls: [],
+          maxItems: scrapeMaxItems,
+          maxPages: scrapeMaxPages,
+          rightsConfirmed: true,
+        });
+        const profile = clone(result.draftProfile);
+        profile.id = slugifyProfileId(profile.id);
+
+        if (!/^[a-z0-9][a-z0-9._-]{1,63}$/.test(profile.id) || RESERVED_IDS.has(profile.id)) {
+          failed += 1;
+          updateItem(index, { status: 'failed', profileName: profile.name, mediaCount: profile.images.length, message: `Scraped profile ID “${profile.id || 'unknown'}” is not a valid FansLeak profile slug.` });
+          continue;
+        }
+        if (knownProfileIds.has(profile.id)) {
+          skipped += 1;
+          updateItem(index, { status: 'skipped', profileId: profile.id, profileName: profile.name, mediaCount: profile.images.length, message: 'Already exists on FansLeak — skipped without changes.' });
+          continue;
+        }
+        if (!profile.images.length) {
+          failed += 1;
+          updateItem(index, { status: 'failed', profileId: profile.id, profileName: profile.name, mediaCount: 0, message: 'No image or video media was found for this profile.' });
+          continue;
+        }
+
+        updateItem(index, { status: 'scraping', profileId: profile.id, profileName: profile.name, mediaCount: profile.images.length, message: `Saving draft with ${profile.images.length} media item(s)…` });
+        const record = buildCmsProfileRecord({ edited: profile, status: 'draft', origin: 'cms' });
+        const savedRecord = await saveCmsProfileRecord(record);
+        replaceProfileRecord(savedRecord.record);
+        knownProfileIds.add(profile.id);
+        saved += 1;
+        updateItem(index, {
+          status: 'saved',
+          profileId: profile.id,
+          profileName: profile.name,
+          mediaCount: profile.images.length,
+          message: result.warnings.length ? `Saved as draft. ${result.warnings.join(' ')}` : 'Saved as draft. Review it under Profiles before publishing.',
+        });
+      } catch (error) {
+        failed += 1;
+        updateItem(index, { status: 'failed', message: errorText(error) });
+      }
+    }
+
+    await refreshCmsContent();
+    setBulkRunning(false);
+    const notes = [
+      parsed.overflow > 0 ? `${parsed.overflow} extra URL(s) over the ${BULK_SCRAPE_MAX_PROFILES}-profile batch limit were not processed.` : '',
+      parsed.duplicates > 0 ? `${parsed.duplicates} duplicate URL(s) were removed before starting.` : '',
+      stopped ? 'The batch was stopped before all URLs were processed.' : '',
+    ].filter(Boolean).join(' ');
+    setNotice({
+      tone: failed || stopped ? 'info' : 'success',
+      message: `Bulk scrape finished: ${saved} saved as draft(s), ${skipped} skipped, ${failed} failed.${notes ? ` ${notes}` : ''} Review the new drafts under Profiles before publishing.`,
+    });
   };
 
   const selectedScrapeProfile = (): Profile | null => {
@@ -813,6 +939,12 @@ export const AdminPanel = () => {
     const scrapedMedia = scrapeResult?.draftProfile.images || [];
     const visibleScrapedMedia = scrapedMedia.slice(0, mediaVisibleCount);
     const selectedCount = selectedScrapeMediaIds.length;
+    const bulkParsed = parseBulkProfileUrls(bulkScrapeText);
+    const bulkDone = bulkItems.filter(item => item.status === 'saved' || item.status === 'skipped' || item.status === 'failed').length;
+    const bulkSavedCount = bulkItems.filter(item => item.status === 'saved').length;
+    const bulkSkippedCount = bulkItems.filter(item => item.status === 'skipped').length;
+    const bulkFailedCount = bulkItems.filter(item => item.status === 'failed').length;
+    const bulkPercent = bulkItems.length ? Math.round((bulkDone / bulkItems.length) * 100) : 0;
 
     return (
       <div className="grid gap-6 xl:grid-cols-[430px_1fr]">
@@ -840,9 +972,69 @@ export const AdminPanel = () => {
               <input type="checkbox" checked={rightsConfirmed} onChange={e => setRightsConfirmed(e.target.checked)} className="mt-1 h-4 w-4 shrink-0 accent-red-600" />
               <span>I confirm that I own this content or have permission from the rights holder/creator to publish the information, images, and videos I import.</span>
             </label>
-            <button disabled={scraping || (!scrapeUrl.trim() && !extraScrapeUrls.trim())} onClick={runScrape} className={`${buttonCls} w-full bg-red-600 text-white hover:bg-red-500`}>
+            <button disabled={scraping || bulkRunning || (!scrapeUrl.trim() && !extraScrapeUrls.trim())} onClick={runScrape} className={`${buttonCls} w-full bg-red-600 text-white hover:bg-red-500`}>
               {scraping ? <Loader2 className="animate-spin" size={17} /> : <Wand2 size={17} />} {scraping ? 'Scraping…' : 'Scrape into draft'}
             </button>
+          </section>
+
+          <section className={`${panelCls} space-y-4 p-6`}>
+            <div className="flex items-start gap-3">
+              <div className="rounded-2xl bg-red-500/10 p-3 text-red-400"><Users size={22} /></div>
+              <div>
+                <h3 className="text-lg font-black text-white">Bulk profile scrape</h3>
+                <p className="mt-1 text-sm leading-relaxed text-gray-500">Paste up to {BULK_SCRAPE_MAX_PROFILES} profile URLs. They are processed one by one and every successful profile is auto-saved as a <span className="font-bold text-amber-300">draft</span> — nothing goes live until you publish it. Creators that already exist are skipped untouched.</p>
+              </div>
+            </div>
+
+            <Field label={`Profile URLs — one per line (${bulkParsed.urls.length}/${BULK_SCRAPE_MAX_PROFILES})`} hint={bulkParsed.overflow > 0 ? `${bulkParsed.overflow} URL(s) over the ${BULK_SCRAPE_MAX_PROFILES}-profile limit will be left for the next batch.` : 'Uses the rights confirmation and scrape limits from the URL Scraper box above.'}>
+              <textarea value={bulkScrapeText} onChange={e => setBulkScrapeText(e.target.value)} disabled={bulkRunning} className={`${inputCls} min-h-36 font-mono text-xs disabled:opacity-60`} placeholder={'https://coomer.st/onlyfans/user/creator-one\nhttps://coomer.st/onlyfans/user/creator-two\nhttps://coomer.st/fansly/user/creator-three'} />
+            </Field>
+
+            <div className="flex gap-2">
+              <button disabled={bulkRunning || scraping || !bulkParsed.urls.length} onClick={runBulkScrape} className={`${buttonCls} flex-1 bg-red-600 text-white hover:bg-red-500`}>
+                {bulkRunning ? <Loader2 className="animate-spin" size={17} /> : <Users size={17} />} {bulkRunning ? `Scraping ${bulkDone}/${bulkItems.length}…` : `Bulk scrape ${bulkParsed.urls.length || ''} profile${bulkParsed.urls.length === 1 ? '' : 's'}`}
+              </button>
+              {bulkRunning && <button onClick={() => { bulkCancelRef.current = true; }} className={`${buttonCls} border border-rose-400/30 bg-rose-400/10 text-rose-200`}><X size={16} /> Stop</button>}
+            </div>
+
+            {bulkItems.length > 0 && (
+              <div className="space-y-3 border-t border-white/5 pt-4">
+                <div>
+                  <div className="flex items-center justify-between text-xs font-bold text-gray-400">
+                    <span>{bulkRunning ? 'Processing…' : 'Batch finished'} · {bulkDone}/{bulkItems.length}</span>
+                    <span>{bulkPercent}%</span>
+                  </div>
+                  <div className="mt-2 h-2.5 overflow-hidden rounded-full bg-black/60">
+                    <div className={`h-full rounded-full transition-all ${bulkFailedCount ? 'bg-amber-500' : 'bg-red-600'}`} style={{ width: `${bulkPercent}%` }} />
+                  </div>
+                  <p className="mt-2 text-xs text-gray-500">{bulkSavedCount} saved · {bulkSkippedCount} skipped · {bulkFailedCount} failed</p>
+                </div>
+                <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
+                  {bulkItems.map((item, index) => (
+                    <div key={`${item.url}-${index}`} className="rounded-2xl border border-white/10 bg-black/40 p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <p className="min-w-0 truncate font-mono text-[11px] text-gray-400" title={item.url}>{item.url}</p>
+                        <span className={`flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-black ${bulkScrapeStatusStyles[item.status]}`}>
+                          {item.status === 'scraping' && <Loader2 className="animate-spin" size={12} />}
+                          {item.status === 'saved' && <CheckCircle2 size={12} />}
+                          {bulkScrapeStatusLabels[item.status]}
+                        </span>
+                      </div>
+                      {(item.profileName || item.message) && (
+                        <p className="mt-1.5 text-xs leading-relaxed text-gray-500">
+                          {item.profileName && <span className="font-bold text-gray-300">{item.profileName}</span>}
+                          {typeof item.mediaCount === 'number' && <span> · {item.mediaCount} media</span>}
+                          {item.message && <span>{item.profileName ? ' — ' : ''}{item.message}</span>}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                {!bulkRunning && bulkSavedCount > 0 && (
+                  <button onClick={() => { setProfileStatusFilter('draft'); setActiveTab('profiles'); }} className={`${buttonCls} w-full border border-amber-400/30 bg-amber-400/10 text-amber-200`}><Eye size={16} /> Review saved drafts</button>
+                )}
+              </div>
+            )}
           </section>
 
           <section className={`${panelCls} space-y-4 p-6`}>
