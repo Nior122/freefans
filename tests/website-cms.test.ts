@@ -21,6 +21,7 @@ import {
   type SiteCmsEnv,
 } from '../functions/_lib/siteCms';
 import { assertPublicHttpUrl, scrapeProfileSource, ScrapeError } from '../functions/_lib/scraper';
+import { profileSubscribeUrl } from '../services/profileLinks';
 import { onRequest as handleProfileRequest } from '../functions/profile/[id].ts';
 import { onRequest as handleApiRequest } from '../functions/api/[[path]].ts';
 
@@ -303,6 +304,21 @@ test('media locker URL resolver keeps valid links and falls back to the default'
   assert.equal(resolveMediaLockerUrl('not-a-url'), DEFAULT_MEDIA_LOCKER_URL);
   assert.equal(resolveMediaLockerUrl('javascript:alert(1)'), DEFAULT_MEDIA_LOCKER_URL);
   assert.equal(resolveMediaLockerUrl(undefined), DEFAULT_MEDIA_LOCKER_URL);
+});
+
+test('profile Subscribe and Get videos links use the same profile-specific Telegram URL', () => {
+  assert.equal(
+    profileSubscribeUrl('creator.name'),
+    'https://t.me/KasiQueenbot?start=contact_creator_dot_name',
+  );
+  assert.equal(
+    profileSubscribeUrl('future-creator', '@FansLeakBot'),
+    'https://t.me/FansLeakBot?start=contact_future-creator',
+  );
+  assert.equal(
+    profileSubscribeUrl('future-creator', '  '),
+    'https://t.me/KasiQueenbot?start=contact_future-creator',
+  );
 });
 
 interface ProfileRow extends Record<string, unknown> {
