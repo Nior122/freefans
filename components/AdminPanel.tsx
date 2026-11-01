@@ -1175,10 +1175,11 @@ export const AdminPanel = () => {
           <aside className={`${panelCls} h-fit p-6`}>
             <h3 className="font-black uppercase tracking-wide text-white">Preview</h3>
             {advert.kind === 'managed' ? (
-              <div className="relative mt-4 min-h-64 overflow-hidden rounded-3xl border border-red-900/50 bg-black">
+              <div className="relative mt-4 min-h-64 overflow-hidden rounded-3xl bg-black">
                 {advert.videoUrl ? <video src={advert.videoUrl} poster={advert.imageUrl || undefined} muted loop playsInline className="absolute inset-0 h-full w-full object-cover" /> : advert.imageUrl ? <img src={advert.imageUrl} alt="" className="absolute inset-0 h-full w-full object-cover" /> : null}
                 <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent" />
-                <div className="relative flex min-h-64 flex-col justify-end p-5"><p className="text-[11px] font-black uppercase tracking-[0.18em] text-red-300">Advertisement</p><p className="mt-2 text-2xl font-black text-white">{advert.headline || 'Your headline'}</p><p className="mt-1 text-sm text-white/70">{advert.description || 'Your advert description will appear here.'}</p><span className="mt-4 w-fit rounded-full bg-red-600 px-4 py-2 text-xs font-black uppercase text-white">{advert.ctaLabel || 'Visit sponsor'}</span></div>
+                <span className="absolute right-3 top-3 rounded-full border border-white/20 bg-black/60 px-2 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-white/80">Sponsored</span>
+                <div className="relative flex min-h-64 flex-col justify-end p-5"><p className="mt-2 text-2xl font-black text-white">{advert.headline || 'Your headline'}</p><p className="mt-1 text-sm text-white/70">{advert.description || 'Your advert description will appear here.'}</p><span className="mt-4 w-fit rounded-full bg-red-600 px-4 py-2 text-xs font-black uppercase text-white">{advert.ctaLabel || 'Visit sponsor'}</span></div>
               </div>
             ) : (
               <div className="mt-4 rounded-3xl border border-white/10 bg-black/60 p-4">

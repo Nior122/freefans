@@ -66,28 +66,6 @@ const ProfilePageContent = ({ profile }: { profile: Profile }) => {
   const fmtK = (n: number) => n >= 1000 ? (n / 1000).toFixed(1) + 'K' : n.toString();
   const [subCount] = useState(() => fmtK(Math.floor(Math.random() * 60000) + 18000));
 
-  // Social proof toast
-  const NAMES = [
-    'Ashley','Mia','Jordan','Tyler','Brianna','Kayla','Marcus','Destiny','Chris','Aaliyah',
-    'Devon','Savannah','Jake','Monique','Ryan','Jasmine','Taylor','Keisha','Logan','Priya',
-    'Zoe','Cameron','Alexis','Brandon','Naomi','Hunter','Sierra','Darius','Chloe','Isaiah',
-    'Madison','Elijah','Amber','Malik','Tiffany','Kyle','Imani','Nathan','Vanessa','Caleb',
-    'Danielle','Derek','Simone','Connor','Aria','Jaden','Leah','Omar','Faith','Austin',
-    'Gabrielle','Anthony','Kiera','Xavier','Paige','Damien','Yara','Evan','Nadia','Blake',
-    'Tatiana','Jalen','Brooklyn','Miles','Selena','Andre','Camille','Tristan','Jade','Kevin',
-    'Ciara','Bryan','Lydia','Terrell','Aisha','Chase','Hailey','Dante','Maya','Preston',
-    'Tiana','Dominic','Layla','Micah','Zara','Seth','Nia','Colton','Whitney','Jaylen',
-    'Stephanie','Rashad','Elena','Brady','Raven','Vincent','Jocelyn','Shane','Amara','Grant',
-  ];
-  const ACTIONS: { label: string; icon: string; color: string }[] = [
-    { label: 'just subscribed', icon: '💳', color: 'text-red-400' },
-    { label: 'just messaged', icon: '💬', color: 'text-blue-400' },
-    { label: 'just called', icon: '📞', color: 'text-green-400' },
-  ];
-  const usedNamesRef = useRef<Set<string>>(new Set());
-  const [socialToast, setSocialToast] = useState<{ name: string; label: string; icon: string; color: string } | null>(null);
-  const [toastVisible, setToastVisible] = useState(false);
-
   // Track unlock attempts with cumulative time tracking
   const unlockAttemptRef = useRef<{
     id: string;
@@ -115,11 +93,11 @@ const ProfilePageContent = ({ profile }: { profile: Profile }) => {
     toggleFavorite(profile.id);
   };
 
-  // Automatic Reshuffle Timer (Every 1 minute)
+  // Automatic Reshuffle Timer (Every 2 minutes)
   useEffect(() => {
     const interval = setInterval(() => {
       setShuffleToken(prev => prev + 1);
-    }, 60000);
+    }, 120000);
     return () => clearInterval(interval);
   }, []);
 
@@ -132,31 +110,6 @@ const ProfilePageContent = ({ profile }: { profile: Profile }) => {
       });
     }, 3000);
     return () => clearInterval(interval);
-  }, []);
-
-  // Social proof toast cycle — no name repeats until pool exhausted
-  useEffect(() => {
-    const getUnusedName = () => {
-      const unused = NAMES.filter(n => !usedNamesRef.current.has(n));
-      if (unused.length === 0) { usedNamesRef.current.clear(); return NAMES[Math.floor(Math.random() * NAMES.length)]; }
-      const pick = unused[Math.floor(Math.random() * unused.length)];
-      usedNamesRef.current.add(pick);
-      return pick;
-    };
-    const show = () => {
-      const name = getUnusedName();
-      const action = ACTIONS[Math.floor(Math.random() * ACTIONS.length)];
-      setSocialToast({ name, ...action });
-      setToastVisible(true);
-      setTimeout(() => setToastVisible(false), 2500);
-    };
-    const scheduleNext = () => {
-      const delay = Math.floor(Math.random() * 2000) + 2000;
-      return setTimeout(() => { show(); scheduleNext(); }, delay);
-    };
-    const initial = setTimeout(show, 1500);
-    const t = setTimeout(scheduleNext, 4500);
-    return () => { clearTimeout(initial); clearTimeout(t); };
   }, []);
 
   // Cumulative time tracking: Track when user leaves and returns
@@ -279,7 +232,7 @@ const ProfilePageContent = ({ profile }: { profile: Profile }) => {
     window.open("https://www.effectivecpmnetwork.com/quqay0k2?key=f9dc05c1566e4e3627daf87fe9a2c9fc", "_blank");
   };
 
-  // Memoized shuffled images - updates when shuffleToken changes (every min) or profile changes
+  // Memoized shuffled images - updates when shuffleToken changes (every 2 min) or profile changes
   const shuffledImages = useMemo(() => {
     const shuffled = [...profile.images];
     // Simple Fisher-Yates shuffle
@@ -728,24 +681,6 @@ const ProfilePageContent = ({ profile }: { profile: Profile }) => {
         unlockedIds={unlockedIds}
       />
 
-      {/* Social Proof Toast */}
-      {socialToast && (
-        <div
-          className={`fixed bottom-6 left-4 z-50 flex items-center gap-3 px-4 py-3 rounded-xl bg-[#0f0f0f] border border-red-900/40 shadow-2xl shadow-black/60 transition-all duration-500 max-w-[280px] ${
-            toastVisible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4 pointer-events-none'
-          }`}
-        >
-          <span className="text-xl">{socialToast.icon}</span>
-          <div className="flex flex-col leading-tight">
-            <span className="text-white text-sm font-semibold">{socialToast.name}</span>
-            <span className={`text-xs font-medium ${socialToast.color}`}>{socialToast.label}</span>
-          </div>
-          <span className="ml-auto flex h-2 w-2 shrink-0">
-            <span className="animate-ping absolute inline-flex h-2 w-2 rounded-full bg-green-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-          </span>
-        </div>
-      )}
     </div>
   );
 };
