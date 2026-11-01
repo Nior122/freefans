@@ -72,9 +72,6 @@ const ManagedAdvert = ({ advert }: { advert: Advert }) => {
         />
       ) : null}
       <div className="absolute inset-0 bg-gradient-to-t from-black via-black/45 to-transparent" />
-      <span className="absolute right-3 top-3 rounded-full border border-white/20 bg-black/60 px-2 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-white/80">
-        Sponsored
-      </span>
       <div className="relative flex h-full flex-col justify-end p-4 text-white">
         {advert.headline && <p className={`${compact ? 'text-base' : 'text-xl'} font-black leading-tight`}>{advert.headline}</p>}
         {advert.description && <p className="mt-1 line-clamp-2 text-sm text-white/75">{advert.description}</p>}
