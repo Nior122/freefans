@@ -77,6 +77,11 @@ export const SITE_CMS_SCHEMA_STATEMENTS = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_cms_login_attempts_recent
      ON cms_login_attempts(ip_hash, created_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS cms_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+  )`,
 ];
 
 const schemaPromises = new WeakMap<object, Promise<void>>();
@@ -197,6 +202,27 @@ export async function loadCmsAdverts(env: SiteCmsEnv): Promise<Advert[]> {
       updatedAt: row.updated_at,
     } as Advert;
   });
+}
+
+export const MEDIA_LOCKER_URL_SETTING_KEY = 'media_locker_url';
+
+export async function loadCmsSetting(env: SiteCmsEnv, key: string): Promise<string> {
+  const db = await ensureSiteCmsSchema(env);
+  const row = await db.prepare('SELECT value FROM cms_settings WHERE key=?').bind(key).first<{ value: string }>();
+  return typeof row?.value === 'string' ? row.value : '';
+}
+
+// An empty value deletes the setting so callers fall back to their default.
+export async function saveCmsSetting(env: SiteCmsEnv, key: string, value: string): Promise<void> {
+  const db = await ensureSiteCmsSchema(env);
+  if (!value) {
+    await db.prepare('DELETE FROM cms_settings WHERE key=?').bind(key).run();
+    return;
+  }
+  await db.prepare(`
+    INSERT INTO cms_settings(key,value) VALUES(?,?)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+  `).bind(key, value).run();
 }
 
 export function sanitizePublicProfileRecord(record: CmsProfileRecord): CmsProfileRecord | null {

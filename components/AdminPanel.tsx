@@ -9,10 +9,10 @@ import {
 import { useMockData } from '../services/mockData';
 import {
   AdminProfileEntry, applyProfileRecord, buildCmsProfileRecord, BULK_SCRAPE_MAX_PROFILES, CmsApiError,
-  deleteAdvert as deleteAdvertApi, downloadJson, emptyAdvert, emptyProfile,
+  DEFAULT_MEDIA_LOCKER_URL, deleteAdvert as deleteAdvertApi, downloadJson, emptyAdvert, emptyProfile,
   exportAdminCms, getAdminContent, getAdminSession, loginAdmin, logoutAdmin,
   makeMediaId, mergeAdminProfiles, normalizeTags, parseBulkProfileUrls, permanentlyDeleteCmsProfileRecord,
-  saveAdvert as saveAdvertApi, saveCmsProfileRecord, scrapeProfileUrl, slugifyProfileId,
+  saveAdvert as saveAdvertApi, saveCmsProfileRecord, saveMediaLockerUrl, scrapeProfileUrl, slugifyProfileId,
   type AdminSession, type ScrapeResult,
 } from '../services/cms';
 import type {
@@ -180,6 +180,8 @@ export const AdminPanel = () => {
   const [advertStatusFilter, setAdvertStatusFilter] = useState<'all' | AdvertStatus>('all');
   const [advertBusy, setAdvertBusy] = useState('');
   const [pendingAdvertDelete, setPendingAdvertDelete] = useState<Advert | null>(null);
+  const [mediaLockerUrlInput, setMediaLockerUrlInput] = useState(DEFAULT_MEDIA_LOCKER_URL);
+  const [mediaLockerBusy, setMediaLockerBusy] = useState(false);
 
   const profileEntries = useMemo(
     () => content ? mergeAdminProfiles(baseProfiles, content.profileRecords) : [],
@@ -194,6 +196,7 @@ export const AdminPanel = () => {
     try {
       const data = await getAdminContent();
       setContent(data);
+      setMediaLockerUrlInput(data.mediaLockerUrl || DEFAULT_MEDIA_LOCKER_URL);
       setScrapeMaxItems(current => Math.min(current, data.config.scraperMaxItems));
       setScrapeMaxPages(current => Math.min(current, data.config.scraperMaxPages));
       await refreshCmsContent();
@@ -251,6 +254,38 @@ export const AdminPanel = () => {
   };
   const replaceAdvert = (advert: Advert) => {
     setContent(current => current ? { ...current, adverts: [advert, ...current.adverts.filter(item => item.id !== advert.id)] } : current);
+  };
+
+  const saveMediaLocker = async (value: string) => {
+    const trimmed = value.trim();
+    if (trimmed) {
+      let valid = false;
+      try {
+        const parsed = new URL(trimmed);
+        valid = parsed.protocol === 'http:' || parsed.protocol === 'https:';
+      } catch { valid = false; }
+      if (!valid) {
+        setNotice({ tone: 'error', message: 'Media locker URL must be a full http(s) link, for example https://example.com/locker?key=...' });
+        return;
+      }
+    }
+    setMediaLockerBusy(true);
+    try {
+      const saved = await saveMediaLockerUrl(trimmed);
+      setContent(current => current ? { ...current, mediaLockerUrl: saved.mediaLockerUrl, mediaLockerUrlIsCustom: saved.mediaLockerUrlIsCustom } : current);
+      setMediaLockerUrlInput(saved.mediaLockerUrl);
+      await refreshCmsContent();
+      setNotice({
+        tone: 'success',
+        message: saved.mediaLockerUrlIsCustom
+          ? 'Media locker URL updated. New profile visits will use it within about a minute.'
+          : 'Media locker URL reset to the built-in default.',
+      });
+    } catch (error) {
+      setNotice({ tone: 'error', message: errorText(error) });
+    } finally {
+      setMediaLockerBusy(false);
+    }
   };
 
   const openProfileEditor = (state: ProfileEditState) => {
@@ -1175,10 +1210,10 @@ export const AdminPanel = () => {
           <aside className={`${panelCls} h-fit p-6`}>
             <h3 className="font-black uppercase tracking-wide text-white">Preview</h3>
             {advert.kind === 'managed' ? (
-              <div className="relative mt-4 min-h-64 overflow-hidden rounded-3xl border border-red-900/50 bg-black">
+              <div className="relative mt-4 min-h-64 overflow-hidden rounded-3xl bg-black">
                 {advert.videoUrl ? <video src={advert.videoUrl} poster={advert.imageUrl || undefined} muted loop playsInline className="absolute inset-0 h-full w-full object-cover" /> : advert.imageUrl ? <img src={advert.imageUrl} alt="" className="absolute inset-0 h-full w-full object-cover" /> : null}
                 <div className="absolute inset-0 bg-gradient-to-t from-black via-black/40 to-transparent" />
-                <div className="relative flex min-h-64 flex-col justify-end p-5"><p className="text-[11px] font-black uppercase tracking-[0.18em] text-red-300">Advertisement</p><p className="mt-2 text-2xl font-black text-white">{advert.headline || 'Your headline'}</p><p className="mt-1 text-sm text-white/70">{advert.description || 'Your advert description will appear here.'}</p><span className="mt-4 w-fit rounded-full bg-red-600 px-4 py-2 text-xs font-black uppercase text-white">{advert.ctaLabel || 'Visit sponsor'}</span></div>
+                <div className="relative flex min-h-64 flex-col justify-end p-5"><p className="mt-2 text-2xl font-black text-white">{advert.headline || 'Your headline'}</p><p className="mt-1 text-sm text-white/70">{advert.description || 'Your advert description will appear here.'}</p><span className="mt-4 w-fit rounded-full bg-red-600 px-4 py-2 text-xs font-black uppercase text-white">{advert.ctaLabel || 'Visit sponsor'}</span></div>
               </div>
             ) : (
               <div className="mt-4 rounded-3xl border border-white/10 bg-black/60 p-4">
@@ -1258,6 +1293,30 @@ export const AdminPanel = () => {
           <StatCard label="Admin auth" value={config?.authConfigured ? 'Ready' : 'Missing'} detail="Username, password and session secret" icon={<KeyRound size={22} />} />
           <StatCard label="Scraper limits" value={`${config?.scraperMaxItems || 300} / ${config?.scraperMaxPages || 3}`} detail="Media items / Coomer pages" icon={<Wand2 size={22} />} />
         </div>
+
+        <section className={`${panelCls} space-y-4 p-6`}>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="flex items-center gap-2 text-xl font-black text-white"><Lock size={20} className="text-red-400" /> Media locker URL</h2>
+              <p className="mt-1 max-w-2xl text-sm leading-relaxed text-gray-500">This is the link that opens when a visitor clicks the <strong className="text-gray-300">lock on a photo or video</strong> to unlock it. Change it here any time — no redeploy needed, and new profile visits pick it up within about a minute.</p>
+            </div>
+            <span className={`rounded-full border px-3 py-1 text-xs font-black ${content?.mediaLockerUrlIsCustom ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300' : 'border-slate-400/30 bg-slate-400/10 text-slate-300'}`}>
+              {content?.mediaLockerUrlIsCustom ? 'Custom URL active' : 'Using built-in default'}
+            </span>
+          </div>
+          <Field label="Locker link (full http(s) URL)" hint="Paste the full link from your locker/ad network, including any ?key=... part. Leave the default if you are not sure.">
+            <input value={mediaLockerUrlInput} onChange={e => setMediaLockerUrlInput(e.target.value)} className={`${inputCls} font-mono text-xs`} placeholder="https://example.com/locker?key=..." spellCheck={false} />
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <button disabled={mediaLockerBusy || mediaLockerUrlInput.trim() === (content?.mediaLockerUrl || DEFAULT_MEDIA_LOCKER_URL)} onClick={() => saveMediaLocker(mediaLockerUrlInput)} className={`${buttonCls} bg-red-600 text-white hover:bg-red-500`}>
+              {mediaLockerBusy ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />} Save locker URL
+            </button>
+            <button disabled={mediaLockerBusy || !content?.mediaLockerUrlIsCustom} onClick={() => saveMediaLocker('')} className={`${buttonCls} border border-white/10 text-white hover:bg-white/5`}>
+              <RefreshCw size={16} /> Reset to default
+            </button>
+            {mediaLockerUrlInput.trim() && <a href={mediaLockerUrlInput.trim()} target="_blank" rel="noopener noreferrer" className={`${buttonCls} border border-white/10 text-gray-200 hover:bg-white/5`}>Test link <Eye size={16} /></a>}
+          </div>
+        </section>
 
         <section className={`${panelCls} p-6`}>
           <h2 className="text-xl font-black text-white">Cloudflare Pages setup order</h2>

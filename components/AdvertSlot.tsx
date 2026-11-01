@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef } from 'react';
-import { ExternalLink, Megaphone } from 'lucide-react';
+import { ExternalLink } from 'lucide-react';
 import { useMockData } from '../services/mockData';
 import { isAdvertLive } from '../services/cms';
 import type { Advert, AdvertPlacement } from '../types';
@@ -72,13 +72,7 @@ const ManagedAdvert = ({ advert }: { advert: Advert }) => {
         />
       ) : null}
       <div className="absolute inset-0 bg-gradient-to-t from-black via-black/45 to-transparent" />
-      <span className="absolute right-3 top-3 rounded-full border border-white/20 bg-black/60 px-2 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-white/80">
-        Sponsored
-      </span>
       <div className="relative flex h-full flex-col justify-end p-4 text-white">
-        <div className="mb-2 flex items-center gap-2 text-[11px] font-black uppercase tracking-[0.18em] text-red-300">
-          <Megaphone size={14} /> Advertisement
-        </div>
         {advert.headline && <p className={`${compact ? 'text-base' : 'text-xl'} font-black leading-tight`}>{advert.headline}</p>}
         {advert.description && <p className="mt-1 line-clamp-2 text-sm text-white/75">{advert.description}</p>}
         {advert.destinationUrl && (
@@ -90,7 +84,7 @@ const ManagedAdvert = ({ advert }: { advert: Advert }) => {
     </>
   );
 
-  const className = `group relative block overflow-hidden rounded-2xl border border-red-900/50 bg-[#12090b] shadow-xl shadow-black/40 ${compact ? 'min-h-44' : 'min-h-48 md:min-h-56'}`;
+  const className = `group relative block overflow-hidden rounded-2xl bg-[#12090b] shadow-xl shadow-black/40 ${compact ? 'min-h-44' : 'min-h-48 md:min-h-56'}`;
   return advert.destinationUrl ? (
     <a href={advert.destinationUrl} target="_blank" rel="nofollow sponsored noopener noreferrer" className={className} aria-label={advert.headline || advert.title}>
       {content}
@@ -131,12 +125,7 @@ export const AdvertSlot = ({
     <section aria-label="Advertisements" className={`space-y-4 ${className}`}>
       {visible.map(advert => advert.kind === 'managed'
         ? <ManagedAdvert key={advert.id} advert={advert} />
-        : (
-          <div key={advert.id} className="overflow-hidden rounded-2xl border border-red-900/40 bg-[#0d0d0f] p-2">
-            <p className="px-2 pb-2 pt-1 text-[10px] font-black uppercase tracking-[0.18em] text-gray-500">Advertisement</p>
-            <NetworkAdvert advert={advert} />
-          </div>
-        ))}
+        : <NetworkAdvert key={advert.id} advert={advert} />)}
     </section>
   );
 };

@@ -1,6 +1,7 @@
 import {
   Advert,
   AdminCmsContent,
+  DEFAULT_MEDIA_LOCKER_URL,
   CmsProfileOrigin,
   CmsProfileRecord,
   CmsProfileStatus,
@@ -9,6 +10,21 @@ import {
   ProfilePatch,
   PublicCmsContent,
 } from '../types';
+
+export { DEFAULT_MEDIA_LOCKER_URL };
+
+// The locker link always resolves to a usable absolute http(s) URL: the
+// owner's saved setting when valid, otherwise the built-in default.
+export function resolveMediaLockerUrl(value: unknown): string {
+  const cleaned = typeof value === 'string' ? value.trim() : '';
+  if (!cleaned) return DEFAULT_MEDIA_LOCKER_URL;
+  try {
+    const url = new URL(cleaned);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : DEFAULT_MEDIA_LOCKER_URL;
+  } catch {
+    return DEFAULT_MEDIA_LOCKER_URL;
+  }
+}
 
 export class CmsApiError extends Error {
   status: number;
@@ -123,6 +139,11 @@ export function parseBulkProfileUrls(text: string, max = BULK_SCRAPE_MAX_PROFILE
   };
 }
 export const exportAdminCms = () => api<AdminCmsContent>('/api/admin/export');
+// Pass an empty string to clear the custom setting and restore the default.
+export const saveMediaLockerUrl = (mediaLockerUrl: string) => api<{ mediaLockerUrl: string; mediaLockerUrlIsCustom: boolean }>('/api/admin/settings', {
+  method: 'PUT',
+  body: JSON.stringify({ mediaLockerUrl }),
+});
 
 export function slugifyProfileId(value: string): string {
   return value

@@ -122,14 +122,22 @@ export interface Advert {
   updatedAt?: string;
 }
 
+/** Fallback link opened when a visitor clicks a locked media item, until the
+ * owner sets a custom media locker URL in the website admin panel. */
+export const DEFAULT_MEDIA_LOCKER_URL = 'https://www.effectivecpmnetwork.com/quqay0k2?key=f9dc05c1566e4e3627daf87fe9a2c9fc';
+
 export interface PublicCmsContent {
   profileRecords: CmsProfileRecord[];
   adverts: Advert[];
+  /** Effective media locker URL (custom D1 setting or DEFAULT_MEDIA_LOCKER_URL). */
+  mediaLockerUrl: string;
   generatedAt: string;
 }
 
 export interface AdminCmsContent extends PublicCmsContent {
   username: string;
+  /** True when mediaLockerUrl comes from the owner's saved setting, not the default. */
+  mediaLockerUrlIsCustom: boolean;
   config: {
     databaseConfigured: boolean;
     authConfigured: boolean;

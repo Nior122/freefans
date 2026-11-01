@@ -14,6 +14,9 @@ bot database.
 - Authorized URL imports from public Coomer profiles/posts, generic public webpages,
   and direct image/video URLs. Every scrape opens as a reviewable draft first.
 - Complete profile JSON and batch-media JSON imports.
+- The media locker URL opened when a visitor clicks the lock on a photo/video
+  (Setup & Secrets → Media locker URL; stored in `cms_settings` in D1, takes
+  effect without a redeploy, and can be reset to the built-in default).
 - Managed image/video/link banners.
 - Trusted third-party script slots, HTML slots, native banners, social bars, and popunders.
 - Advert status, placement, priority and optional start/end dates.

@@ -50,3 +50,9 @@ CREATE TABLE IF NOT EXISTS cms_login_attempts (
 
 CREATE INDEX IF NOT EXISTS idx_cms_login_attempts_recent
   ON cms_login_attempts(ip_hash, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS cms_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);

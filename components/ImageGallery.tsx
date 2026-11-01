@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Lock, Loader2, AlertCircle } from 'lucide-react';
 import { Lightbox } from './Lightbox';
+import { useMockData } from '../services/mockData';
 import { Image } from '../types';
 
 interface ImageGalleryProps {
@@ -9,6 +10,7 @@ interface ImageGalleryProps {
 }
 
 export const ImageGallery = ({ images, userHasAccess }: ImageGalleryProps) => {
+  const { mediaLockerUrl } = useMockData();
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [unlockedIds, setUnlockedIds] = useState<Set<string>>(new Set());
   const [unlockingIds, setUnlockingIds] = useState<Set<string>>(new Set());
@@ -88,7 +90,7 @@ export const ImageGallery = ({ images, userHasAccess }: ImageGalleryProps) => {
     setUnlockingIds(prev => new Set(prev).add(imgId));
     unlockAttemptRef.current = { id: imgId, time: Date.now() };
 
-    window.open("https://www.effectivecpmnetwork.com/quqay0k2?key=f9dc05c1566e4e3627daf87fe9a2c9fc", "_blank");
+    window.open(mediaLockerUrl, "_blank");
   };
 
   return (

@@ -1,4 +1,4 @@
-import type { Advert, CmsProfileRecord, Image, Profile } from '../../types';
+import { DEFAULT_MEDIA_LOCKER_URL, type Advert, type CmsProfileRecord, type Image, type Profile } from '../../types';
 import {
   CmsConfigError,
   clampInteger,
@@ -6,7 +6,10 @@ import {
   loadCmsAdverts,
   loadCmsProfileRecord,
   loadCmsProfileRecords,
+  loadCmsSetting,
+  MEDIA_LOCKER_URL_SETTING_KEY,
   sanitizePublicProfileRecord,
+  saveCmsSetting,
   siteCmsConfig,
   advertIsLive,
   writeCmsAudit,
@@ -513,6 +516,36 @@ async function saveAdvert(request: Request, env: SiteCmsEnv, id: string, actor: 
   return json({ advert: saved });
 }
 
+async function effectiveMediaLockerUrl(env: SiteCmsEnv): Promise<{ url: string; isCustom: boolean }> {
+  const stored = (await loadCmsSetting(env, MEDIA_LOCKER_URL_SETTING_KEY)).trim();
+  // Only trust a stored value that still passes the public-URL rules; the
+  // save handler validates before writing, this is defence in depth.
+  const validated = stored ? publicUrl(stored) : '';
+  return validated
+    ? { url: validated, isCustom: true }
+    : { url: DEFAULT_MEDIA_LOCKER_URL, isCustom: false };
+}
+
+async function saveSettings(request: Request, env: SiteCmsEnv, actor: string): Promise<Response> {
+  requireAdminMutationHeader(request);
+  const body = await readJson(request, 16 * 1024);
+  const raw = cleanString(body.mediaLockerUrl, 2048);
+
+  if (!raw) {
+    await saveCmsSetting(env, MEDIA_LOCKER_URL_SETTING_KEY, '');
+    await writeCmsAudit(env, actor, 'update_media_locker_url', 'settings', MEDIA_LOCKER_URL_SETTING_KEY, { custom: false });
+    return json({ mediaLockerUrl: DEFAULT_MEDIA_LOCKER_URL, mediaLockerUrlIsCustom: false });
+  }
+
+  const validated = publicUrl(raw);
+  if (!validated) {
+    throw new HttpError('Media locker URL must be a public http(s) URL without embedded credentials or a non-standard port.', 400, 'invalid_media_locker_url');
+  }
+  await saveCmsSetting(env, MEDIA_LOCKER_URL_SETTING_KEY, validated);
+  await writeCmsAudit(env, actor, 'update_media_locker_url', 'settings', MEDIA_LOCKER_URL_SETTING_KEY, { custom: true });
+  return json({ mediaLockerUrl: validated, mediaLockerUrlIsCustom: true });
+}
+
 export async function onRequest(context: PagesContext): Promise<Response> {
   const { request, env } = context;
   const url = new URL(request.url);
@@ -530,11 +563,12 @@ export async function onRequest(context: PagesContext): Promise<Response> {
 
     if (request.method === 'GET' && parts[1] === 'public' && parts[2] === 'content') {
       if (!config.databaseConfigured) {
-        return json({ profileRecords: [], adverts: [], generatedAt: new Date().toISOString() }, 200, { 'cache-control': 'public, max-age=30', 'x-fansleak-cms-configured': 'false' });
+        return json({ profileRecords: [], adverts: [], mediaLockerUrl: DEFAULT_MEDIA_LOCKER_URL, generatedAt: new Date().toISOString() }, 200, { 'cache-control': 'public, max-age=30', 'x-fansleak-cms-configured': 'false' });
       }
       const records = (await loadCmsProfileRecords(env)).map(sanitizePublicProfileRecord).filter((item): item is CmsProfileRecord => Boolean(item));
       const adverts = (await loadCmsAdverts(env)).filter(advert => advertIsLive(advert));
-      return json({ profileRecords: records, adverts, generatedAt: new Date().toISOString() }, 200, { 'cache-control': 'public, max-age=30, stale-while-revalidate=60', 'x-fansleak-cms-configured': 'true' });
+      const locker = await effectiveMediaLockerUrl(env);
+      return json({ profileRecords: records, adverts, mediaLockerUrl: locker.url, generatedAt: new Date().toISOString() }, 200, { 'cache-control': 'public, max-age=30, stale-while-revalidate=60', 'x-fansleak-cms-configured': 'true' });
     }
 
     if (parts[1] !== 'admin') throw new HttpError('Not found.', 404, 'not_found');
@@ -555,8 +589,12 @@ export async function onRequest(context: PagesContext): Promise<Response> {
     }
 
     if (request.method === 'GET' && (parts[2] === 'content' || parts[2] === 'export') && parts.length === 3) {
-      const [profileRecords, adverts] = await Promise.all([loadCmsProfileRecords(env), loadCmsAdverts(env)]);
-      return json({ profileRecords, adverts, generatedAt: new Date().toISOString(), username: actor, config });
+      const [profileRecords, adverts, locker] = await Promise.all([loadCmsProfileRecords(env), loadCmsAdverts(env), effectiveMediaLockerUrl(env)]);
+      return json({ profileRecords, adverts, mediaLockerUrl: locker.url, mediaLockerUrlIsCustom: locker.isCustom, generatedAt: new Date().toISOString(), username: actor, config });
+    }
+
+    if (request.method === 'PUT' && parts[2] === 'settings' && parts.length === 3) {
+      return await saveSettings(request, env, actor);
     }
 
     if (parts[2] === 'profiles' && parts.length === 4) {

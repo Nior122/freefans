@@ -31,10 +31,12 @@ export const HomePage = ({ showFavoritesOnly }: { showFavoritesOnly?: boolean })
 
   useEffect(() => {
     setShuffledProfiles(shuffleArray(baseRef.current));
+    // Reshuffle every 2 minutes so profiles and adverts stay stable long
+    // enough to be seen (this was previously every 10 seconds).
     const interval = setInterval(() => {
       setShuffledProfiles(shuffleArray(baseRef.current));
       setCurrentPage(1);
-    }, 10000);
+    }, 120000);
     return () => clearInterval(interval);
   }, [showFavoritesOnly, profiles]);
 
