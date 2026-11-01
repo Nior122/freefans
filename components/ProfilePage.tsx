@@ -15,6 +15,7 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { useMockData } from '../services/mockData';
+import { profileSubscribeUrl } from '../services/profileLinks';
 import { Lightbox } from './Lightbox';
 import { AdvertSlot } from './AdvertSlot';
 import { MediaType, Profile } from '../types';
@@ -45,6 +46,7 @@ export const ProfilePage = () => {
 const ProfilePageContent = ({ profile }: { profile: Profile }) => {
   const navigate = useNavigate();
   const { user, toggleFavorite, isFavorite, mediaLockerUrl } = useMockData();
+  const subscribeUrl = profileSubscribeUrl(profile.id, import.meta.env.VITE_TELEGRAM_BOT_USERNAME);
   const [activeTab, setActiveTab] = useState<'all' | 'image' | 'video' | 'tags'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
@@ -423,7 +425,7 @@ const ProfilePageContent = ({ profile }: { profile: Profile }) => {
         {/* Actions */}
         <div className="flex items-center gap-4 w-full max-w-sm justify-center mb-3">
           <a
-            href={`https://t.me/${(import.meta.env.VITE_TELEGRAM_BOT_USERNAME || 'KasiQueenbot').replace(/^@/, '')}?start=contact_${profile.id.replace(/\./g, '_dot_')}`}
+            href={subscribeUrl}
             target="_blank"
             rel="noopener noreferrer"
             aria-label={`Subscribe to ${profile.name} on Telegram`}
@@ -512,6 +514,23 @@ const ProfilePageContent = ({ profile }: { profile: Profile }) => {
 
           <PaginationControls />
         </div>
+
+        {/* Same destination/action as this profile's Subscribe button. */}
+        {activeTab === 'video' && (
+          <a
+            href={subscribeUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={`Get videos from ${profile.name} on Telegram`}
+            title={`Get videos from ${profile.name} on Telegram`}
+            data-testid="get-videos-button"
+            data-profile-id={profile.id}
+            className="mx-auto mb-6 flex w-full max-w-3xl items-center justify-center gap-3 rounded-full bg-red-700 px-8 py-4 text-xl font-black text-white shadow-xl shadow-red-950/50 transition-colors hover:bg-red-600 focus:outline-none focus-visible:ring-4 focus-visible:ring-red-400/50 md:py-5 md:text-2xl"
+          >
+            <Play size={26} fill="currentColor" aria-hidden="true" />
+            Get videos
+          </a>
+        )}
 
         {/* 5. Post Grid */}
         {displayImages.length > 0 ? (
