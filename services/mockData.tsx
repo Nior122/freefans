@@ -1,6 +1,6 @@
 import React, { createContext, useCallback, useContext, useMemo, useState, useEffect, ReactNode } from 'react';
 import { Advert, CmsProfileRecord, Profile, User, UserRole, Image, MediaType } from '../types';
-import { getPublicCmsContent, mergePublicProfiles } from './cms';
+import { DEFAULT_MEDIA_LOCKER_URL, getPublicCmsContent, mergePublicProfiles, resolveMediaLockerUrl } from './cms';
 import anaimiyaData from './anaimiyaData.json';
 import ruriData from './ruriData.json';
 import nicolebunData from './nicolebunData.json';
@@ -12018,6 +12018,7 @@ interface MockDataContextType {
   baseProfiles: Profile[];
   cmsProfileRecords: CmsProfileRecord[];
   adverts: Advert[];
+  mediaLockerUrl: string;
   cmsStatus: 'loading' | 'ready' | 'unavailable';
   refreshCmsContent: () => Promise<void>;
   hiddenProfileIds: Set<string>;
@@ -12039,6 +12040,7 @@ export const MockDataProvider = ({ children }: { children: ReactNode }) => {
   const [profileBaseState, setProfileBaseState] = useState<Profile[]>(PROFILES);
   const [cmsProfileRecords, setCmsProfileRecords] = useState<CmsProfileRecord[]>([]);
   const [adverts, setAdverts] = useState<Advert[]>([]);
+  const [mediaLockerUrl, setMediaLockerUrl] = useState(DEFAULT_MEDIA_LOCKER_URL);
   const [cmsStatus, setCmsStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading');
   const [hiddenProfileIds, setHiddenProfileIds] = useState<Set<string>>(new Set());
   const [profileVisibilityStatus, setProfileVisibilityStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading');
@@ -12048,6 +12050,7 @@ export const MockDataProvider = ({ children }: { children: ReactNode }) => {
       const content = await getPublicCmsContent();
       setCmsProfileRecords(Array.isArray(content.profileRecords) ? content.profileRecords : []);
       setAdverts(Array.isArray(content.adverts) ? content.adverts : []);
+      setMediaLockerUrl(resolveMediaLockerUrl(content.mediaLockerUrl));
       setCmsStatus('ready');
     } catch {
       // The separate website CMS is optional at runtime: if Pages Functions or
@@ -12141,6 +12144,7 @@ export const MockDataProvider = ({ children }: { children: ReactNode }) => {
       baseProfiles: PROFILES,
       cmsProfileRecords,
       adverts,
+      mediaLockerUrl,
       cmsStatus,
       refreshCmsContent,
       hiddenProfileIds,

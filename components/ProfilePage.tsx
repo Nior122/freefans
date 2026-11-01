@@ -44,7 +44,7 @@ export const ProfilePage = () => {
 
 const ProfilePageContent = ({ profile }: { profile: Profile }) => {
   const navigate = useNavigate();
-  const { user, toggleFavorite, isFavorite } = useMockData();
+  const { user, toggleFavorite, isFavorite, mediaLockerUrl } = useMockData();
   const [activeTab, setActiveTab] = useState<'all' | 'image' | 'video' | 'tags'>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
@@ -228,8 +228,9 @@ const ProfilePageContent = ({ profile }: { profile: Profile }) => {
       cumulativeTimeOutside: 0  // Start at 0
     };
 
-    // Open the link - this will trigger the blur/visibility change
-    window.open("https://www.effectivecpmnetwork.com/quqay0k2?key=f9dc05c1566e4e3627daf87fe9a2c9fc", "_blank");
+    // Open the media locker link (owner-editable in the admin panel) - this
+    // will trigger the blur/visibility change
+    window.open(mediaLockerUrl, "_blank");
   };
 
   // Memoized shuffled images - updates when shuffleToken changes (every 2 min) or profile changes

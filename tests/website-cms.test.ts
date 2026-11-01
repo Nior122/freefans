@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { DEFAULT_MEDIA_LOCKER_URL } from '../types';
 import type { Advert, CmsProfileRecord, Image, Profile } from '../types';
 import {
   applyProfileRecord,
@@ -10,6 +11,7 @@ import {
   mergeAdminProfiles,
   mergePublicProfiles,
   parseBulkProfileUrls,
+  resolveMediaLockerUrl,
   slugifyProfileId,
 } from '../services/cms';
 import {
@@ -294,6 +296,15 @@ test('bulk scraper URL list is trimmed, de-duplicated in order, and capped', () 
   assert.equal(capped.overflow, 5);
 });
 
+test('media locker URL resolver keeps valid links and falls back to the default', () => {
+  assert.equal(resolveMediaLockerUrl('https://locker.example.com/open?key=abc'), 'https://locker.example.com/open?key=abc');
+  assert.equal(resolveMediaLockerUrl(''), DEFAULT_MEDIA_LOCKER_URL);
+  assert.equal(resolveMediaLockerUrl('   '), DEFAULT_MEDIA_LOCKER_URL);
+  assert.equal(resolveMediaLockerUrl('not-a-url'), DEFAULT_MEDIA_LOCKER_URL);
+  assert.equal(resolveMediaLockerUrl('javascript:alert(1)'), DEFAULT_MEDIA_LOCKER_URL);
+  assert.equal(resolveMediaLockerUrl(undefined), DEFAULT_MEDIA_LOCKER_URL);
+});
+
 interface ProfileRow extends Record<string, unknown> {
   id: string;
   status: CmsProfileRecord['status'];
@@ -333,6 +344,10 @@ class FakeStatement implements D1PreparedStatementLike {
     if (this.sql.includes('FROM cms_profiles') && this.sql.includes('WHERE id=?')) {
       return (this.db.profiles.get(String(this.values[0])) || null) as T | null;
     }
+    if (this.sql.includes('FROM cms_settings') && this.sql.includes('WHERE key=?')) {
+      const value = this.db.settings.get(String(this.values[0]));
+      return (value === undefined ? null : { value }) as T | null;
+    }
     return null;
   }
 
@@ -363,6 +378,14 @@ class FakeStatement implements D1PreparedStatementLike {
       });
       return { meta: { changes: 1 } };
     }
+    if (this.sql.includes('INSERT INTO cms_settings')) {
+      this.db.settings.set(String(this.values[0]), String(this.values[1]));
+      return { meta: { changes: 1 } };
+    }
+    if (this.sql.includes('DELETE FROM cms_settings')) {
+      this.db.settings.delete(String(this.values[0]));
+      return { meta: { changes: 1 } };
+    }
     if (this.sql.includes('INSERT INTO cms_adverts')) {
       const [id, status, kind, placement, priority, startsAt, endsAt, advertJson] = this.values;
       this.db.adverts.set(String(id), {
@@ -386,6 +409,7 @@ class FakeStatement implements D1PreparedStatementLike {
 class FakeD1 implements D1DatabaseLike {
   profiles = new Map<string, ProfileRow>();
   adverts = new Map<string, AdvertRow>();
+  settings = new Map<string, string>();
   loginAttempts: Array<{ ipHash: string; username: string; success: number }> = [];
 
   prepare(sql: string): D1PreparedStatementLike {
@@ -489,6 +513,61 @@ test('website CMS API returns JSON auth errors and publishes synthetic D1 conten
   }, cookie);
   assert.equal(scrape.status, 200);
   assert.deepEqual(scrape.body.draftProfile.images.map((item: Image) => item.mediaType), ['image', 'video']);
+});
+
+test('website CMS media locker URL can be changed, published, rejected when unsafe, and reset', async () => {
+  const db = new FakeD1();
+  const env = testEnv(db);
+
+  const before = await apiRequest(env, '/api/public/content');
+  assert.equal(before.status, 200);
+  assert.equal(before.body.mediaLockerUrl, DEFAULT_MEDIA_LOCKER_URL);
+
+  const login = await apiRequest(env, '/api/admin/login', {
+    method: 'POST',
+    body: JSON.stringify({ username: 'local-admin', password: 'local-test-password-123' }),
+  });
+  assert.equal(login.status, 200);
+  const cookie = login.headers.get('set-cookie')?.split(';')[0] || '';
+
+  const adminBefore = await apiRequest(env, '/api/admin/content', {}, cookie);
+  assert.equal(adminBefore.body.mediaLockerUrl, DEFAULT_MEDIA_LOCKER_URL);
+  assert.equal(adminBefore.body.mediaLockerUrlIsCustom, false);
+
+  const unauthenticated = await apiRequest(env, '/api/admin/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ mediaLockerUrl: 'https://locker.example.com/open?key=abc' }),
+  });
+  assert.equal(unauthenticated.status, 401);
+
+  const unsafe = await apiRequest(env, '/api/admin/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ mediaLockerUrl: 'http://127.0.0.1/secret' }),
+  }, cookie);
+  assert.equal(unsafe.status, 400);
+  assert.equal(unsafe.body.error, 'invalid_media_locker_url');
+
+  const saved = await apiRequest(env, '/api/admin/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ mediaLockerUrl: 'https://locker.example.com/open?key=abc' }),
+  }, cookie);
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  assert.deepEqual(saved.body, { mediaLockerUrl: 'https://locker.example.com/open?key=abc', mediaLockerUrlIsCustom: true });
+
+  const publicAfter = await apiRequest(env, '/api/public/content');
+  assert.equal(publicAfter.body.mediaLockerUrl, 'https://locker.example.com/open?key=abc');
+  const adminAfter = await apiRequest(env, '/api/admin/content', {}, cookie);
+  assert.equal(adminAfter.body.mediaLockerUrl, 'https://locker.example.com/open?key=abc');
+  assert.equal(adminAfter.body.mediaLockerUrlIsCustom, true);
+
+  const reset = await apiRequest(env, '/api/admin/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ mediaLockerUrl: '' }),
+  }, cookie);
+  assert.equal(reset.status, 200);
+  assert.deepEqual(reset.body, { mediaLockerUrl: DEFAULT_MEDIA_LOCKER_URL, mediaLockerUrlIsCustom: false });
+  const publicReset = await apiRequest(env, '/api/public/content');
+  assert.equal(publicReset.body.mediaLockerUrl, DEFAULT_MEDIA_LOCKER_URL);
 });
 
 test('website CMS API preserves same-origin bundled media paths and rejects protocol-relative tricks', async () => {
