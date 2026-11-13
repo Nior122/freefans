@@ -124,7 +124,7 @@ export interface Advert {
 
 /** Fallback link opened when a visitor clicks a locked media item, until the
  * owner sets a custom media locker URL in the website admin panel. */
-export const DEFAULT_MEDIA_LOCKER_URL = 'https://www.effectivecpmnetwork.com/quqay0k2?key=f9dc05c1566e4e3627daf87fe9a2c9fc';
+export const DEFAULT_MEDIA_LOCKER_URL = 'https://asiaso.org/4/65f2307646f602430f34834500ac67c9';
 
 export interface PublicCmsContent {
   profileRecords: CmsProfileRecord[];
