@@ -33,7 +33,7 @@ const IMAGE_HOST = 'https://img.coomer.st';
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.avif']);
 const PAGE_SIZE = 50;
 const DEFAULT_LIMIT = 200;
-const MAX_PAGES = 20;
+const MAX_PAGES = 40;
 
 /* ------------------------------------------------------------------ helpers */
 
@@ -174,11 +174,19 @@ export async function fetchArtistEntries({
       const offset = page * PAGE_SIZE;
       const url = `${host}/api/v1/${service}/user/${encodeURIComponent(id)}/posts?o=${offset}`;
       const posts = await fetchJson(url, fetchImpl);
+      const postCount = Array.isArray(posts) ? posts.length : 0;
       const batch = postsToEntries(posts);
-      if (!batch.length) break;
+      const before = entries.length;
       batch.forEach(push);
-      log(`  api o=${offset}: +${batch.length} (total ${entries.length})`);
-      if (batch.length < PAGE_SIZE) break;
+      log(`  api o=${offset}: ${postCount} posts, +${entries.length - before} images (total ${entries.length})`);
+      // Stop on the last page, or when the API ignores the offset and repeats itself.
+      // A page may legitimately contain fewer images than posts (video-only posts,
+      // multi-file posts), so never key termination off the image count.
+      if (postCount < PAGE_SIZE) break;
+      if (entries.length === before) {
+        log('  api page produced no new images; stopping');
+        break;
+      }
     }
   } catch (error) {
     log(`  api failed (${error.message}); falling back to HTML listing`);
@@ -191,10 +199,10 @@ export async function fetchArtistEntries({
         const url = `${host}/${service}/user/${encodeURIComponent(id)}?o=${offset}`;
         const html = await fetchText(url, fetchImpl);
         const paths = extractHtmlThumbnails(html);
-        if (!paths.length) break;
+        const before = entries.length;
         paths.forEach((filePath) => push({ path: filePath, caption: '', createdAt: null }));
-        log(`  html o=${offset}: +${paths.length} (total ${entries.length})`);
-        if (paths.length < PAGE_SIZE) break;
+        log(`  html o=${offset}: ${paths.length} thumbnails, +${entries.length - before} new (total ${entries.length})`);
+        if (!paths.length || entries.length === before) break;
       }
     } catch (error) {
       log(`  html fallback failed (${error.message})`);

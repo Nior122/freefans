@@ -114,3 +114,27 @@ test('API failure falls back to the HTML listing', async () => {
   assert.equal(entries.length, 1);
   assert.equal(entries[0].path, `/aa/bb/${HASH_A}.jpg`);
 });
+
+test('API crawl continues past pages with fewer images than posts', async () => {
+  // 50 posts with only 5 images total is a normal page for a video-heavy
+  // creator: it must not be treated as the final page.
+  const page0 = Array.from({ length: 50 }, (_, index) =>
+    index < 5
+      ? { title: `p${index}`, file: { path: `/${HASH_A.slice(0, 60)}${String(index).padStart(4, '0')}.jpg` } }
+      : { title: `video ${index}`, file: { path: `/${HASH_B}.mp4` } }
+  );
+  const page1 = Array.from({ length: 50 }, (_, index) => ({
+    title: `later ${index}`,
+    file: { path: `/${'d'.repeat(60)}${String(index).padStart(4, '0')}.jpg` },
+  }));
+  const offsets = [];
+  const fetchImpl = async (url) => {
+    const offset = Number(new URL(url).searchParams.get('o'));
+    offsets.push(offset);
+    const body = offset === 0 ? page0 : offset === 50 ? page1 : [];
+    return { ok: true, status: 200, json: async () => body, text: async () => '' };
+  };
+  const entries = await fetchArtistEntries({ id: 'demo', limit: 55, fetchImpl });
+  assert.deepEqual(offsets, [0, 50]);
+  assert.equal(entries.length, 55);
+});
