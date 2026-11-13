@@ -237,7 +237,12 @@ const profilesStart = next.indexOf('const PROFILES: Profile[] = [');
 if (profilesStart === -1) fail('could not find the PROFILES array in services/mockData.tsx');
 const profilesEnd = next.indexOf('\n];', profilesStart);
 if (profilesEnd === -1) fail('could not find the end of the PROFILES array');
-next = `${next.slice(0, profilesEnd)}\n${entry}${next.slice(profilesEnd)}`;
+// The entry before the new one must end with a comma, otherwise the array breaks.
+const beforeProfilesEnd = next.slice(0, profilesEnd).replace(/\s+$/, '');
+const separator = beforeProfilesEnd.endsWith(',') || beforeProfilesEnd.endsWith('[')
+  ? beforeProfilesEnd
+  : `${beforeProfilesEnd},`;
+next = `${separator}\n${entry}${next.slice(profilesEnd)}`;
 
 fs.writeFileSync(MOCK_DATA_FILE, next, 'utf8');
 

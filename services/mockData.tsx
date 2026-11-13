@@ -62,6 +62,8 @@ import bigtittygotheggData from './bigtittygotheggData.json';
 import imsadspiceData from './imsadspiceData.json';
 import sierralisabethData from './sierralisabethData.json';
 import yellz00Data from './yellz00Data.json';
+import himeTsuData from './hime_tsuData.json';
+import mayvisalycevipData from './mayvisalycevipData.json';
 
 // Subset of data for demo purposes from the Belle Delphine dataset
 const BELLE_FULL_DATA = [
@@ -12008,7 +12010,45 @@ const PROFILES: Profile[] = [
     isVerified: true,
     isVisible: true,
     pricePerMonth: 19.99
-  }
+  },
+  {
+    id: 'hime_tsu',
+    name: 'Hime Tsu',
+    handle: '@hime_tsu',
+    bio: 'hime_tsu OnlyFans creator with 2,029 archived posts | Exclusive premium photos, fresh uploads every week | Unlock the full collection and see it all',
+    avatarUrl: 'https://img.coomer.st/thumbnail/data/b7/6d/b76dfcf45c3c8d27d2246f25188e4e5f6059d3ee1b3eb8eacbf9159ef2412695.jpg',
+    heroUrl: 'https://img.coomer.st/thumbnail/data/39/b3/39b36ae286c35abb183efba9b18125fbe749890fa663b15ebeffd96722e42322.jpg',
+    tags: ['onlyfans', 'premium', 'exclusive', 'photos', 'new'],
+    category: 'Premium',
+    images: himeTsuData as Image[],
+    stats: {
+      posts: 2029,
+      likes: 38713,
+      views: 0,
+      followers: 0,
+    },
+    isVerified: true,
+    isVisible: true,
+  },
+  {
+    id: 'mayvisalycevip',
+    name: 'Mayvis Alyce',
+    handle: '@mayvisalycevip',
+    bio: 'mayvisalycevip OnlyFans creator with 384 archived posts | Exclusive premium photos, fresh uploads every week | Unlock the full collection and see it all',
+    avatarUrl: 'https://img.coomer.st/thumbnail/data/74/93/74934258f35248ed904a393e5a3239bc1c9f081a9b0f8dd30cb4557b92a5ead1.jpg',
+    heroUrl: 'https://img.coomer.st/thumbnail/data/de/d3/ded33158be9b0c0e9213d35ca7b12a44e85073a1096053ee150cec2c9046192c.jpg',
+    tags: ['onlyfans', 'premium', 'exclusive', 'photos', 'new'],
+    category: 'Premium',
+    images: mayvisalycevipData as Image[],
+    stats: {
+      posts: 384,
+      likes: 34770,
+      views: 0,
+      followers: 0,
+    },
+    isVerified: true,
+    isVisible: true,
+  },
 ];
 
 
